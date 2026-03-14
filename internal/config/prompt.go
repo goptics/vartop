@@ -24,7 +24,7 @@ func PromptOnboarding() (*Config, error) {
 	).Srender()
 
 	fmt.Println(logo)
-	
+
 	introText := "Welcome to the Dashboard!\nIt looks like you don't have a configuration file yet.\nLet's set up your first varmq server connection to get started."
 	fmt.Println(textStyle.Render(introText))
 	fmt.Println(strings.Repeat("─", 60))

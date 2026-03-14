@@ -14,25 +14,25 @@ var (
 	ColorWarning   = lipgloss.Color("#E0AF68") // Yellow
 	ColorError     = lipgloss.Color("#F7768E") // Red
 	ColorSubtle    = lipgloss.Color("#565F89") // Grey
-	
-	ColorHeaderBg  = lipgloss.Color("#24283B")
+
+	ColorHeaderBg = lipgloss.Color("#24283B")
 
 	// Global Styles
 	BaseStyle = lipgloss.NewStyle().
-		Foreground(ColorFg)
+			Foreground(ColorFg)
 
 	HeaderStyle = lipgloss.NewStyle().
-		Foreground(ColorHighlight).
-		Bold(true).
-		Padding(0, 1).
-		MarginBottom(1)
+			Foreground(ColorHighlight).
+			Bold(true).
+			Padding(0, 1).
+			MarginBottom(1)
 
 	TitleStyle = lipgloss.NewStyle().
-		Foreground(ColorBg).
-		Background(ColorHighlight).
-		Bold(true).
-		Padding(0, 1).
-		MarginRight(1)
+			Foreground(ColorBg).
+			Background(ColorHighlight).
+			Bold(true).
+			Padding(0, 1).
+			MarginRight(1)
 
 	StatusStyleRunning = lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
 	StatusStylePaused  = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
@@ -40,15 +40,15 @@ var (
 	StatusStyleIdle    = lipgloss.NewStyle().Foreground(ColorFg)
 
 	FooterStyle = lipgloss.NewStyle().
-		Foreground(ColorSubtle).
-		MarginTop(1)
+			Foreground(ColorSubtle).
+			MarginTop(1)
 
 	HelpKeyStyle = lipgloss.NewStyle().
-		Foreground(ColorHighlight).
-		Bold(true)
+			Foreground(ColorHighlight).
+			Bold(true)
 
 	HelpDescStyle = lipgloss.NewStyle().
-		Foreground(ColorSubtle)
+			Foreground(ColorSubtle)
 )
 
 func TableStyles() table.Styles {
@@ -63,19 +63,4 @@ func TableStyles() table.Styles {
 		Background(ColorHighlight).
 		Bold(true)
 	return s
-}
-
-func formatStatus(status string) string {
-	switch status {
-	case "running":
-		return StatusStyleRunning.Render("▶ Running")
-	case "paused":
-		return StatusStylePaused.Render("⏸ Paused")
-	case "stopped":
-		return StatusStyleStopped.Render("■ Stopped")
-	case "idle":
-		return StatusStyleIdle.Render("○ Idle")
-	default:
-		return status
-	}
 }
