@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -12,23 +11,6 @@ import (
 	"github.com/goptics/varmq/cmd/vartop/internal/api"
 	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
-
-type tickMsg time.Time
-type workersMsg []api.WorkerSummary
-type healthMsg struct{ ok bool }
-type errMsg struct{ err error }
-
-func (e errMsg) Error() string { return e.err.Error() }
-
-// serverItem implements list.Item for the context switcher
-type serverItem struct {
-	name     string
-	endpoint string
-}
-
-func (i serverItem) Title() string       { return i.name }
-func (i serverItem) Description() string { return i.endpoint }
-func (i serverItem) FilterValue() string { return i.name }
 
 // Model is the main state of the TUI
 type Model struct {
@@ -46,6 +28,12 @@ type Model struct {
 	showSwitcher      bool
 	inActionSelection bool
 	isHealthy         bool
+
+	// Worker detail view state
+	showWorkerDetail     bool
+	workerDetails        *api.WorkerDetails
+	currentWorkerName    string // Track which worker we're viewing for polling
+	inWorkerDetailAction bool   // Action mode for worker detail view
 }
 
 // NewModel initializes the application state.
@@ -82,19 +70,23 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 	l.SetFilteringEnabled(false)
 
 	return &Model{
-		cfg:       cfg,
-		server:    server,
-		client:    client,
-		table:     t,
-		switcher:  l,
-		isHealthy: true, // Assume healthy initially
+		cfg:                  cfg,
+		server:               server,
+		client:               client,
+		table:                t,
+		switcher:             l,
+		isHealthy:            true, // Assume healthy initially
+		showWorkerDetail:     false,
+		workerDetails:        nil,
+		currentWorkerName:    "",
+		inWorkerDetailAction: false,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
-		m.checkHealth(),
-		m.tick(),
+		m.checkHealthCmd(),
+		m.tickCmd(),
 	)
 }
 
@@ -110,94 +102,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateTable(msg)
 
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-
-		tHeight := msg.Height - 8
-
-		// Responsive table columns
-		// Total fixed width of other columns + generous padding/borders space
-		fixedWidths := 15 + 12 + 12 + 10 + 8 + 10
-		nameWidth := msg.Width - fixedWidths
-		if nameWidth < 15 {
-			nameWidth = 15 // Minimum width for name
-		}
-
-		columns := []table.Column{
-			{Title: "Name", Width: nameWidth},
-			{Title: "Status", Width: 15},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
-			{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
-		}
-
-		// Recreate table rather than mutating to avoid underlying viewport panics
-		s := TableStyles()
-		selected := m.table.Cursor()
-		rows := m.table.Rows()
-
-		t := table.New(
-			table.WithColumns(columns),
-			table.WithRows(rows),
-			table.WithFocused(true),
-		)
-		if tHeight > 0 {
-			t.SetHeight(tHeight)
-		}
-		t.SetStyles(s)
-		t.SetCursor(selected)
-
-		m.table = t
-
-		lHeight := msg.Height - 6
-		if lHeight > 0 {
-			m.switcher.SetSize(msg.Width-2, lHeight)
-		}
+		m.handleWindowSize(msg)
 
 	case tickMsg:
+		cmd = m.tickCmd()
 		if !m.showSwitcher {
-			cmds = append(cmds, m.checkHealth())
+			cmds = append(cmds, m.checkHealthCmd())
 		}
-		cmds = append(cmds, m.tick())
+		cmds = append(cmds, cmd)
 
 	case healthMsg:
-		m.isHealthy = msg.ok
-		if m.isHealthy && !m.showSwitcher {
-			cmds = append(cmds, m.fetchWorkers())
+		cmd = m.handleHealth(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case workersMsg:
-		m.lastUpdate = time.Now()
-		m.err = nil
+		m.handleWorkers(msg)
 
-		rows := make([]table.Row, len(msg))
-		for i, w := range msg {
-			rows[i] = table.Row{
-				w.Name,
-				w.Status,
-				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.Concurrency)),
-				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.NumProcessing)),
-				lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render(fmt.Sprint(w.NumPending)),
-				lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render(fmt.Sprint(w.NumIdleWorkers)),
-			}
-		}
-
-		// Retain selection if possible
-		selected := m.table.Cursor()
-		m.table.SetRows(rows)
-		if selected < len(rows) {
-			m.table.SetCursor(selected)
+	case workerDetailsMsg:
+		cmd = m.handleWorkerDetails(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case errMsg:
-		m.err = msg.err
+		cmd = m.handleError(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	if m.showSwitcher {
 		m.switcher, cmd = m.switcher.Update(msg)
 		cmds = append(cmds, cmd)
-	} else {
+	} else if !m.showWorkerDetail {
 		m.table, cmd = m.table.Update(msg)
 		cmds = append(cmds, cmd)
 	}
@@ -206,6 +145,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle worker detail view keys
+	if m.showWorkerDetail {
+		if m.inWorkerDetailAction {
+			// Action mode in detail view
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "esc":
+				m.inWorkerDetailAction = false
+				return m, nil
+			case "p":
+				m.inWorkerDetailAction = false
+				return m, m.actionCurrentWorkerCmd("pause")
+			case "r":
+				m.inWorkerDetailAction = false
+				return m, m.actionCurrentWorkerCmd("resume")
+			case "s":
+				m.inWorkerDetailAction = false
+				return m, m.actionCurrentWorkerCmd("stop")
+			case "R":
+				m.inWorkerDetailAction = false
+				return m, m.actionCurrentWorkerCmd("restart")
+			}
+			return m, nil
+		}
+
+		// Normal detail view mode
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "esc":
+			m.showWorkerDetail = false
+			m.workerDetails = nil
+			m.currentWorkerName = ""
+			m.inWorkerDetailAction = false
+			return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
+		case "a", "A":
+			if m.currentWorkerName != "" {
+				m.inWorkerDetailAction = !m.inWorkerDetailAction
+			}
+			return m, nil
+		case "r":
+			if m.currentWorkerName != "" {
+				m.workerDetails = nil // Clear to show loading state
+				return m, m.fetchWorkerDetailsCmd(m.currentWorkerName)
+			}
+			return m, nil
+		}
+		return m, nil
+	}
+
 	if m.inActionSelection {
 		switch msg.String() {
 		case "esc":
@@ -213,16 +203,16 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "p":
 			m.inActionSelection = false
-			return m, m.actionSelectedWorker("pause")
+			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "pause")
 		case "r":
 			m.inActionSelection = false
-			return m, m.actionSelectedWorker("resume")
+			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "resume")
 		case "s":
 			m.inActionSelection = false
-			return m, m.actionSelectedWorker("stop")
+			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "stop")
 		case "R":
 			m.inActionSelection = false
-			return m, m.actionSelectedWorker("restart")
+			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "restart")
 		}
 		// If in action selection, don't let table keys through except navigation maybe?
 		// Actually user said "options will be shows eaxt where the main menu exsit",
@@ -237,10 +227,10 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.inActionSelection {
 			// In action selection 'r' is resume
 			m.inActionSelection = false
-			return m, m.actionSelectedWorker("resume")
+			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "resume")
 		}
 		m.err = nil
-		return m, tea.Batch(m.checkHealth(), m.fetchWorkers())
+		return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 	case "a", "A":
 		if len(m.table.Rows()) > 0 {
 			m.inActionSelection = !m.inActionSelection
@@ -248,6 +238,28 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "tab":
 		m.showSwitcher = true
+		return m, nil
+	case "enter":
+		// Navigate to worker detail view
+		if m.isHealthy && len(m.table.Rows()) > 0 {
+			selectedRow := m.table.SelectedRow()
+			if selectedRow != nil {
+				workerName := selectedRow[0]
+				m.showWorkerDetail = true
+				m.workerDetails = nil            // Clear previous details
+				m.currentWorkerName = workerName // Store for polling
+				return m, m.fetchWorkerDetailsCmd(workerName)
+			}
+		}
+		return m, nil
+	case "esc":
+		// Return to dashboard from detail view
+		if m.showWorkerDetail {
+			m.showWorkerDetail = false
+			m.workerDetails = nil
+			m.currentWorkerName = "" // Clear worker name
+			return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
+		}
 		return m, nil
 	}
 
@@ -275,7 +287,7 @@ func (m Model) updateSwitcher(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if srv, err := m.cfg.GetActiveServer(i.name); err == nil {
 				m.server = srv
 				m.client = api.NewClient(srv)
-				return m, tea.Batch(m.checkHealth(), m.fetchWorkers())
+				return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 			} else {
 				m.err = err
 			}
@@ -295,130 +307,9 @@ func (m Model) View() string {
 		)
 	}
 
-	// 1. Header
-	var statusIndicator string
-	if m.isHealthy {
-		statusIndicator = lipgloss.NewStyle().Foreground(ColorSuccess).Render(" ● Active ")
-	} else {
-		statusIndicator = lipgloss.NewStyle().Foreground(ColorError).Render(" ○ Inactive ")
+	if m.showWorkerDetail {
+		return m.renderWorkerDetailView()
 	}
 
-	serverName := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
-	endpointInfo := fmt.Sprintf("→ %s", m.server.Endpoint)
-
-	headerContent := lipgloss.JoinHorizontal(lipgloss.Center, serverName, statusIndicator, lipgloss.NewStyle().PaddingLeft(1).Render(endpointInfo))
-	header := HeaderStyle.Width(m.width).Render(headerContent)
-
-	// 2. Body / Table
-	var bodyView string
-	if !m.isHealthy {
-		offlineMsg := lipgloss.NewStyle().
-			Foreground(ColorSubtle).
-			Padding(2, 2).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorError).
-			Render(fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.server.Endpoint))
-
-		bodyView = lipgloss.Place(m.width, m.table.Height()+2, lipgloss.Center, lipgloss.Center, offlineMsg)
-	} else {
-		// Only display errors if healthy. If unhealthy, we know it's failing
-		var errorView string
-		if m.err != nil {
-			errorView = lipgloss.NewStyle().Foreground(ColorError).Padding(0, 1).Render(fmt.Sprintf("⚠️  Error: %v", m.err))
-			errorView += "\n"
-		}
-
-		tableView := lipgloss.NewStyle().Padding(1, 1).Render(m.table.View())
-		bodyView = lipgloss.JoinVertical(lipgloss.Left, errorView, tableView)
-	}
-
-	// 3. Footer
-	lastUpdateStr := "Never"
-	if !m.lastUpdate.IsZero() {
-		lastUpdateStr = m.lastUpdate.Format("15:04:05")
-	}
-
-	pollInfo := fmt.Sprintf("Updated: %s (Polling: %ds)", lastUpdateStr, m.server.Interval)
-
-	var keysView string
-	if m.inActionSelection {
-		keysView = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
-			HelpKeyStyle.Render("p"), HelpDescStyle.Render(" pause • "),
-			HelpKeyStyle.Render("r"), HelpDescStyle.Render(" resume • "),
-			HelpKeyStyle.Render("s"), HelpDescStyle.Render(" stop • "),
-			HelpKeyStyle.Render("R"), HelpDescStyle.Render(" restart"),
-		)
-	} else {
-		keysView = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
-			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" move • "),
-			HelpKeyStyle.Render("a"), HelpDescStyle.Render(" actions • "),
-			HelpKeyStyle.Render("r"), HelpDescStyle.Render(" refresh • "),
-			HelpKeyStyle.Render("tab"), HelpDescStyle.Render(" switch server"),
-		)
-	}
-
-	// Create columns: keys on left, blank space, pollInfo on right
-	leftCol := lipgloss.NewStyle().Width(m.width - lipgloss.Width(pollInfo) - 2).Render(keysView)
-	footerContent := lipgloss.JoinHorizontal(lipgloss.Right, leftCol, pollInfo)
-
-	footer := FooterStyle.Width(m.width).Padding(0, 1).Render(footerContent)
-
-	return BaseStyle.Render(
-		lipgloss.JoinVertical(lipgloss.Left,
-			header,
-			bodyView,
-			footer,
-		),
-	)
-}
-
-func (m Model) checkHealth() tea.Cmd {
-	return func() tea.Msg {
-		err := m.client.GetHealth()
-		return healthMsg{ok: err == nil}
-	}
-}
-
-func (m Model) fetchWorkers() tea.Cmd {
-	return func() tea.Msg {
-		workers, err := m.client.ListWorkers()
-		if err != nil {
-			return errMsg{err}
-		}
-		return workersMsg(workers)
-	}
-}
-
-func (m Model) actionSelectedWorker(action string) tea.Cmd {
-	if !m.isHealthy || len(m.table.Rows()) == 0 {
-		return nil
-	}
-
-	selectedRow := m.table.SelectedRow()
-	if selectedRow == nil {
-		return nil
-	}
-	workerName := selectedRow[0]
-
-	return func() tea.Msg {
-		err := m.client.Action(workerName, action)
-		if err != nil {
-			return errMsg{err}
-		}
-		// If action suceeded, immediately fetch new status
-		return m.fetchWorkers()()
-	}
-}
-
-func (m Model) tick() tea.Cmd {
-	interval := m.server.Interval
-	if interval <= 0 {
-		interval = 5 // Default safe fallback
-	}
-
-	return tea.Tick(time.Duration(interval)*time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+	return m.renderDashboardView()
 }
