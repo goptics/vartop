@@ -87,11 +87,22 @@ func (m Model) renderDashboardHeader() string {
 	title := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
 	endpointInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("→ %s", m.server.Endpoint))
 
-	headerContent := lipgloss.JoinHorizontal(lipgloss.Left, title, statusIndicator, " ", endpointInfo)
+	// Updated time in top-right
+	lastUpdateStr := "Never"
+	if !m.lastUpdate.IsZero() {
+		lastUpdateStr = m.lastUpdate.Format("15:04:05")
+	}
+	updatedInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("Updated: %s", lastUpdateStr))
 
-	// Clean header without border
+	// Left side: title, status, endpoint
+	leftContent := lipgloss.JoinHorizontal(lipgloss.Left, title, statusIndicator, " ", endpointInfo)
+
+	// Full header with updated time aligned right
+	headerContent := lipgloss.JoinHorizontal(lipgloss.Left, leftContent, "", updatedInfo)
+
 	return lipgloss.NewStyle().
 		Padding(1, 0).
+		Width(m.width).
 		Render(headerContent)
 }
 
@@ -121,12 +132,12 @@ func (m Model) renderDashboardBody() string {
 
 // renderDashboardFooter renders the dashboard footer
 func (m Model) renderDashboardFooter() string {
-	// Update info
-	lastUpdateStr := "Never"
-	if !m.lastUpdate.IsZero() {
-		lastUpdateStr = m.lastUpdate.Format("15:04:05")
+	// Only polling info now (updated time moved to header)
+	interval := m.server.Interval
+	if interval <= 0 {
+		interval = 5
 	}
-	pollInfo := fmt.Sprintf("Updated: %s (Polling: %ds)", lastUpdateStr, m.server.Interval)
+	pollInfo := fmt.Sprintf("Polling: %ds", interval)
 
 	// Key bindings
 	var keysView string
@@ -184,13 +195,21 @@ func (m Model) renderWorkerDetailHeaderView() string {
 	endpointLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render("Endpoint:")
 	endpointValue := lipgloss.NewStyle().Foreground(ColorSubtle).Render(m.server.Endpoint)
 
+	// Updated time
+	lastUpdateStr := "Never"
+	if !m.lastUpdate.IsZero() {
+		lastUpdateStr = m.lastUpdate.Format("15:04:05")
+	}
+	updatedInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("Updated: %s", lastUpdateStr))
+
 	// Build header rows
 	row1 := lipgloss.JoinHorizontal(lipgloss.Left, title, " • ", workerInfo)
-	row2 := lipgloss.JoinHorizontal(lipgloss.Left,
+	row2Left := lipgloss.JoinHorizontal(lipgloss.Left,
 		serverLabel, " ", serverValue, "  |  ",
 		endpointLabel, " ", endpointValue, "  |  ",
 		statusDot, " ", statusText,
 	)
+	row2 := lipgloss.JoinHorizontal(lipgloss.Left, row2Left, "", updatedInfo)
 
 	headerContent := lipgloss.JoinVertical(lipgloss.Left, row1, row2)
 
@@ -265,17 +284,12 @@ func (m Model) renderWorkerDetailView() string {
 
 // renderWorkerDetailFooter renders the worker detail view footer
 func (m Model) renderWorkerDetailFooter() string {
-	// Update info
-	lastUpdateStr := "Never"
-	if !m.lastUpdate.IsZero() {
-		lastUpdateStr = m.lastUpdate.Format("15:04:05")
-	}
-
+	// Only polling info now (updated time moved to header)
 	interval := m.server.Interval
 	if interval <= 0 {
 		interval = 5
 	}
-	pollInfo := fmt.Sprintf("Updated: %s (Polling: %ds)", lastUpdateStr, interval)
+	pollInfo := fmt.Sprintf("Polling: %ds", interval)
 
 	// Key bindings
 	var footerKeys string
