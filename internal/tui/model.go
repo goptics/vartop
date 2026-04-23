@@ -53,7 +53,7 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 	t := table.New(
 		table.WithColumns(columns),
 		table.WithFocused(true),
-		table.WithHeight(10),
+		table.WithHeight(6),  // Reduced from 10 to leave more room for header
 	)
 
 	t.SetStyles(TableStyles())
@@ -80,6 +80,8 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 		workerDetails:        nil,
 		currentWorkerName:    "",
 		inWorkerDetailAction: false,
+		width:                80,  // Default width, will be updated by WindowSizeMsg
+		height:               24,  // Default height, will be updated by WindowSizeMsg
 	}
 }
 
@@ -302,9 +304,7 @@ func (m Model) updateSwitcher(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if m.showSwitcher {
-		return BaseStyle.Render(
-			lipgloss.NewStyle().Padding(1, 2).Render(m.switcher.View()),
-		)
+		return m.renderSwitcherView()
 	}
 
 	if m.showWorkerDetail {

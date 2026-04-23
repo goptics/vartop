@@ -76,8 +76,8 @@ func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
 	m.width = msg.Width
 	m.height = msg.Height
 
-	// Update table dimensions
-	tHeight := msg.Height - 8
+	// Update table dimensions - reserve more space for header
+	tHeight := msg.Height - 12  // Increased from 8 to leave room for header
 	fixedWidths := 15 + 12 + 12 + 10 + 8 + 10
 	nameWidth := msg.Width - fixedWidths
 	if nameWidth < 15 {
@@ -115,4 +115,7 @@ func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
 	if lHeight > 0 {
 		m.switcher.SetSize(msg.Width-2, lHeight)
 	}
+
+	// Hide default help, we'll show custom footer
+	m.switcher.SetShowHelp(false)
 }

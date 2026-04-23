@@ -9,6 +9,37 @@ import (
 
 // View rendering functions
 
+// renderSwitcherView renders the server switcher with custom footer
+func (m Model) renderSwitcherView() string {
+	switcherContent := m.switcher.View()
+
+	// Custom footer for switcher
+	footerKeys := lipgloss.JoinHorizontal(lipgloss.Center,
+		HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
+		HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" select • "),
+		HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
+		HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" navigate"),
+	)
+
+	footer := FooterStyle.Width(m.width).Padding(0, 1).Render(footerKeys)
+
+	// Calculate spacing
+	switcherHeight := lipgloss.Height(switcherContent)
+	footerHeight := lipgloss.Height(footer)
+	spacing := createSpacing(m.height, switcherHeight, footerHeight, 2)
+
+	// Join with padding
+	mainContent := lipgloss.NewStyle().Padding(1, 2).Render(switcherContent)
+	fullContent := lipgloss.JoinVertical(
+		lipgloss.Left,
+		mainContent,
+		strings.Repeat("\n", spacing),
+		footer,
+	)
+
+	return BaseStyle.Render(fullContent)
+}
+
 // renderDashboardView renders the main dashboard view
 func (m Model) renderDashboardView() string {
 	// Header
@@ -20,8 +51,8 @@ func (m Model) renderDashboardView() string {
 	// Footer
 	footer := m.renderDashboardFooter()
 
-	// Build main content
-	mainContent := lipgloss.JoinVertical(lipgloss.Left, header, "", bodyView)
+	// Build main content - reduced gap
+	mainContent := lipgloss.JoinVertical(lipgloss.Left, header, bodyView)
 
 	// Calculate spacing for footer positioning
 	footerHeight := lipgloss.Height(footer)
@@ -41,27 +72,27 @@ func (m Model) renderDashboardView() string {
 
 // renderDashboardHeader renders the dashboard header
 func (m Model) renderDashboardHeader() string {
-	var statusIndicator string
+	var statusStyle lipgloss.Style
+	var statusText string
 	if m.isHealthy {
-		statusIndicator = lipgloss.NewStyle().Foreground(ColorSuccess).Render(" ● Active ")
+		statusStyle = StatusStyleRunning
+		statusText = "● Active"
 	} else {
-		statusIndicator = lipgloss.NewStyle().Foreground(ColorError).Render(" ○ Inactive ")
+		statusStyle = StatusStyleStopped
+		statusText = "○ Inactive"
 	}
 
-	serverName := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
-	endpointInfo := fmt.Sprintf("→ %s", m.server.Endpoint)
+	statusIndicator := statusStyle.Render(statusText)
 
-	headerContent := lipgloss.JoinHorizontal(lipgloss.Center, serverName, statusIndicator, lipgloss.NewStyle().PaddingLeft(1).Render(endpointInfo))
+	title := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
+	endpointInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("→ %s", m.server.Endpoint))
 
-	// Simple header with border
-	header := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorHighlight).
-		Padding(1, 2).
-		Width(m.width).
+	headerContent := lipgloss.JoinHorizontal(lipgloss.Left, title, statusIndicator, " ", endpointInfo)
+
+	// Clean header without border
+	return lipgloss.NewStyle().
+		Padding(1, 0).
 		Render(headerContent)
-
-	return header
 }
 
 // renderDashboardBody renders the dashboard body content
@@ -163,11 +194,11 @@ func (m Model) renderWorkerDetailHeaderView() string {
 
 	headerContent := lipgloss.JoinVertical(lipgloss.Left, row1, row2)
 
+	// Worker detail keeps border for visual separation
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorHighlight).
 		Padding(1, 2).
-		Width(m.width).
 		Render(headerContent)
 }
 

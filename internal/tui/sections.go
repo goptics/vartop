@@ -56,10 +56,11 @@ func (m Model) renderModernMetricsSection(w api.WorkerDetails) string {
 		Bold(true).
 		Render("📊 Performance Metrics")
 
-	// Calculate success rate
+	// Calculate success rate based on completed attempts (successful + failed)
 	var successRate float64
-	if w.Metrics.Submitted > 0 {
-		successRate = float64(w.Metrics.Successful) / float64(w.Metrics.Submitted) * 100
+	totalAttempts := w.Metrics.Successful + w.Metrics.Failed
+	if totalAttempts > 0 {
+		successRate = float64(w.Metrics.Successful) / float64(totalAttempts) * 100
 	}
 
 	// Build metric rows with icons and colors
@@ -160,10 +161,11 @@ func (m Model) renderCompactMetricsSection(w api.WorkerDetails) string {
 		Bold(true).
 		Render("📊 Performance Metrics")
 
-	// Calculate success rate
+	// Calculate success rate based on completed attempts (successful + failed)
 	var successRate float64
-	if w.Metrics.Submitted > 0 {
-		successRate = float64(w.Metrics.Successful) / float64(w.Metrics.Submitted) * 100
+	totalAttempts := w.Metrics.Successful + w.Metrics.Failed
+	if totalAttempts > 0 {
+		successRate = float64(w.Metrics.Successful) / float64(totalAttempts) * 100
 	}
 
 	// Create compact metric rows
@@ -214,10 +216,11 @@ func (m Model) renderMetricsSection(w api.WorkerDetails) string {
 		Bold(true).
 		Render("📊 Performance Metrics")
 
-	// Calculate success rate
+	// Calculate success rate based on completed attempts (successful + failed)
 	var successRate float64
-	if w.Metrics.Submitted > 0 {
-		successRate = float64(w.Metrics.Successful) / float64(w.Metrics.Submitted) * 100
+	totalAttempts := w.Metrics.Successful + w.Metrics.Failed
+	if totalAttempts > 0 {
+		successRate = float64(w.Metrics.Successful) / float64(totalAttempts) * 100
 	}
 
 	metricsData := []struct {
