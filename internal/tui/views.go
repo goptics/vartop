@@ -87,6 +87,9 @@ func (m Model) renderDashboardHeader() string {
 	title := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
 	endpointInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("→ %s", m.server.Endpoint))
 
+	// Left side: title, status, endpoint
+	leftContent := lipgloss.JoinHorizontal(lipgloss.Left, title, statusIndicator, " ", endpointInfo)
+
 	// Updated time in top-right
 	lastUpdateStr := "Never"
 	if !m.lastUpdate.IsZero() {
@@ -94,15 +97,19 @@ func (m Model) renderDashboardHeader() string {
 	}
 	updatedInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("Updated: %s", lastUpdateStr))
 
-	// Left side: title, status, endpoint
-	leftContent := lipgloss.JoinHorizontal(lipgloss.Left, title, statusIndicator, " ", endpointInfo)
+	// Proper justification: calculate spacing between left and right
+	leftWidth := lipgloss.Width(leftContent)
+	rightWidth := lipgloss.Width(updatedInfo)
+	spacing := m.width - leftWidth - rightWidth - 4 // -4 for padding
 
-	// Full header with updated time aligned right
-	headerContent := lipgloss.JoinHorizontal(lipgloss.Left, leftContent, "", updatedInfo)
+	headerContent := lipgloss.JoinHorizontal(lipgloss.Left,
+		leftContent,
+		strings.Repeat(" ", max(0, spacing)),
+		updatedInfo,
+	)
 
 	return lipgloss.NewStyle().
-		Padding(1, 0).
-		Width(m.width).
+		Padding(1, 2).
 		Render(headerContent)
 }
 
@@ -174,11 +181,47 @@ func (m Model) renderWorkerDetailHeaderView() string {
 	}
 
 	w := *m.workerDetails
-	statusStyle := getStatusStyle(w.Status)
-	statusDot := statusStyle.Render("●")
-	statusText := statusStyle.Render(w.Status)
 
-	// Header layout with proper alignment
+	// Updated time
+	lastUpdateStr := "Never"
+	if !m.lastUpdate.IsZero() {
+		lastUpdateStr = m.lastUpdate.Format("15:04:05")
+	}
+
+	// Responsive header layout
+	minWidthForCompact := 80
+	if m.width < minWidthForCompact {
+		// Compact layout for narrow screens - stack vertically
+		title := lipgloss.NewStyle().
+			Foreground(ColorHighlight).
+			Bold(true).
+			Render("Worker Details")
+
+		workerInfo := lipgloss.NewStyle().
+			Foreground(ColorFg).
+			Bold(true).
+			Render(w.Name)
+
+		serverInfo := fmt.Sprintf("Server: %s", m.server.Name)
+		endpointInfo := fmt.Sprintf("→ %s", m.server.Endpoint)
+		updatedInfo := fmt.Sprintf("Updated: %s", lastUpdateStr)
+
+		headerContent := lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			workerInfo,
+			lipgloss.NewStyle().Foreground(ColorSubtle).Render(serverInfo),
+			lipgloss.NewStyle().Foreground(ColorSubtle).Render(endpointInfo),
+			lipgloss.NewStyle().Foreground(ColorSubtle).Render(updatedInfo),
+		)
+
+		return lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorHighlight).
+			Padding(1, 1).
+			Render(headerContent)
+	}
+
+	// Normal layout for wider screens
 	title := lipgloss.NewStyle().
 		Foreground(ColorHighlight).
 		Bold(true).
@@ -189,27 +232,22 @@ func (m Model) renderWorkerDetailHeaderView() string {
 		Bold(true).
 		Render(w.Name)
 
-	// Server and status info
+	// Server and endpoint info
 	serverLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render("Server:")
 	serverValue := lipgloss.NewStyle().Foreground(ColorFg).Render(m.server.Name)
 	endpointLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render("Endpoint:")
 	endpointValue := lipgloss.NewStyle().Foreground(ColorSubtle).Render(m.server.Endpoint)
 
-	// Updated time
-	lastUpdateStr := "Never"
-	if !m.lastUpdate.IsZero() {
-		lastUpdateStr = m.lastUpdate.Format("15:04:05")
-	}
 	updatedInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("Updated: %s", lastUpdateStr))
 
 	// Build header rows
 	row1 := lipgloss.JoinHorizontal(lipgloss.Left, title, " • ", workerInfo)
 	row2Left := lipgloss.JoinHorizontal(lipgloss.Left,
 		serverLabel, " ", serverValue, "  |  ",
-		endpointLabel, " ", endpointValue, "  |  ",
-		statusDot, " ", statusText,
+		endpointLabel, " ", endpointValue,
 	)
-	row2 := lipgloss.JoinHorizontal(lipgloss.Left, row2Left, "", updatedInfo)
+	separator := lipgloss.NewStyle().Foreground(ColorSubtle).Render(" | ")
+	row2 := lipgloss.JoinHorizontal(lipgloss.Left, row2Left, separator, updatedInfo)
 
 	headerContent := lipgloss.JoinVertical(lipgloss.Left, row1, row2)
 
@@ -223,7 +261,8 @@ func (m Model) renderWorkerDetailHeaderView() string {
 
 // renderWorkerDetailView renders the complete worker detail view
 func (m Model) renderWorkerDetailView() string {
-	var bodyView string
+	footer := m.renderWorkerDetailFooter()
+	footerHeight := lipgloss.Height(footer)
 
 	if m.workerDetails == nil {
 		loadingMsg := lipgloss.NewStyle().
@@ -233,51 +272,73 @@ func (m Model) renderWorkerDetailView() string {
 			BorderForeground(ColorHighlight).
 			Render(fmt.Sprintf("Loading worker details for %s...", m.currentWorkerName))
 
-		bodyView = lipgloss.Place(m.width, m.height-6, lipgloss.Center, lipgloss.Center, loadingMsg)
-	} else {
-		w := *m.workerDetails
-
-		// Header
-		header := m.renderWorkerDetailHeaderView()
-
-		// Content sections
-		configSection := m.renderModernConfigSection(w)
-		metricsSection := m.renderModernMetricsSection(w)
-
-		// Responsive layout
-		minWidthForHorizontal := 100
-		var bodyContent string
-
-		if m.width >= minWidthForHorizontal {
-			// Side-by-side layout
-			halfWidth := (m.width - 8) / 2
-			configSection = lipgloss.NewStyle().Width(halfWidth).Render(configSection)
-			metricsSection = lipgloss.NewStyle().Width(halfWidth).Render(metricsSection)
-			bodyContent = lipgloss.JoinHorizontal(lipgloss.Top, configSection, "", metricsSection)
-		} else {
-			// Vertical layout
-			bodyContent = lipgloss.JoinVertical(lipgloss.Left, configSection, "", metricsSection)
-		}
-
-		bodyView = lipgloss.NewStyle().Padding(0, 1).Render(bodyContent)
-		bodyView = lipgloss.JoinVertical(lipgloss.Left, "", header, "", bodyView)
+		bodyView := lipgloss.Place(m.width, m.height-footerHeight-2, lipgloss.Center, lipgloss.Center, loadingMsg)
+		spacing := createSpacing(m.height, lipgloss.Height(bodyView), footerHeight, 0)
+		fullContent := lipgloss.JoinVertical(lipgloss.Left, bodyView, strings.Repeat("\n", spacing), footer)
+		return BaseStyle.Render(fullContent)
 	}
 
-	// Footer
-	footer := m.renderWorkerDetailFooter()
+	w := *m.workerDetails
 
-	// Calculate footer height to position it at bottom
-	footerHeight := lipgloss.Height(footer)
-	bodyHeight := lipgloss.Height(bodyView)
-	spacing := createSpacing(m.height, bodyHeight, footerHeight, 2)
+	// Header
+	header := m.renderWorkerDetailHeaderView()
 
-	// Create the full view with footer anchored at bottom
-	fullContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		bodyView,
-		strings.Repeat("\n", spacing),
-		footer,
-	)
+	// Content sections
+	configSection := m.renderModernConfigSection(w)
+	metricsSection := m.renderModernMetricsSection(w)
+
+	// Responsive layout
+	minWidthForHorizontal := 100
+	var bodyContent string
+
+	if m.width >= minWidthForHorizontal {
+		// Side-by-side layout
+		halfWidth := (m.width - 8) / 2
+		configSection = lipgloss.NewStyle().Width(halfWidth).Render(configSection)
+		metricsSection = lipgloss.NewStyle().Width(halfWidth).Render(metricsSection)
+		bodyContent = lipgloss.JoinHorizontal(lipgloss.Top, configSection, "", metricsSection)
+	} else {
+		// Vertical layout
+		bodyContent = lipgloss.JoinVertical(lipgloss.Left, configSection, "", metricsSection)
+	}
+
+	bodyContent = lipgloss.NewStyle().Padding(0, 1).Render(bodyContent)
+	fullBodyContent := lipgloss.JoinVertical(lipgloss.Left, "", header, "", bodyContent)
+
+	// Calculate viewport and scrolling
+	availableHeight := m.height - footerHeight - 2
+	contentHeight := lipgloss.Height(fullBodyContent)
+
+	// Clamp scroll offset
+	maxScroll := max(0, contentHeight-availableHeight)
+	if m.workerDetailScrollY > maxScroll {
+		m.workerDetailScrollY = maxScroll
+	}
+	if m.workerDetailScrollY < 0 {
+		m.workerDetailScrollY = 0
+	}
+
+	// Apply scrolling if content overflows
+	var visibleContent string
+	if contentHeight > availableHeight {
+		lines := strings.Split(fullBodyContent, "\n")
+		start := m.workerDetailScrollY
+		end := min(start+availableHeight, len(lines))
+		if start >= len(lines) {
+			start = len(lines) - 1
+		}
+		if end > len(lines) {
+			end = len(lines)
+		}
+		visibleContent = strings.Join(lines[start:end], "\n")
+	} else {
+		visibleContent = fullBodyContent
+	}
+
+	// Anchor footer at bottom with proper spacing
+	bodyViewHeight := lipgloss.Height(visibleContent)
+	spacing := createSpacing(m.height, bodyViewHeight, footerHeight, 0)
+	fullContent := lipgloss.JoinVertical(lipgloss.Left, visibleContent, strings.Repeat("\n", spacing), footer)
 
 	return BaseStyle.Render(fullContent)
 }
@@ -289,7 +350,12 @@ func (m Model) renderWorkerDetailFooter() string {
 	if interval <= 0 {
 		interval = 5
 	}
+
+	// Add scroll indicator if scrolling is active
 	pollInfo := fmt.Sprintf("Polling: %ds", interval)
+	if m.workerDetailScrollY > 0 {
+		pollInfo = fmt.Sprintf("↓ %d | Polling: %ds", m.workerDetailScrollY, interval)
+	}
 
 	// Key bindings
 	var footerKeys string
@@ -303,9 +369,9 @@ func (m Model) renderWorkerDetailFooter() string {
 		)
 	} else {
 		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back to dashboard • "),
+			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" scroll • "),
+			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
 			HelpKeyStyle.Render("a"), HelpDescStyle.Render(" actions • "),
-			HelpKeyStyle.Render("r"), HelpDescStyle.Render(" refresh • "),
 			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit"),
 		)
 	}

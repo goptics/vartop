@@ -62,6 +62,7 @@ func (m *Model) handleWorkerDetails(msg workerDetailsMsg) tea.Cmd {
 	m.lastUpdate = time.Now()
 	m.err = nil
 	m.workerDetails = msg
+	m.recalculateMaxScroll()
 	return nil
 }
 
@@ -118,4 +119,32 @@ func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
 
 	// Hide default help, we'll show custom footer
 	m.switcher.SetShowHelp(false)
+
+	// Recalculate scroll limits for worker detail view
+	m.recalculateMaxScroll()
+}
+
+// recalculateMaxScroll updates the maximum scroll value for worker detail view
+func (m *Model) recalculateMaxScroll() {
+	if !m.showWorkerDetail || m.workerDetails == nil {
+		m.workerDetailMaxScroll = 0
+		return
+	}
+
+	// Estimate content height based on actual worker details
+	// Header ~6 lines, config ~15 lines (5 items * 3 lines), metrics ~20 lines
+	estimatedContentHeight := 45
+	footerHeight := 3
+	availableHeight := m.height - footerHeight - 2
+
+	maxScroll := estimatedContentHeight - availableHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	m.workerDetailMaxScroll = maxScroll
+
+	// Clamp current scroll position
+	if m.workerDetailScrollY > m.workerDetailMaxScroll {
+		m.workerDetailScrollY = m.workerDetailMaxScroll
+	}
 }

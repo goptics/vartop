@@ -30,10 +30,12 @@ type Model struct {
 	isHealthy         bool
 
 	// Worker detail view state
-	showWorkerDetail     bool
-	workerDetails        *api.WorkerDetails
-	currentWorkerName    string // Track which worker we're viewing for polling
-	inWorkerDetailAction bool   // Action mode for worker detail view
+	showWorkerDetail       bool
+	workerDetails          *api.WorkerDetails
+	currentWorkerName      string // Track which worker we're viewing for polling
+	inWorkerDetailAction   bool   // Action mode for worker detail view
+	workerDetailScrollY    int    // Vertical scroll offset for worker detail view
+	workerDetailMaxScroll  int    // Maximum scroll value (0 if no overflow)
 }
 
 // NewModel initializes the application state.
@@ -82,6 +84,8 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 		inWorkerDetailAction: false,
 		width:                80,  // Default width, will be updated by WindowSizeMsg
 		height:               24,  // Default height, will be updated by WindowSizeMsg
+		workerDetailScrollY:   0,
+		workerDetailMaxScroll: 0,
 	}
 }
 
@@ -182,6 +186,7 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.workerDetails = nil
 			m.currentWorkerName = ""
 			m.inWorkerDetailAction = false
+			m.workerDetailScrollY = 0 // Reset scroll
 			return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 		case "a", "A":
 			if m.currentWorkerName != "" {
@@ -191,8 +196,38 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			if m.currentWorkerName != "" {
 				m.workerDetails = nil // Clear to show loading state
+				m.workerDetailScrollY = 0
+				m.workerDetailMaxScroll = 0
 				return m, m.fetchWorkerDetailsCmd(m.currentWorkerName)
 			}
+			return m, nil
+		case "up", "k":
+			if m.workerDetailScrollY > 0 {
+				m.workerDetailScrollY--
+			}
+			return m, nil
+		case "down", "j":
+			if m.workerDetailScrollY < m.workerDetailMaxScroll {
+				m.workerDetailScrollY++
+			}
+			return m, nil
+		case "pgup", "b":
+			m.workerDetailScrollY -= 10
+			if m.workerDetailScrollY < 0 {
+				m.workerDetailScrollY = 0
+			}
+			return m, nil
+		case "pgdown", " ":
+			m.workerDetailScrollY += 10
+			if m.workerDetailScrollY > m.workerDetailMaxScroll {
+				m.workerDetailScrollY = m.workerDetailMaxScroll
+			}
+			return m, nil
+		case "home", "g":
+			m.workerDetailScrollY = 0
+			return m, nil
+		case "end", "G":
+			m.workerDetailScrollY = m.workerDetailMaxScroll
 			return m, nil
 		}
 		return m, nil
