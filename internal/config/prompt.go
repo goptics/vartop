@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -94,6 +96,8 @@ func PromptOnboarding() (*Config, error) {
 		return nil, fmt.Errorf("failed to save initial config: %w", err)
 	}
 
-	fmt.Printf("\n✓ Configuration saved to %s\n\n", defaultConfigFileName)
+	home, _ := os.UserHomeDir()
+	configPath := filepath.Join(home, configDirName, configFileName)
+	fmt.Printf("\n✓ Configuration saved to %s\n\n", configPath)
 	return cfg, nil
 }

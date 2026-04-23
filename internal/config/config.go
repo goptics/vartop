@@ -9,7 +9,8 @@ import (
 )
 
 const (
-	defaultConfigFileName = ".vartop.json"
+	configDirName  = ".vartop"
+	configFileName = "settings.json"
 )
 
 var (
@@ -30,17 +31,56 @@ type Config struct {
 	Servers       map[string]*Server `json:"servers"`
 }
 
-// configFilePath returns the absolute path to the ~/.vartop.json file.
+// configFilePath returns the absolute path to the ~/.vartop/settings.json file.
+// Creates the .vartop directory if it doesn't exist.
 func configFilePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("could not determine user home directory: %w", err)
 	}
-	return filepath.Join(home, defaultConfigFileName), nil
+
+	configDir := filepath.Join(home, configDirName)
+
+	// Create config directory if it doesn't exist
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	return filepath.Join(configDir, configFileName), nil
 }
 
-// Load reads the configuration from the ~/.vartop.json file.
+// Load reads the configuration from the ~/.vartop/settings.json file.
+// If the old ~/.vartop.json exists, it migrates it to the new location.
 func Load() (*Config, error) {
+	// Check for old config location and migrate if needed
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not determine user home directory: %w", err)
+	}
+
+	oldConfigPath := filepath.Join(home, ".vartop.json")
+	if _, err := os.Stat(oldConfigPath); err == nil {
+		// Old config exists, migrate it
+		newConfigPath, pathErr := configFilePath()
+		if pathErr != nil {
+			return nil, pathErr
+		}
+
+		// Read old config
+		data, err := os.ReadFile(oldConfigPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read old config: %w", err)
+		}
+
+		// Write to new location
+		if err := os.WriteFile(newConfigPath, data, 0600); err != nil {
+			return nil, fmt.Errorf("failed to migrate config: %w", err)
+		}
+
+		// Remove old config
+		os.Remove(oldConfigPath)
+	}
+
 	path, err := configFilePath()
 	if err != nil {
 		return nil, err

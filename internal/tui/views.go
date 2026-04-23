@@ -369,10 +369,10 @@ func (m Model) renderWorkerDetailFooter() string {
 		)
 	} else {
 		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" scroll • "),
 			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
 			HelpKeyStyle.Render("a"), HelpDescStyle.Render(" actions • "),
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit"),
+			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit  • "),
+			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" scroll"),
 		)
 	}
 
