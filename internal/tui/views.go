@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
 // View rendering functions
@@ -14,12 +16,21 @@ func (m Model) renderSwitcherView() string {
 	switcherContent := m.switcher.View()
 
 	// Custom footer for switcher
-	footerKeys := lipgloss.JoinHorizontal(lipgloss.Center,
-		HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
-		HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" select • "),
-		HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
-		HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" navigate"),
-	)
+	var footerKeys string
+	if m.switcherExpandedServer != "" {
+		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
+			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
+			HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" select • "),
+			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" collapse • "),
+			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" navigate"),
+		)
+	} else {
+		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
+			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
+			HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" expand/select • "),
+			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" navigate"),
+		)
+	}
 
 	footer := FooterStyle.Width(m.width).Padding(0, 1).Render(footerKeys)
 
@@ -85,7 +96,37 @@ func (m Model) renderDashboardHeader() string {
 	statusIndicator := statusStyle.Render(statusText)
 
 	title := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
-	endpointInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("→ %s", m.server.Endpoint))
+
+	// Build endpoint/pod info
+	var endpointInfo string
+	endpoints := m.server.GetEndpoints()
+	if m.selectedPodOrigin != "" {
+		// Single pod view
+		short := config.ShortOrigin(m.selectedPodOrigin)
+		var dot string
+		if m.podHealth[m.selectedPodOrigin] {
+			dot = StatusStyleRunning.Render("●")
+		} else {
+			dot = StatusStyleStopped.Render("○")
+		}
+		endpointInfo = lipgloss.NewStyle().Foreground(ColorSubtle).Render(
+			fmt.Sprintf("→ %s %s", dot, short),
+		)
+	} else if len(endpoints) > 1 {
+		// Merged view: compact summary
+		total := len(endpoints)
+		healthy := 0
+		for _, ep := range endpoints {
+			if m.podHealth[ep] {
+				healthy++
+			}
+		}
+		endpointInfo = lipgloss.NewStyle().Foreground(ColorSubtle).Render(
+			fmt.Sprintf("→ %d pods, %d healthy", total, healthy),
+		)
+	} else {
+		endpointInfo = lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("→ %s", m.server.DisplayEndpoint()))
+	}
 
 	// Left side: title, status, endpoint
 	leftContent := lipgloss.JoinHorizontal(lipgloss.Left, title, statusIndicator, " ", endpointInfo)
@@ -121,7 +162,7 @@ func (m Model) renderDashboardBody() string {
 			Padding(2, 2).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorError).
-			Render(fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.server.Endpoint))
+			Render(fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.server.DisplayEndpoint()))
 
 		return lipgloss.Place(m.width, m.table.Height()+2, lipgloss.Center, lipgloss.Center, offlineMsg)
 	}
@@ -158,12 +199,12 @@ func (m Model) renderDashboardFooter() string {
 		)
 	} else {
 		keysView = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
 			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" move • "),
 			HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" view details • "),
 			HelpKeyStyle.Render("a"), HelpDescStyle.Render(" actions • "),
 			HelpKeyStyle.Render("r"), HelpDescStyle.Render(" refresh • "),
-			HelpKeyStyle.Render("tab"), HelpDescStyle.Render(" switch server"),
+			HelpKeyStyle.Render("tab"), HelpDescStyle.Render(" switch • "),
+			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit"),
 		)
 	}
 
@@ -203,7 +244,11 @@ func (m Model) renderWorkerDetailHeaderView() string {
 			Render(w.Name)
 
 		serverInfo := fmt.Sprintf("Server: %s", m.server.Name)
-		endpointInfo := fmt.Sprintf("→ %s", m.server.Endpoint)
+		showEndpoint := w.Origin
+		if showEndpoint == "" {
+			showEndpoint = m.server.DisplayEndpoint()
+		}
+		endpointInfo := fmt.Sprintf("→ %s", config.ShortOrigin(showEndpoint))
 		updatedInfo := fmt.Sprintf("Updated: %s", lastUpdateStr)
 
 		headerContent := lipgloss.JoinVertical(lipgloss.Left,
@@ -236,7 +281,11 @@ func (m Model) renderWorkerDetailHeaderView() string {
 	serverLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render("Server:")
 	serverValue := lipgloss.NewStyle().Foreground(ColorFg).Render(m.server.Name)
 	endpointLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render("Endpoint:")
-	endpointValue := lipgloss.NewStyle().Foreground(ColorSubtle).Render(m.server.Endpoint)
+	showEndpoint := w.Origin
+	if showEndpoint == "" {
+		showEndpoint = m.server.DisplayEndpoint()
+	}
+	endpointValue := lipgloss.NewStyle().Foreground(ColorSubtle).Render(config.ShortOrigin(showEndpoint))
 
 	updatedInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("Updated: %s", lastUpdateStr))
 
@@ -371,8 +420,8 @@ func (m Model) renderWorkerDetailFooter() string {
 		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
 			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
 			HelpKeyStyle.Render("a"), HelpDescStyle.Render(" actions • "),
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit  • "),
-			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" scroll"),
+			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" scroll • "),
+			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit"),
 		)
 	}
 

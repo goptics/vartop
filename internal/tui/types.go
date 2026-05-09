@@ -21,7 +21,10 @@ type workersMsg []api.WorkerSummary
 type workerDetailsMsg *api.WorkerDetails
 
 // healthMsg carries the health check result
-type healthMsg struct{ ok bool }
+type healthMsg struct {
+	ok     bool
+	status map[string]bool // per-endpoint health status
+}
 
 // errMsg carries an error that should be displayed to the user
 type errMsg struct{ err error }
@@ -30,15 +33,54 @@ func (e errMsg) Error() string { return e.err.Error() }
 
 // List item types
 
-// serverItem implements list.Item for the server switcher
-type serverItem struct {
-	name     string
-	endpoint string
+// switchServerItem represents a server (merged pods view) in the switcher
+type switchServerItem struct {
+	name        string
+	podCount    int
+	healthyPods int
+	expanded    bool
 }
 
-func (i serverItem) Title() string       { return i.name }
-func (i serverItem) Description() string { return i.endpoint }
-func (i serverItem) FilterValue() string { return i.name }
+func (i switchServerItem) Title() string {
+	indicator := "▶"
+	if i.expanded {
+		indicator = "▼"
+	}
+
+	if i.podCount <= 1 {
+		return fmt.Sprintf("%s %s", indicator, i.name)
+	}
+
+	dot := StatusStyleRunning.Render("●")
+	if i.healthyPods == 0 {
+		dot = StatusStyleStopped.Render("○")
+	} else if i.healthyPods < i.podCount {
+		dot = StatusStyleWarning.Render("◐")
+	}
+	return fmt.Sprintf("%s %s %s (%d pods, %d healthy)", indicator, dot, i.name, i.podCount, i.healthyPods)
+}
+func (i switchServerItem) Description() string { return "" }
+func (i switchServerItem) FilterValue() string  { return i.name }
+
+// switchPodItem represents an individual pod under a server in the switcher
+type switchPodItem struct {
+	name    string
+	server  string
+	origin  string
+	healthy bool
+}
+
+func (i switchPodItem) Title() string {
+	var dot string
+	if i.healthy {
+		dot = StatusStyleRunning.Render("●")
+	} else {
+		dot = StatusStyleStopped.Render("○")
+	}
+	return fmt.Sprintf("  └─ %s %s", dot, i.name)
+}
+func (i switchPodItem) Description() string { return "" }
+func (i switchPodItem) FilterValue() string  { return i.name }
 
 // Helper functions
 

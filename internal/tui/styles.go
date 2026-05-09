@@ -37,6 +37,7 @@ var (
 	StatusStyleRunning = lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
 	StatusStylePaused  = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	StatusStyleStopped = lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+	StatusStyleWarning = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	StatusStyleIdle    = lipgloss.NewStyle().Foreground(ColorFg)
 
 	FooterStyle = lipgloss.NewStyle().

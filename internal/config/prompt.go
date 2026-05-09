@@ -83,10 +83,10 @@ func PromptOnboarding() (*Config, error) {
 		DefaultServer: name,
 		Servers: map[string]*Server{
 			name: {
-				Name:     name,
-				Endpoint: endpoint,
-				Token:    token,
-				Interval: 5, // Default polling interval
+				Name:      name,
+				Endpoints: []string{endpoint},
+				Token:     token,
+				Interval:  5,
 			},
 		},
 	}

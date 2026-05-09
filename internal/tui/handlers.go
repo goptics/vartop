@@ -7,6 +7,8 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
 // Event handlers for different message types
@@ -17,12 +19,17 @@ func (m *Model) handleHealth(msg healthMsg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	m.isHealthy = msg.ok
+	if msg.status != nil {
+		m.podHealth = msg.status
+	}
+
+	// Rebuild switcher so health dots stay current
+	m.rebuildSwitcherItems()
+
 	if m.isHealthy && !m.showSwitcher {
 		if m.showWorkerDetail && m.currentWorkerName != "" {
-			// Refresh worker details when in detail view
-			cmds = append(cmds, m.fetchWorkerDetailsCmd(m.currentWorkerName))
+			cmds = append(cmds, m.fetchWorkerDetailsCmd(m.currentWorkerName, m.currentWorkerOrigin))
 		} else if !m.showWorkerDetail {
-			// Refresh dashboard when not in detail view
 			cmds = append(cmds, m.fetchWorkersCmd())
 		}
 	}
@@ -35,17 +42,36 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 	m.lastUpdate = time.Now()
 	m.err = nil
 
-	rows := make([]table.Row, len(msg))
-	for i, w := range msg {
-		rows[i] = table.Row{
-			w.Name,
-			w.Status,
-			lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.Concurrency)),
-			lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.NumProcessing)),
-			lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render(fmt.Sprint(w.NumPending)),
-			lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render(fmt.Sprint(w.NumIdleWorkers)),
+	rows := make([]table.Row, 0, len(msg))
+	origins := make(map[string]string, len(msg))
+
+	for _, w := range msg {
+		origin := config.ShortOrigin(w.Origin)
+		origins[w.Name] = w.Origin
+
+		if m.showNodeColumn {
+			rows = append(rows, table.Row{
+				w.Name,
+				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(origin),
+				w.Status,
+				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.Concurrency)),
+				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.NumProcessing)),
+				lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render(fmt.Sprint(w.NumPending)),
+				lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render(fmt.Sprint(w.NumIdleWorkers)),
+			})
+		} else {
+			rows = append(rows, table.Row{
+				w.Name,
+				w.Status,
+				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.Concurrency)),
+				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.NumProcessing)),
+				lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render(fmt.Sprint(w.NumPending)),
+				lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render(fmt.Sprint(w.NumIdleWorkers)),
+			})
 		}
 	}
+
+	m.workerOrigins = origins
 
 	// Retain selection if possible
 	selected := m.table.Cursor()
@@ -72,31 +98,55 @@ func (m *Model) handleError(msg errMsg) tea.Cmd {
 	return nil
 }
 
-// handleWindowSize processes terminal resize events
-func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
-	m.width = msg.Width
-	m.height = msg.Height
+// rebuildTable reconstructs the table with the current width and showNodeColumn setting.
+func (m *Model) rebuildTable() {
+	tHeight := m.height - 12
 
-	// Update table dimensions - reserve more space for header
-	tHeight := msg.Height - 12  // Increased from 8 to leave room for header
-	fixedWidths := 15 + 12 + 12 + 10 + 8 + 10
-	nameWidth := msg.Width - fixedWidths
-	if nameWidth < 15 {
-		nameWidth = 15
-	}
-
-	columns := []table.Column{
-		{Title: "Name", Width: nameWidth},
-		{Title: "Status", Width: 15},
-		{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
-		{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
-		{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
-		{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
+	var columns []table.Column
+	var fixedWidths int
+	if m.showNodeColumn {
+		// 7 columns + cell padding (7 × 2 = 14)
+		fixedWidths = 12 + 12 + 12 + 12 + 10 + 8 + 14
+		nameWidth := m.width - fixedWidths
+		if nameWidth < 12 {
+			nameWidth = 12
+		}
+		columns = []table.Column{
+			{Title: "Name", Width: nameWidth},
+			{Title: "Node", Width: 12},
+			{Title: "Status", Width: 12},
+			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
+			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
+			{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
+			{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
+		}
+	} else {
+		// 6 columns + cell padding (6 × 2 = 12)
+		fixedWidths = 12 + 12 + 12 + 10 + 8 + 12
+		nameWidth := m.width - fixedWidths
+		if nameWidth < 12 {
+			nameWidth = 12
+		}
+		columns = []table.Column{
+			{Title: "Name", Width: nameWidth},
+			{Title: "Status", Width: 12},
+			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
+			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
+			{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
+			{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
+		}
 	}
 
 	s := TableStyles()
 	selected := m.table.Cursor()
 	rows := m.table.Rows()
+
+	// If existing rows have a different cell count than new columns,
+	// clear them to avoid a panic in table.New (rows will be repopulated by the next fetch).
+	if len(rows) > 0 && len(rows[0]) != len(columns) {
+		rows = nil
+		selected = 0
+	}
 
 	t := table.New(
 		table.WithColumns(columns),
@@ -110,6 +160,14 @@ func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
 	t.SetCursor(selected)
 
 	m.table = t
+}
+
+// handleWindowSize processes terminal resize events
+func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
+	m.width = msg.Width
+	m.height = msg.Height
+
+	m.rebuildTable()
 
 	// Update switcher dimensions
 	lHeight := msg.Height - 6

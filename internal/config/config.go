@@ -19,10 +19,65 @@ var (
 
 // Server represents a single varmq server connection definition.
 type Server struct {
-	Name     string `json:"name"`
-	Endpoint string `json:"endpoint"`
-	Token    string `json:"token,omitempty"`
-	Interval int    `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+	Name      string   `json:"name"`
+	Endpoints []string `json:"endpoints"` // One or more mux server endpoint URLs
+	Token     string   `json:"token,omitempty"`
+	Interval  int      `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+}
+
+// UnmarshalJSON handles backward compatibility: if the config file has the old
+// singular "endpoint" field instead of "endpoints", it migrates it transparently.
+func (s *Server) UnmarshalJSON(data []byte) error {
+	type Alias Server
+	aux := &struct {
+		Endpoint string `json:"endpoint"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if len(s.Endpoints) == 0 && aux.Endpoint != "" {
+		s.Endpoints = []string{aux.Endpoint}
+	}
+	return nil
+}
+
+// GetEndpoints returns the list of endpoints to query.
+func (s *Server) GetEndpoints() []string {
+	return s.Endpoints
+}
+
+// DisplayEndpoint returns a human-readable representation of the endpoint(s).
+// For single endpoints, returns the full URL; for multi-pod, returns "N pods".
+func (s *Server) DisplayEndpoint() string {
+	if len(s.Endpoints) == 0 {
+		return "(no endpoints)"
+	}
+	if len(s.Endpoints) == 1 {
+		return s.Endpoints[0]
+	}
+	return fmt.Sprintf("%d pods", len(s.Endpoints))
+}
+
+// shortOrigin returns a compact display label for a given endpoint URL.
+func ShortOrigin(endpoint string) string {
+	// Strip scheme
+	u := endpoint
+	for _, prefix := range []string{"https://", "http://"} {
+		if len(u) > len(prefix) && u[:len(prefix)] == prefix {
+			u = u[len(prefix):]
+			break
+		}
+	}
+	// Take host only (before first / or :)
+	for i, c := range u {
+		if c == '/' || c == ':' {
+			return u[:i]
+		}
+	}
+	return u
 }
 
 // Config represents the schema of the ~/.vartop.json configuration file.

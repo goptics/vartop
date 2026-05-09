@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -40,7 +41,7 @@ var serverListCmd = &cobra.Command{
 			}
 
 			fmt.Printf("%s%s [%s]\n", prefix, name, status)
-			fmt.Printf("    Endpoint: %s\n", server.Endpoint)
+			fmt.Printf("    Endpoint: %s\n", server.DisplayEndpoint())
 			if server.Token != "" {
 				fmt.Printf("    Token:    ***\n")
 			}
@@ -52,13 +53,12 @@ var serverListCmd = &cobra.Command{
 
 var serverAddCmd = &cobra.Command{
 	Use:   "add <name> <endpoint> [token]",
-	Short: "Add a new varmq server connection",
+	Short: "Add a new varmq server connection (use commas for multi-pod endpoints)",
 	Args:  cobra.RangeArgs(2, 3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
 			if err == config.ErrConfigNotFound {
-				// Initialize an empty config if one doesn't exist
 				cfg = &config.Config{Servers: make(map[string]*config.Server)}
 			} else {
 				return err
@@ -76,11 +76,14 @@ var serverAddCmd = &cobra.Command{
 			return fmt.Errorf("server '%s' already exists", name)
 		}
 
+		// Support comma-separated endpoints for multi-pod setups
+		endpoints := splitEndpoints(endpoint)
+
 		cfg.Servers[name] = &config.Server{
-			Name:     name,
-			Endpoint: endpoint,
-			Token:    token,
-			Interval: 5, // Default polling
+			Name:      name,
+			Endpoints: endpoints,
+			Token:     token,
+			Interval:  5,
 		}
 
 		// Use as default if it's the first one
@@ -92,7 +95,11 @@ var serverAddCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Added server '%s' (%s)\n", name, endpoint)
+		if len(endpoints) > 1 {
+			fmt.Printf("Added server '%s' with %d endpoints\n", name, len(endpoints))
+		} else {
+			fmt.Printf("Added server '%s' (%s)\n", name, endpoint)
+		}
 		return nil
 	},
 }
@@ -203,7 +210,7 @@ var serverSetCmd = &cobra.Command{
 			if value == "" {
 				return fmt.Errorf("endpoint cannot be empty")
 			}
-			server.Endpoint = value
+			server.Endpoints = splitEndpoints(value)
 		case "token":
 			server.Token = value // allow empty token to clear it
 		case "interval":
@@ -234,4 +241,20 @@ func init() {
 	serverCmd.AddCommand(serverRemoveCmd)
 	serverCmd.AddCommand(serverSetCmd)
 	rootCmd.AddCommand(serverCmd)
+}
+
+// splitEndpoints splits a comma-separated endpoint string into a slice, trimming whitespace.
+func splitEndpoints(raw string) []string {
+	parts := strings.Split(raw, ",")
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	if len(result) == 0 {
+		return []string{raw}
+	}
+	return result
 }

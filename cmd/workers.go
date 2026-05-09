@@ -10,10 +10,12 @@ import (
 	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
+var actionOrigin string
+
 func getClient() (*api.Client, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load config (%w). run vartop config add first", err)
+		return nil, fmt.Errorf("failed to load config (%w). run vartop server add first", err)
 	}
 
 	server, err := cfg.GetActiveServer(serverFlag)
@@ -45,8 +47,13 @@ var actionCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Sending '%s' action to worker '%s'...\n", action, workerName)
-		if err := client.Action(workerName, action); err != nil {
+		origin := actionOrigin
+		if origin == "" {
+			origin = client.PrimaryEndpoint()
+		}
+
+		fmt.Printf("Sending '%s' action to worker '%s' (%s)...\n", action, workerName, config.ShortOrigin(origin))
+		if err := client.Action(workerName, action, origin); err != nil {
 			return err
 		}
 
@@ -73,8 +80,13 @@ var concurrencyCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Updating concurrency of worker '%s' to %d...\n", workerName, concurrency)
-		if err := client.TuneConcurrency(workerName, concurrency); err != nil {
+		origin := actionOrigin
+		if origin == "" {
+			origin = client.PrimaryEndpoint()
+		}
+
+		fmt.Printf("Updating concurrency of worker '%s' to %d (%s)...\n", workerName, concurrency, config.ShortOrigin(origin))
+		if err := client.TuneConcurrency(workerName, concurrency, origin); err != nil {
 			return err
 		}
 
@@ -84,6 +96,8 @@ var concurrencyCmd = &cobra.Command{
 }
 
 func init() {
+	actionCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target endpoint origin (empty uses primary endpoint)")
+	concurrencyCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target endpoint origin (empty uses primary endpoint)")
 	rootCmd.AddCommand(actionCmd)
 	rootCmd.AddCommand(concurrencyCmd)
 }

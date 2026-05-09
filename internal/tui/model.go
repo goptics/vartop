@@ -29,6 +29,13 @@ type Model struct {
 	inActionSelection bool
 	isHealthy         bool
 
+	// Multi-endpoint state
+	workerOrigins          map[string]string // workerName -> origin endpoint (for action routing)
+	podHealth              map[string]bool   // per-endpoint health status
+	selectedPodOrigin      string            // empty = merged view; non-empty = single pod view
+	switcherExpandedServer string            // which server is expanded in the switch view
+	showNodeColumn         bool              // false when viewing a single pod (Node column hidden)
+
 	// Worker detail view state
 	showWorkerDetail       bool
 	workerDetails          *api.WorkerDetails
@@ -36,6 +43,7 @@ type Model struct {
 	inWorkerDetailAction   bool   // Action mode for worker detail view
 	workerDetailScrollY    int    // Vertical scroll offset for worker detail view
 	workerDetailMaxScroll  int    // Maximum scroll value (0 if no overflow)
+	currentWorkerOrigin    string // Origin of the worker being viewed (for action routing)
 }
 
 // NewModel initializes the application state.
@@ -44,8 +52,9 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 
 	// Determine table columns
 	columns := []table.Column{
-		{Title: "Name", Width: 20},
-		{Title: "Status", Width: 15},
+		{Title: "Name", Width: 18},
+		{Title: "Node", Width: 12},
+		{Title: "Status", Width: 12},
 		{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
 		{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
 		{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
@@ -60,33 +69,36 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 
 	t.SetStyles(TableStyles())
 
-	// Init Switcher List
-	var items []list.Item
-	for n, srv := range cfg.Servers {
-		items = append(items, serverItem{name: n, endpoint: srv.Endpoint})
-	}
-
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Select VarMQ Server"
+	// Init Switcher List (will be populated by rebuildSwitcherItems)
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	l.Title = "Switch"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
 
-	return &Model{
+	m := &Model{
 		cfg:                  cfg,
 		server:               server,
 		client:               client,
 		table:                t,
 		switcher:             l,
 		isHealthy:            true, // Assume healthy initially
-		showWorkerDetail:     false,
+		workerOrigins:          make(map[string]string),
+		podHealth:              make(map[string]bool),
+		selectedPodOrigin:      "",
+		switcherExpandedServer: "",
+		showNodeColumn:         true,
+		showWorkerDetail:       false,
 		workerDetails:        nil,
 		currentWorkerName:    "",
+		currentWorkerOrigin:  "",
 		inWorkerDetailAction: false,
 		width:                80,  // Default width, will be updated by WindowSizeMsg
 		height:               24,  // Default height, will be updated by WindowSizeMsg
 		workerDetailScrollY:   0,
 		workerDetailMaxScroll: 0,
 	}
+	m.rebuildSwitcherItems()
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -185,6 +197,7 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showWorkerDetail = false
 			m.workerDetails = nil
 			m.currentWorkerName = ""
+			m.currentWorkerOrigin = ""
 			m.inWorkerDetailAction = false
 			m.workerDetailScrollY = 0 // Reset scroll
 			return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
@@ -198,7 +211,7 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.workerDetails = nil // Clear to show loading state
 				m.workerDetailScrollY = 0
 				m.workerDetailMaxScroll = 0
-				return m, m.fetchWorkerDetailsCmd(m.currentWorkerName)
+			return m, m.fetchWorkerDetailsCmd(m.currentWorkerName, m.currentWorkerOrigin)
 			}
 			return m, nil
 		case "up", "k":
@@ -240,16 +253,16 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "p":
 			m.inActionSelection = false
-			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "pause")
+			return m, m.actionWorkerCmd(m.selectedWorkerName(), m.selectedWorkerOrigin(), "pause")
 		case "r":
 			m.inActionSelection = false
-			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "resume")
+			return m, m.actionWorkerCmd(m.selectedWorkerName(), m.selectedWorkerOrigin(), "resume")
 		case "s":
 			m.inActionSelection = false
-			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "stop")
+			return m, m.actionWorkerCmd(m.selectedWorkerName(), m.selectedWorkerOrigin(), "stop")
 		case "R":
 			m.inActionSelection = false
-			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "restart")
+			return m, m.actionWorkerCmd(m.selectedWorkerName(), m.selectedWorkerOrigin(), "restart")
 		}
 		// If in action selection, don't let table keys through except navigation maybe?
 		// Actually user said "options will be shows eaxt where the main menu exsit",
@@ -264,7 +277,7 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.inActionSelection {
 			// In action selection 'r' is resume
 			m.inActionSelection = false
-			return m, m.actionWorkerCmd(m.table.SelectedRow()[0], "resume")
+			return m, m.actionWorkerCmd(m.selectedWorkerName(), m.selectedWorkerOrigin(), "resume")
 		}
 		m.err = nil
 		return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
@@ -282,10 +295,12 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			selectedRow := m.table.SelectedRow()
 			if selectedRow != nil {
 				workerName := selectedRow[0]
+				origin := m.workerOrigins[workerName]
 				m.showWorkerDetail = true
 				m.workerDetails = nil            // Clear previous details
 				m.currentWorkerName = workerName // Store for polling
-				return m, m.fetchWorkerDetailsCmd(workerName)
+				m.currentWorkerOrigin = origin   // Store for action routing
+				return m, m.fetchWorkerDetailsCmd(workerName, origin)
 			}
 		}
 		return m, nil
@@ -294,7 +309,8 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.showWorkerDetail {
 			m.showWorkerDetail = false
 			m.workerDetails = nil
-			m.currentWorkerName = "" // Clear worker name
+			m.currentWorkerName = ""  // Clear worker name
+			m.currentWorkerOrigin = "" // Clear origin
 			return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 		}
 		return m, nil
@@ -314,20 +330,78 @@ func (m Model) updateSwitcher(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "esc":
+		if m.switcherExpandedServer != "" {
+			m.switcherExpandedServer = ""
+			m.rebuildSwitcherItems()
+			return m, nil
+		}
 		m.showSwitcher = false
 		return m, nil
+	case "backspace", "h":
+		if m.switcherExpandedServer != "" {
+			m.switcherExpandedServer = ""
+			m.rebuildSwitcherItems()
+		}
+		return m, nil
 	case "enter":
-		if i, ok := m.switcher.SelectedItem().(serverItem); ok {
+		switch item := m.switcher.SelectedItem().(type) {
+		case switchServerItem:
+			if item.podCount <= 1 {
+				// Single pod: select immediately
+				m.showSwitcher = false
+				m.err = nil
+				m.workerOrigins = make(map[string]string)
+				m.selectedPodOrigin = ""
+				m.showNodeColumn = true
+				m.rebuildTable()
+				srv, err := m.cfg.GetActiveServer(item.name)
+				if err == nil {
+					m.server = srv
+					m.client = api.NewClient(srv)
+					return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
+				}
+				m.err = err
+				return m, nil
+			}
+
+			if m.switcherExpandedServer == item.name {
+				// Already expanded: select merged view
+				m.showSwitcher = false
+				m.err = nil
+				m.workerOrigins = make(map[string]string)
+				m.selectedPodOrigin = ""
+				m.showNodeColumn = true
+				m.rebuildTable()
+				srv, err := m.cfg.GetActiveServer(item.name)
+				if err == nil {
+					m.server = srv
+					m.client = api.NewClient(srv)
+					return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
+				}
+				m.err = err
+				return m, nil
+			}
+
+			// Expand this server
+			m.switcherExpandedServer = item.name
+			m.rebuildSwitcherItems()
+			return m, nil
+
+		case switchPodItem:
 			m.showSwitcher = false
 			m.err = nil
-
-			if srv, err := m.cfg.GetActiveServer(i.name); err == nil {
+			m.workerOrigins = make(map[string]string)
+			m.selectedPodOrigin = item.origin
+			m.showNodeColumn = false
+			m.rebuildTable()
+			srv, err := m.cfg.GetActiveServer(item.server)
+			if err == nil {
 				m.server = srv
 				m.client = api.NewClient(srv)
 				return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
-			} else {
-				m.err = err
 			}
+			m.err = err
+			return m, nil
 		}
 		return m, nil
 	}
@@ -347,4 +421,62 @@ func (m Model) View() string {
 	}
 
 	return m.renderDashboardView()
+}
+
+// selectedWorkerOrigin returns the origin endpoint for the currently selected table row.
+func (m Model) selectedWorkerOrigin() string {
+	if len(m.table.Rows()) == 0 {
+		return ""
+	}
+	name := m.table.SelectedRow()[0]
+	return m.workerOrigins[name]
+}
+
+// selectedWorkerName returns the name of the currently selected table row.
+func (m Model) selectedWorkerName() string {
+	if len(m.table.Rows()) == 0 {
+		return ""
+	}
+	return m.table.SelectedRow()[0]
+}
+
+// rebuildSwitcherItems reconstructs the switcher list. Servers are always shown.
+// Pods are shown only under the currently expanded server.
+func (m *Model) rebuildSwitcherItems() {
+	var items []list.Item
+	for name, srv := range m.cfg.Servers {
+		endpoints := srv.GetEndpoints()
+		podCount := len(endpoints)
+
+		// Count healthy pods
+		healthyPods := 0
+		for _, ep := range endpoints {
+			if m.podHealth[ep] {
+				healthyPods++
+			}
+		}
+
+		expanded := m.switcherExpandedServer == name
+
+		items = append(items, switchServerItem{
+			name:        name,
+			podCount:    podCount,
+			healthyPods: healthyPods,
+			expanded:    expanded,
+		})
+
+		// Add pod rows only for the expanded server
+		if expanded && podCount > 1 {
+			for _, ep := range endpoints {
+				items = append(items, switchPodItem{
+					name:    config.ShortOrigin(ep),
+					server:  name,
+					origin:  ep,
+					healthy: m.podHealth[ep],
+				})
+			}
+		}
+	}
+
+	m.switcher.SetItems(items)
 }
