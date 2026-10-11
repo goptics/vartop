@@ -144,7 +144,10 @@ func Load() (*Config, error) {
 		cfg.Servers = make(map[string]*Server)
 	}
 
-	for _, server := range cfg.Servers {
+	for name, server := range cfg.Servers {
+		if server == nil {
+			return nil, fmt.Errorf("server %q: empty definition", name)
+		}
 		if err := server.Validate(); err != nil {
 			return nil, err
 		}

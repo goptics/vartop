@@ -2,6 +2,9 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -179,5 +182,32 @@ func TestLoadMissingConfig(t *testing.T) {
 	_, err := Load()
 	if !errors.Is(err, ErrConfigNotFound) {
 		t.Fatalf("Load() error = %v, want ErrConfigNotFound", err)
+	}
+}
+
+// TestLoadNullServer guards the validation boundary against a hand-edited or
+// partially-written config: {"servers":{"a":null}} unmarshals to a nil *Server,
+// which must produce a clean error rather than a nil-pointer panic.
+func TestLoadNullServer(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	path, err := configPath()
+	if err != nil {
+		t.Fatalf("configPath() error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"servers":{"a":null}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Load()
+	if err == nil {
+		t.Fatal("Load() expected error for null server, got nil")
+	}
+	if !strings.Contains(err.Error(), `"a"`) {
+		t.Fatalf("Load() error = %v, want it to name server %q", err, "a")
 	}
 }
