@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/goptics/varmq/cmd/vartop/cmd"
+	"github.com/goptics/vartop/cmd"
 )
 
 func main() {

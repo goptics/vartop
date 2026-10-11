@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/vartop/internal/config"
 )
 
 // dashboardScreen is the worker list view and the base of the screen stack.

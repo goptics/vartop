@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/api"
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/config"
 )
 
 // detailScreen is the worker detail overlay. It owns the fetched details and

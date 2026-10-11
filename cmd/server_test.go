@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/vartop/internal/config"
 )
 
 func TestServerSetEndpointOnKubernetesServerRejected(t *testing.T) {

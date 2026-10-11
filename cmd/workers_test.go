@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/vartop/internal/config"
 )
 
 // recorder is a fake varmq pod that records request paths and answers with

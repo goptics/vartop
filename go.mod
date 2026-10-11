@@ -1,4 +1,4 @@
-module github.com/goptics/varmq/cmd/vartop
+module github.com/goptics/vartop
 
 go 1.26.0
 

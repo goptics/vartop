@@ -7,8 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
-	"github.com/goptics/varmq/cmd/vartop/internal/tui"
+	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/tui"
 )
 
 var (

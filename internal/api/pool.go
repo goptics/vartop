@@ -3,8 +3,8 @@ package api
 import (
 	"sync"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
-	"github.com/goptics/varmq/cmd/vartop/internal/discovery"
+	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/discovery"
 )
 
 // Pool reconciles api.Clients against a discovery.Source, keeping one Client

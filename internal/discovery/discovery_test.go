@@ -14,7 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/vartop/internal/config"
 )
 
 // TestK8sSourceEndpointsFromStore covers EndpointSlice churn: an address that

@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/api"
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/config"
 )
 
 var serverCmd = &cobra.Command{

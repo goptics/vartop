@@ -9,9 +9,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/api"
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
-	"github.com/goptics/varmq/cmd/vartop/internal/discovery"
+	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/discovery"
 )
 
 func testModel(t *testing.T) *Model {

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/vartop/internal/config"
 )
 
 // Client is a REST API client for a single varmq mux server endpoint.
