@@ -43,6 +43,10 @@ concurrencies, and metrics from varmq mux servers.`,
 		p := tea.NewProgram(m, tea.WithAltScreen())
 
 		_, err = p.Run()
+		// Quit tears down the pool's discovery source (stops any informer).
+		if closeErr := m.Close(); err == nil {
+			err = closeErr
+		}
 		return err
 	},
 }

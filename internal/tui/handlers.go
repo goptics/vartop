@@ -98,6 +98,26 @@ func (m *Model) handleError(msg errMsg) tea.Cmd {
 	return nil
 }
 
+// handleServerSwitch applies the pool built for a newly selected server.
+// Construction errors keep the current pool and surface through the error display.
+func (m *Model) handleServerSwitch(msg serverSwitchMsg) tea.Cmd {
+	if msg.err != nil {
+		m.err = msg.err
+		return nil
+	}
+
+	// Stop the previous server's source watcher (informer), if any.
+	if m.pool != nil {
+		_ = m.pool.Close()
+	}
+	m.server = msg.srv
+	m.pool = msg.pool
+	m.err = nil
+	m.rebuildSwitcherItems()
+
+	return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
+}
+
 // rebuildTable reconstructs the table with the current width and showNodeColumn setting.
 func (m *Model) rebuildTable() {
 	tHeight := m.height - 12

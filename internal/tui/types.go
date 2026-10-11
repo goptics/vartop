@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/goptics/varmq/cmd/vartop/internal/api"
+	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
 // Message types for Bubble Tea
@@ -30,6 +31,14 @@ type healthMsg struct {
 type errMsg struct{ err error }
 
 func (e errMsg) Error() string { return e.err.Error() }
+
+// serverSwitchMsg carries the result of building a pool for a newly selected
+// server: either a ready pool, or the construction error.
+type serverSwitchMsg struct {
+	srv  *config.Server
+	pool *api.Pool
+	err  error
+}
 
 // List item types
 
@@ -60,7 +69,7 @@ func (i switchServerItem) Title() string {
 	return fmt.Sprintf("%s %s %s (%d pods, %d healthy)", indicator, dot, i.name, i.podCount, i.healthyPods)
 }
 func (i switchServerItem) Description() string { return "" }
-func (i switchServerItem) FilterValue() string  { return i.name }
+func (i switchServerItem) FilterValue() string { return i.name }
 
 // switchPodItem represents an individual pod under a server in the switcher
 type switchPodItem struct {
@@ -80,7 +89,7 @@ func (i switchPodItem) Title() string {
 	return fmt.Sprintf("  └─ %s %s", dot, i.name)
 }
 func (i switchPodItem) Description() string { return "" }
-func (i switchPodItem) FilterValue() string  { return i.name }
+func (i switchPodItem) FilterValue() string { return i.name }
 
 // Helper functions
 

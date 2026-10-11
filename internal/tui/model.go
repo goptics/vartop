@@ -10,13 +10,14 @@ import (
 
 	"github.com/goptics/varmq/cmd/vartop/internal/api"
 	"github.com/goptics/varmq/cmd/vartop/internal/config"
+	"github.com/goptics/varmq/cmd/vartop/internal/discovery"
 )
 
 // Model is the main state of the TUI
 type Model struct {
 	cfg      *config.Config
 	server   *config.Server
-	client   *api.Client
+	pool     *api.Pool
 	table    table.Model
 	switcher list.Model
 
@@ -37,18 +38,33 @@ type Model struct {
 	showNodeColumn         bool              // false when viewing a single pod (Node column hidden)
 
 	// Worker detail view state
-	showWorkerDetail       bool
-	workerDetails          *api.WorkerDetails
-	currentWorkerName      string // Track which worker we're viewing for polling
-	inWorkerDetailAction   bool   // Action mode for worker detail view
-	workerDetailScrollY    int    // Vertical scroll offset for worker detail view
-	workerDetailMaxScroll  int    // Maximum scroll value (0 if no overflow)
-	currentWorkerOrigin    string // Origin of the worker being viewed (for action routing)
+	showWorkerDetail      bool
+	workerDetails         *api.WorkerDetails
+	currentWorkerName     string // Track which worker we're viewing for polling
+	inWorkerDetailAction  bool   // Action mode for worker detail view
+	workerDetailScrollY   int    // Vertical scroll offset for worker detail view
+	workerDetailMaxScroll int    // Maximum scroll value (0 if no overflow)
+	currentWorkerOrigin   string // Origin of the worker being viewed (for action routing)
+}
+
+// sourceFor builds the discovery source matching the server configuration:
+// Kubernetes EndpointSlices for kubernetes servers, a fixed list otherwise.
+func sourceFor(server *config.Server) (discovery.Source, error) {
+	if server.Kubernetes != nil {
+		return discovery.NewKubernetes(*server.Kubernetes)
+	}
+	return discovery.NewStatic(server.GetEndpoints()), nil
 }
 
 // NewModel initializes the application state.
 func NewModel(cfg *config.Config, server *config.Server) *Model {
-	client := api.NewClient(server)
+	// Construction errors (e.g. a failing Kubernetes watcher) are surfaced
+	// through the TUI's existing error display instead of aborting startup.
+	source, err := sourceFor(server)
+	var pool *api.Pool
+	if err == nil {
+		pool = api.NewPool(source, server.Token)
+	}
 
 	// Determine table columns
 	columns := []table.Column{
@@ -64,7 +80,7 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 	t := table.New(
 		table.WithColumns(columns),
 		table.WithFocused(true),
-		table.WithHeight(6),  // Reduced from 10 to leave more room for header
+		table.WithHeight(6), // Reduced from 10 to leave more room for header
 	)
 
 	t.SetStyles(TableStyles())
@@ -76,26 +92,27 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 	l.SetFilteringEnabled(false)
 
 	m := &Model{
-		cfg:                  cfg,
-		server:               server,
-		client:               client,
-		table:                t,
-		switcher:             l,
-		isHealthy:            true, // Assume healthy initially
+		cfg:                    cfg,
+		server:                 server,
+		pool:                   pool,
+		err:                    err,
+		table:                  t,
+		switcher:               l,
+		isHealthy:              true, // Assume healthy initially
 		workerOrigins:          make(map[string]string),
 		podHealth:              make(map[string]bool),
 		selectedPodOrigin:      "",
 		switcherExpandedServer: "",
 		showNodeColumn:         true,
 		showWorkerDetail:       false,
-		workerDetails:        nil,
-		currentWorkerName:    "",
-		currentWorkerOrigin:  "",
-		inWorkerDetailAction: false,
-		width:                80,  // Default width, will be updated by WindowSizeMsg
-		height:               24,  // Default height, will be updated by WindowSizeMsg
-		workerDetailScrollY:   0,
-		workerDetailMaxScroll: 0,
+		workerDetails:          nil,
+		currentWorkerName:      "",
+		currentWorkerOrigin:    "",
+		inWorkerDetailAction:   false,
+		width:                  80, // Default width, will be updated by WindowSizeMsg
+		height:                 24, // Default height, will be updated by WindowSizeMsg
+		workerDetailScrollY:    0,
+		workerDetailMaxScroll:  0,
 	}
 	m.rebuildSwitcherItems()
 	return m
@@ -146,6 +163,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		cmd = m.handleError(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
+	case serverSwitchMsg:
+		cmd = m.handleServerSwitch(msg)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -211,7 +234,7 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.workerDetails = nil // Clear to show loading state
 				m.workerDetailScrollY = 0
 				m.workerDetailMaxScroll = 0
-			return m, m.fetchWorkerDetailsCmd(m.currentWorkerName, m.currentWorkerOrigin)
+				return m, m.fetchWorkerDetailsCmd(m.currentWorkerName, m.currentWorkerOrigin)
 			}
 			return m, nil
 		case "up", "k":
@@ -309,7 +332,7 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.showWorkerDetail {
 			m.showWorkerDetail = false
 			m.workerDetails = nil
-			m.currentWorkerName = ""  // Clear worker name
+			m.currentWorkerName = ""   // Clear worker name
 			m.currentWorkerOrigin = "" // Clear origin
 			return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 		}
@@ -349,37 +372,15 @@ func (m Model) updateSwitcher(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.podCount <= 1 {
 				// Single pod: select immediately
 				m.showSwitcher = false
-				m.err = nil
-				m.workerOrigins = make(map[string]string)
-				m.selectedPodOrigin = ""
-				m.showNodeColumn = true
-				m.rebuildTable()
-				srv, err := m.cfg.GetActiveServer(item.name)
-				if err == nil {
-					m.server = srv
-					m.client = api.NewClient(srv)
-					return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
-				}
-				m.err = err
-				return m, nil
+				m.resetPodView()
+				return m.selectServer(item.name)
 			}
 
 			if m.switcherExpandedServer == item.name {
 				// Already expanded: select merged view
 				m.showSwitcher = false
-				m.err = nil
-				m.workerOrigins = make(map[string]string)
-				m.selectedPodOrigin = ""
-				m.showNodeColumn = true
-				m.rebuildTable()
-				srv, err := m.cfg.GetActiveServer(item.name)
-				if err == nil {
-					m.server = srv
-					m.client = api.NewClient(srv)
-					return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
-				}
-				m.err = err
-				return m, nil
+				m.resetPodView()
+				return m.selectServer(item.name)
 			}
 
 			// Expand this server
@@ -394,14 +395,7 @@ func (m Model) updateSwitcher(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selectedPodOrigin = item.origin
 			m.showNodeColumn = false
 			m.rebuildTable()
-			srv, err := m.cfg.GetActiveServer(item.server)
-			if err == nil {
-				m.server = srv
-				m.client = api.NewClient(srv)
-				return m, tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
-			}
-			m.err = err
-			return m, nil
+			return m.selectServer(item.server)
 		}
 		return m, nil
 	}
@@ -479,4 +473,33 @@ func (m *Model) rebuildSwitcherItems() {
 	}
 
 	m.switcher.SetItems(items)
+}
+
+// resetPodView returns to the merged multi-pod view for a server.
+func (m *Model) resetPodView() {
+	m.err = nil
+	m.workerOrigins = make(map[string]string)
+	m.selectedPodOrigin = ""
+	m.showNodeColumn = true
+	m.rebuildTable()
+}
+
+// selectServer looks up the named server and returns a command that builds its
+// pool in the background; the result arrives as a serverSwitchMsg.
+func (m *Model) selectServer(serverName string) (tea.Model, tea.Cmd) {
+	srv, err := m.cfg.GetActiveServer(serverName)
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	return m, m.switchServerCmd(srv)
+}
+
+// Close releases resources held by the model, i.e. the pool's discovery source
+// (closing a Kubernetes source stops its informer).
+func (m *Model) Close() error {
+	if m.pool == nil {
+		return nil
+	}
+	return m.pool.Close()
 }
