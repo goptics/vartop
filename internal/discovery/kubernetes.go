@@ -25,7 +25,6 @@ type k8sSource struct {
 	reg       *registry
 	path      string
 	fixedPort int
-	informer  cache.SharedIndexInformer
 	stopCh    chan struct{}
 }
 
@@ -73,7 +72,6 @@ func NewKubernetes(ref config.KubernetesRef) (Source, error) {
 		UpdateFunc: func(oldObj, newObj any) { k.apply(oldObj, newObj) },
 		DeleteFunc: func(obj any) { k.apply(obj, nil) },
 	})
-	k.informer = informer
 
 	// Start the informer, then fail fast if the cache never syncs.
 	go informer.Run(k.stopCh)
@@ -100,6 +98,11 @@ func kubeClient(contextName string) (kubernetes.Interface, error) {
 
 // apply updates the registry for a slice add/update/delete: URLs contributed
 // by the old object are removed, URLs contributed by the new object are added.
+//
+// shortcut: the registry is a set, not reference-counted, so an address
+// present in two slices is dropped when either slice is removed even while the
+// other still contributes it; upgrade to ref-counting if overlapping slices
+// become common.
 func (k *k8sSource) apply(oldObj, newObj any) {
 	if old := endpointSliceOf(oldObj); old != nil {
 		for _, u := range k.urls(old) {

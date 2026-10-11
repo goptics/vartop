@@ -115,6 +115,28 @@ func TestK8sSourceURLs(t *testing.T) {
 	}
 }
 
+func TestK8sSourceURLsPathAndAddressType(t *testing.T) {
+	ready := true
+	slice := &discoveryv1.EndpointSlice{
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints:   []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.5"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}},
+	}
+
+	// The "/varmq" default is applied by NewKubernetes; an explicit ref.Path
+	// override is used verbatim.
+	k := &k8sSource{path: "/custom", fixedPort: 8080}
+	if got := k.urls(slice); len(got) != 1 || got[0] != "http://10.0.0.5:8080/custom" {
+		t.Fatalf("path override: got %v", got)
+	}
+
+	// FQDN address types are excluded; only IPv4/IPv6 are dialed.
+	fqdn := *slice
+	fqdn.AddressType = discoveryv1.AddressTypeFQDN
+	if got := k.urls(&fqdn); len(got) != 0 {
+		t.Fatalf("FQDN exclusion: got %v", got)
+	}
+}
+
 func TestNewKubernetesBadContext(t *testing.T) {
 	kubeconfig := filepath.Join(t.TempDir(), "config")
 	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\ncontexts: []\n"), 0600); err != nil {
