@@ -7,7 +7,6 @@ import (
 
 	"github.com/goptics/varmq/cmd/vartop/internal/api"
 	"github.com/goptics/varmq/cmd/vartop/internal/config"
-	"github.com/goptics/varmq/cmd/vartop/internal/discovery"
 )
 
 // Model is the root TUI state: shared state plus a stack of screens. The
@@ -36,15 +35,6 @@ type Model struct {
 
 	screens  []screen
 	switcher *switcherScreen
-}
-
-// sourceFor builds the discovery source matching the server configuration:
-// Kubernetes EndpointSlices for kubernetes servers, a fixed list otherwise.
-func sourceFor(server *config.Server) (discovery.Source, error) {
-	if server.Kubernetes != nil {
-		return discovery.NewKubernetes(*server.Kubernetes)
-	}
-	return discovery.NewStatic(server.GetEndpoints()), nil
 }
 
 // NewModel initializes the application state. The pool is built in the

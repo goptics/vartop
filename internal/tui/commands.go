@@ -143,11 +143,11 @@ func (m Model) fetchWorkersCmd() tea.Cmd {
 // the background; a Kubernetes source may take seconds to start.
 func (m Model) switchServerCmd(srv *config.Server, seq int) tea.Cmd {
 	return func() tea.Msg {
-		source, err := sourceFor(srv)
+		pool, err := api.PoolFor(srv)
 		if err != nil {
 			return serverSwitchMsg{seq: seq, srv: srv, err: err}
 		}
-		return serverSwitchMsg{seq: seq, srv: srv, pool: api.NewPool(source, srv.Token)}
+		return serverSwitchMsg{seq: seq, srv: srv, pool: pool}
 	}
 }
 

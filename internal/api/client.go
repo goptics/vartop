@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
-// Client is a REST API client for interacting with one or more varmq mux server endpoints.
+// Client is a REST API client for a single varmq mux server endpoint.
+// Multi-pod servers get one Client per endpoint through a Pool.
 type Client struct {
-	endpoints  []string
+	endpoint   string
 	token      string
 	httpClient *http.Client
 }
@@ -50,23 +50,20 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("API error (status %d): %s", e.StatusCode, e.Message)
 }
 
-// NewClient establishes a new varmq API client using the given server configuration.
-func NewClient(cfg *config.Server) *Client {
+// NewClient establishes a new varmq API client for the given endpoint.
+func NewClient(endpoint, token string) *Client {
 	return &Client{
-		endpoints: cfg.GetEndpoints(),
-		token:     cfg.Token,
+		endpoint: endpoint,
+		token:    token,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
 }
 
-// PrimaryEndpoint returns the first endpoint, or empty string if none configured.
+// PrimaryEndpoint returns the endpoint this client talks to.
 func (c *Client) PrimaryEndpoint() string {
-	if len(c.endpoints) > 0 {
-		return c.endpoints[0]
-	}
-	return ""
+	return c.endpoint
 }
 
 // resolveOrigin returns origin if non-empty, otherwise falls back to primary endpoint.
@@ -117,8 +114,9 @@ func (c *Client) handleResponse(resp *http.Response, target interface{}) error {
 	}
 }
 
-// ListWorkersAt retrieves workers from a single endpoint and tags them with the origin.
-func (c *Client) ListWorkersAt(endpoint string) ([]WorkerSummary, error) {
+// ListWorkers retrieves workers from the client endpoint and tags them with the origin.
+func (c *Client) ListWorkers() ([]WorkerSummary, error) {
+	endpoint := c.endpoint
 	req, err := http.NewRequest(http.MethodGet, endpoint+"/workers", nil)
 	if err != nil {
 		return nil, err
@@ -139,50 +137,6 @@ func (c *Client) ListWorkersAt(endpoint string) ([]WorkerSummary, error) {
 	}
 
 	return workers, nil
-}
-
-// ListWorkers fans out to all configured endpoints concurrently and returns merged results.
-func (c *Client) ListWorkers() ([]WorkerSummary, error) {
-	if len(c.endpoints) == 1 {
-		return c.ListWorkersAt(c.endpoints[0])
-	}
-
-	type result struct {
-		workers []WorkerSummary
-		err     error
-		origin  string
-	}
-
-	var wg sync.WaitGroup
-	results := make([]result, len(c.endpoints))
-
-	for i, ep := range c.endpoints {
-		wg.Add(1)
-		go func(idx int, endpoint string) {
-			defer wg.Done()
-			w, err := c.ListWorkersAt(endpoint)
-			results[idx] = result{workers: w, err: err, origin: endpoint}
-		}(i, ep)
-	}
-
-	wg.Wait()
-
-	var merged []WorkerSummary
-	var errs []error
-
-	for _, r := range results {
-		if r.err != nil {
-			errs = append(errs, r.err)
-			continue
-		}
-		merged = append(merged, r.workers...)
-	}
-
-	if len(merged) == 0 && len(errs) > 0 {
-		return nil, fmt.Errorf("all endpoints failed: %v", errs[0])
-	}
-
-	return merged, nil
 }
 
 // GetWorker fetches detailed info and metrics for a single worker from the given origin endpoint.
@@ -252,74 +206,15 @@ func (c *Client) TuneConcurrency(workerName string, concurrency int, origin stri
 	return c.handleResponse(resp, nil)
 }
 
-// GetHealth checks the /health endpoint of all configured endpoints.
-// Returns nil if at least one endpoint is healthy.
+// GetHealth checks the /health endpoint of the client endpoint.
 func (c *Client) GetHealth() error {
-	var wg sync.WaitGroup
-	errs := make([]error, len(c.endpoints))
-
-	for i, ep := range c.endpoints {
-		wg.Add(1)
-		go func(idx int, endpoint string) {
-			defer wg.Done()
-			req, err := http.NewRequest(http.MethodGet, endpoint+"/health", nil)
-			if err != nil {
-				errs[idx] = err
-				return
-			}
-			resp, err := c.doRequest(req)
-			if err != nil {
-				errs[idx] = err
-				return
-			}
-			errs[idx] = c.handleResponse(resp, nil)
-		}(i, ep)
+	req, err := http.NewRequest(http.MethodGet, c.endpoint+"/health", nil)
+	if err != nil {
+		return err
 	}
-
-	wg.Wait()
-
-	// Healthy if any endpoint succeeds
-	for _, err := range errs {
-		if err == nil {
-			return nil
-		}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return err
 	}
-
-	return fmt.Errorf("all endpoints unreachable")
-}
-
-// GetHealthStatus returns per-endpoint health status. Used by the TUI to show individual pod health.
-func (c *Client) GetHealthStatus() map[string]bool {
-	status := make(map[string]bool, len(c.endpoints))
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, ep := range c.endpoints {
-		wg.Add(1)
-		go func(endpoint string) {
-			defer wg.Done()
-			req, err := http.NewRequest(http.MethodGet, endpoint+"/health", nil)
-			if err != nil {
-				mu.Lock()
-				status[endpoint] = false
-				mu.Unlock()
-				return
-			}
-			resp, err := c.doRequest(req)
-			if err != nil {
-				mu.Lock()
-				status[endpoint] = false
-				mu.Unlock()
-				return
-			}
-			err = c.handleResponse(resp, nil)
-			mu.Lock()
-			status[endpoint] = err == nil
-			mu.Unlock()
-		}(ep)
-	}
-
-	wg.Wait()
-	return status
+	return c.handleResponse(resp, nil)
 }

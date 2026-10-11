@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"strconv"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -12,18 +14,67 @@ import (
 
 var actionOrigin string
 
-func getClient() (*api.Client, error) {
+// fanOut runs fn against every pod of the active server (only --origin when
+// set) concurrently and prints one result line per pod. It fails if any pod
+// fails.
+func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load config (%w). run vartop server add first", err)
+		return fmt.Errorf("failed to load config (%w). run vartop server add first", err)
 	}
 
 	server, err := cfg.GetActiveServer(serverFlag)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return api.NewClient(server), nil
+	pool, err := api.PoolFor(server)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	clients := pool.Clients()
+	if actionOrigin != "" {
+		var match []*api.Client
+		for _, c := range clients {
+			if c.PrimaryEndpoint() == actionOrigin {
+				match = append(match, c)
+			}
+		}
+		if len(match) == 0 {
+			return fmt.Errorf("no varmq pod found for endpoint %s", actionOrigin)
+		}
+		clients = match
+	}
+	if len(clients) == 0 {
+		return fmt.Errorf("no varmq pods discovered")
+	}
+
+	fmt.Fprintf(w, "%s on %d pod(s)...\n", desc, len(clients))
+
+	errs := make([]error, len(clients))
+	var wg sync.WaitGroup
+	for i, c := range clients {
+		wg.Go(func() { errs[i] = fn(c) })
+	}
+	wg.Wait()
+
+	failed := 0
+	for i, c := range clients {
+		origin := config.ShortOrigin(c.PrimaryEndpoint())
+		if errs[i] != nil {
+			failed++
+			fmt.Fprintf(w, "  %s: failed: %v\n", origin, errs[i])
+			continue
+		}
+		fmt.Fprintf(w, "  %s: ok\n", origin)
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d of %d pod(s) failed", failed, len(clients))
+	}
+	return nil
 }
 
 var actionCmd = &cobra.Command{
@@ -42,23 +93,10 @@ var actionCmd = &cobra.Command{
 			return fmt.Errorf("invalid action '%s', must be one of: pause, resume, restart, stop", action)
 		}
 
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-
-		origin := actionOrigin
-		if origin == "" {
-			origin = client.PrimaryEndpoint()
-		}
-
-		fmt.Printf("Sending '%s' action to worker '%s' (%s)...\n", action, workerName, config.ShortOrigin(origin))
-		if err := client.Action(workerName, action, origin); err != nil {
-			return err
-		}
-
-		fmt.Println("Success.")
-		return nil
+		desc := fmt.Sprintf("Sending '%s' action to worker '%s'", action, workerName)
+		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
+			return c.Action(workerName, action, c.PrimaryEndpoint())
+		})
 	},
 }
 
@@ -75,29 +113,16 @@ var concurrencyCmd = &cobra.Command{
 			return fmt.Errorf("invalid concurrency number, must be a positive integer > 0")
 		}
 
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-
-		origin := actionOrigin
-		if origin == "" {
-			origin = client.PrimaryEndpoint()
-		}
-
-		fmt.Printf("Updating concurrency of worker '%s' to %d (%s)...\n", workerName, concurrency, config.ShortOrigin(origin))
-		if err := client.TuneConcurrency(workerName, concurrency, origin); err != nil {
-			return err
-		}
-
-		fmt.Println("Success.")
-		return nil
+		desc := fmt.Sprintf("Updating concurrency of worker '%s' to %d", workerName, concurrency)
+		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
+			return c.TuneConcurrency(workerName, concurrency, c.PrimaryEndpoint())
+		})
 	},
 }
 
 func init() {
-	actionCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target endpoint origin (empty uses primary endpoint)")
-	concurrencyCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target endpoint origin (empty uses primary endpoint)")
+	actionCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target only this pod endpoint (default: all pods)")
+	concurrencyCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target only this pod endpoint (default: all pods)")
 	rootCmd.AddCommand(actionCmd)
 	rootCmd.AddCommand(concurrencyCmd)
 }

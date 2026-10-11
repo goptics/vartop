@@ -16,6 +16,20 @@ type Pool struct {
 	clients map[string]*Client // endpoint URL -> client
 }
 
+// PoolFor builds a Pool over the discovery source matching the server
+// configuration: Kubernetes EndpointSlices for kubernetes servers, a fixed
+// list otherwise. Callers must Close the pool to stop any informer.
+func PoolFor(server *config.Server) (*Pool, error) {
+	if server.Kubernetes != nil {
+		source, err := discovery.NewKubernetes(*server.Kubernetes)
+		if err != nil {
+			return nil, err
+		}
+		return NewPool(source, server.Token), nil
+	}
+	return NewPool(discovery.NewStatic(server.GetEndpoints()), server.Token), nil
+}
+
 // NewPool returns a Pool backed by the given endpoint source.
 func NewPool(source discovery.Source, token string) *Pool {
 	return &Pool{
@@ -43,7 +57,7 @@ func (p *Pool) Clients() []*Client {
 		next[ep] = struct{}{}
 		c := p.clients[ep]
 		if c == nil {
-			c = NewClient(&config.Server{Endpoints: []string{ep}, Token: p.token})
+			c = NewClient(ep, p.token)
 			p.clients[ep] = c
 		}
 		clients = append(clients, c)

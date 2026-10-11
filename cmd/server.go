@@ -38,10 +38,13 @@ var serverListCmd = &cobra.Command{
 				// so the static endpoint health probe does not apply.
 				fmt.Printf("%s%s [kubernetes %s/%s]\n", prefix, name, server.Kubernetes.Context, server.Kubernetes.Namespace)
 			} else {
-				client := api.NewClient(server)
-				status := "Active"
-				if err := client.GetHealth(); err != nil {
-					status = "Inactive"
+				// Active if any configured endpoint is healthy.
+				status := "Inactive"
+				for _, ep := range server.GetEndpoints() {
+					if api.NewClient(ep, server.Token).GetHealth() == nil {
+						status = "Active"
+						break
+					}
 				}
 				fmt.Printf("%s%s [%s]\n", prefix, name, status)
 				fmt.Printf("    Endpoint: %s\n", server.DisplayEndpoint())
