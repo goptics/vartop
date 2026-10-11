@@ -22,6 +22,7 @@ func TestRegistryConcurrent(t *testing.T) {
 			defer wg.Done()
 			key := string(rune('a' + i%26))
 			r.add(key)
+			_ = r.Endpoints() // read concurrently with writers (race coverage)
 			r.remove(key)
 		}(i)
 	}
