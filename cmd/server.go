@@ -52,9 +52,8 @@ var serverListCmd = &cobra.Command{
 }
 
 var serverAddCmd = &cobra.Command{
-	Use:   "add <name> <endpoint> [token]",
-	Short: "Add a new varmq server connection (use commas for multi-pod endpoints)",
-	Args:  cobra.RangeArgs(2, 3),
+	Use:   "add",
+	Short: "Add a new varmq server connection interactively",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
@@ -65,40 +64,33 @@ var serverAddCmd = &cobra.Command{
 			}
 		}
 
-		name := args[0]
-		endpoint := args[1]
-		token := ""
-		if len(args) == 3 {
-			token = args[2]
+		server, err := config.PromptServer()
+		if err != nil {
+			return err
 		}
 
-		if _, exists := cfg.Servers[name]; exists {
-			return fmt.Errorf("server '%s' already exists", name)
+		if _, exists := cfg.Servers[server.Name]; exists {
+			return fmt.Errorf("server '%s' already exists", server.Name)
 		}
 
-		// Support comma-separated endpoints for multi-pod setups
-		endpoints := splitEndpoints(endpoint)
-
-		cfg.Servers[name] = &config.Server{
-			Name:      name,
-			Endpoints: endpoints,
-			Token:     token,
-			Interval:  5,
-		}
+		cfg.Servers[server.Name] = server
 
 		// Use as default if it's the first one
 		if len(cfg.Servers) == 1 {
-			cfg.DefaultServer = name
+			cfg.DefaultServer = server.Name
 		}
 
 		if err := config.Save(cfg); err != nil {
 			return err
 		}
 
-		if len(endpoints) > 1 {
-			fmt.Printf("Added server '%s' with %d endpoints\n", name, len(endpoints))
-		} else {
-			fmt.Printf("Added server '%s' (%s)\n", name, endpoint)
+		switch {
+		case server.Kubernetes != nil:
+			fmt.Printf("Added kubernetes server '%s' (%s/%s)\n", server.Name, server.Kubernetes.Context, server.Kubernetes.Namespace)
+		case len(server.Endpoints) > 1:
+			fmt.Printf("Added server '%s' with %d endpoints\n", server.Name, len(server.Endpoints))
+		default:
+			fmt.Printf("Added server '%s' (%s)\n", server.Name, server.Endpoints[0])
 		}
 		return nil
 	},

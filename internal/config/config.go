@@ -9,38 +9,61 @@ import (
 )
 
 const (
-	configDirName  = ".vartop"
-	configFileName = "settings.json"
+	configDirName  = "vartop"
+	configFileName = "config.json"
 )
 
 var (
 	ErrConfigNotFound = errors.New("config file not found")
 )
 
-// Server represents a single varmq server connection definition.
-type Server struct {
-	Name      string   `json:"name"`
-	Endpoints []string `json:"endpoints"` // One or more mux server endpoint URLs
-	Token     string   `json:"token,omitempty"`
-	Interval  int      `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+// KubernetesRef identifies a varmq mux endpoint discovered through Kubernetes.
+type KubernetesRef struct {
+	Context   string `json:"context"`
+	Namespace string `json:"namespace"`
+	Service   string `json:"service,omitempty"`
+	Selector  string `json:"selector,omitempty"`
+	Port      int    `json:"port,omitempty"` // 0 = first port from EndpointSlice
+	Path      string `json:"path,omitempty"` // default "/varmq"
 }
 
-// UnmarshalJSON handles backward compatibility: if the config file has the old
-// singular "endpoint" field instead of "endpoints", it migrates it transparently.
-func (s *Server) UnmarshalJSON(data []byte) error {
-	type Alias Server
-	aux := &struct {
-		Endpoint string `json:"endpoint"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
+// Server represents a single varmq server connection definition.
+type Server struct {
+	Name       string         `json:"name"`
+	Endpoints  []string       `json:"endpoints,omitempty"`
+	Kubernetes *KubernetesRef `json:"kubernetes,omitempty"`
+	Token      string         `json:"token,omitempty"`
+	Interval   int            `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+}
+
+// Validate checks that exactly one of Endpoints or Kubernetes is configured and
+// that the Kubernetes block, when present, has the required fields.
+func (s *Server) Validate() error {
+	hasEndpoints := len(s.Endpoints) > 0
+	hasKubernetes := s.Kubernetes != nil
+
+	if hasEndpoints && hasKubernetes {
+		return fmt.Errorf("server %q: exactly one of endpoints or kubernetes must be set, got both", s.Name)
 	}
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
+	if !hasEndpoints && !hasKubernetes {
+		return fmt.Errorf("server %q: exactly one of endpoints or kubernetes must be set, got neither", s.Name)
 	}
-	if len(s.Endpoints) == 0 && aux.Endpoint != "" {
-		s.Endpoints = []string{aux.Endpoint}
+
+	if hasKubernetes {
+		if s.Kubernetes.Context == "" {
+			return fmt.Errorf("server %q: kubernetes context is required", s.Name)
+		}
+		if s.Kubernetes.Namespace == "" {
+			return fmt.Errorf("server %q: kubernetes namespace is required", s.Name)
+		}
+		if s.Kubernetes.Service != "" && s.Kubernetes.Selector != "" {
+			return fmt.Errorf("server %q: exactly one of kubernetes service or selector must be set, got both", s.Name)
+		}
+		if s.Kubernetes.Service == "" && s.Kubernetes.Selector == "" {
+			return fmt.Errorf("server %q: exactly one of kubernetes service or selector must be set, got neither", s.Name)
+		}
 	}
+
 	return nil
 }
 
@@ -61,7 +84,7 @@ func (s *Server) DisplayEndpoint() string {
 	return fmt.Sprintf("%d pods", len(s.Endpoints))
 }
 
-// shortOrigin returns a compact display label for a given endpoint URL.
+// ShortOrigin returns a compact display label for a given endpoint URL.
 func ShortOrigin(endpoint string) string {
 	// Strip scheme
 	u := endpoint
@@ -80,63 +103,26 @@ func ShortOrigin(endpoint string) string {
 	return u
 }
 
-// Config represents the schema of the ~/.vartop.json configuration file.
+// Config represents the schema of the vartop configuration file.
 type Config struct {
 	DefaultServer string             `json:"default_server"`
 	Servers       map[string]*Server `json:"servers"`
 }
 
-// configFilePath returns the absolute path to the ~/.vartop/settings.json file.
-// Creates the .vartop directory if it doesn't exist.
-func configFilePath() (string, error) {
-	home, err := os.UserHomeDir()
+// configPath returns the absolute path to the vartop config file.
+func configPath() (string, error) {
+	dir, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("could not determine user home directory: %w", err)
+		return "", fmt.Errorf("could not determine user config directory: %w", err)
 	}
 
-	configDir := filepath.Join(home, configDirName)
-
-	// Create config directory if it doesn't exist
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	return filepath.Join(configDir, configFileName), nil
+	return filepath.Join(dir, configDirName, configFileName), nil
 }
 
-// Load reads the configuration from the ~/.vartop/settings.json file.
-// If the old ~/.vartop.json exists, it migrates it to the new location.
+// Load reads the configuration from os.UserConfigDir()/vartop/config.json.
+// If the file does not exist, it returns ErrConfigNotFound.
 func Load() (*Config, error) {
-	// Check for old config location and migrate if needed
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("could not determine user home directory: %w", err)
-	}
-
-	oldConfigPath := filepath.Join(home, ".vartop.json")
-	if _, err := os.Stat(oldConfigPath); err == nil {
-		// Old config exists, migrate it
-		newConfigPath, pathErr := configFilePath()
-		if pathErr != nil {
-			return nil, pathErr
-		}
-
-		// Read old config
-		data, err := os.ReadFile(oldConfigPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read old config: %w", err)
-		}
-
-		// Write to new location
-		if err := os.WriteFile(newConfigPath, data, 0600); err != nil {
-			return nil, fmt.Errorf("failed to migrate config: %w", err)
-		}
-
-		// Remove old config
-		os.Remove(oldConfigPath)
-	}
-
-	path, err := configFilePath()
+	path, err := configPath()
 	if err != nil {
 		return nil, err
 	}
@@ -158,14 +144,24 @@ func Load() (*Config, error) {
 		cfg.Servers = make(map[string]*Server)
 	}
 
+	for _, server := range cfg.Servers {
+		if err := server.Validate(); err != nil {
+			return nil, err
+		}
+	}
+
 	return &cfg, nil
 }
 
-// Save writes the configuration to the ~/.vartop.json file.
+// Save writes the configuration to os.UserConfigDir()/vartop/config.json.
 func Save(cfg *Config) error {
-	path, err := configFilePath()
+	path, err := configPath()
 	if err != nil {
 		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")

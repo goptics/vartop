@@ -2,8 +2,6 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -32,13 +30,41 @@ func PromptOnboarding() (*Config, error) {
 	fmt.Println(strings.Repeat("─", 60))
 	fmt.Println()
 
+	server, err := PromptServer()
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &Config{
+		DefaultServer: server.Name,
+		Servers: map[string]*Server{
+			server.Name: server,
+		},
+	}
+
+	if err := Save(cfg); err != nil {
+		return nil, fmt.Errorf("failed to save initial config: %w", err)
+	}
+
+	path, _ := configPath()
+	fmt.Printf("\n✓ Configuration saved to %s\n\n", path)
+	return cfg, nil
+}
+
+// PromptServer interactively asks the user for a single server configuration.
+func PromptServer() (*Server, error) {
 	var (
-		name     string
-		endpoint string
-		token    string
+		name          string
+		serverType    string
+		endpoint      string
+		context       string
+		namespace     string
+		discoveryType string
+		service       string
+		selector      string
+		token         string
 	)
 
-	// Create a new form
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
@@ -53,6 +79,16 @@ func PromptOnboarding() (*Config, error) {
 				}),
 		),
 		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Server Type").
+				Description("How should vartop discover this server?").
+				Options(
+					huh.NewOption("Static endpoints", "endpoints"),
+					huh.NewOption("Kubernetes", "kubernetes"),
+				).
+				Value(&serverType),
+		),
+		huh.NewGroup(
 			huh.NewInput().
 				Title("Mux Server Endpoint").
 				Description("The full URL to the varmq mux API").
@@ -62,10 +98,67 @@ func PromptOnboarding() (*Config, error) {
 					if s == "" {
 						return fmt.Errorf("endpoint cannot be empty")
 					}
-					// Keep simple validation for now. Can add URL parsing verification later.
 					return nil
 				}),
-		),
+		).WithHideFunc(func() bool { return serverType != "endpoints" }),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Kubernetes Context").
+				Description("The kubectl context to use").
+				Value(&context).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("context cannot be empty")
+					}
+					return nil
+				}),
+		).WithHideFunc(func() bool { return serverType != "kubernetes" }),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Kubernetes Namespace").
+				Description("The namespace containing the varmq service").
+				Value(&namespace).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("namespace cannot be empty")
+					}
+					return nil
+				}),
+		).WithHideFunc(func() bool { return serverType != "kubernetes" }),
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Kubernetes Discovery").
+				Description("Discover pods by service name or label selector").
+				Options(
+					huh.NewOption("Service", "service"),
+					huh.NewOption("Label selector", "selector"),
+				).
+				Value(&discoveryType),
+		).WithHideFunc(func() bool { return serverType != "kubernetes" }),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Service Name").
+				Description("The Kubernetes service name").
+				Value(&service).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("service cannot be empty")
+					}
+					return nil
+				}),
+		).WithHideFunc(func() bool { return serverType != "kubernetes" || discoveryType != "service" }),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Label Selector").
+				Description("e.g., app=varmq-mux").
+				Value(&selector).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("selector cannot be empty")
+					}
+					return nil
+				}),
+		).WithHideFunc(func() bool { return serverType != "kubernetes" || discoveryType != "selector" }),
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Auth Token (Optional)").
@@ -74,30 +167,35 @@ func PromptOnboarding() (*Config, error) {
 		),
 	)
 
-	err := form.Run()
-	if err != nil {
-		return nil, fmt.Errorf("onboarding interrupted: %w", err)
+	if err := form.Run(); err != nil {
+		return nil, fmt.Errorf("server prompt interrupted: %w", err)
 	}
 
-	cfg := &Config{
-		DefaultServer: name,
-		Servers: map[string]*Server{
-			name: {
-				Name:      name,
-				Endpoints: []string{endpoint},
-				Token:     token,
-				Interval:  5,
-			},
-		},
+	server := &Server{
+		Name:     name,
+		Token:    token,
+		Interval: 5,
 	}
 
-	err = Save(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to save initial config: %w", err)
+	switch serverType {
+	case "endpoints":
+		server.Endpoints = []string{endpoint}
+	case "kubernetes":
+		server.Kubernetes = &KubernetesRef{
+			Context:   context,
+			Namespace: namespace,
+		}
+		switch discoveryType {
+		case "service":
+			server.Kubernetes.Service = service
+		case "selector":
+			server.Kubernetes.Selector = selector
+		}
 	}
 
-	home, _ := os.UserHomeDir()
-	configPath := filepath.Join(home, configDirName, configFileName)
-	fmt.Printf("\n✓ Configuration saved to %s\n\n", configPath)
-	return cfg, nil
+	if err := server.Validate(); err != nil {
+		return nil, err
+	}
+
+	return server, nil
 }
