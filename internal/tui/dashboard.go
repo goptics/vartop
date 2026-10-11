@@ -15,6 +15,7 @@ import (
 // dashboardScreen is the worker list view and the base of the screen stack.
 type dashboardScreen struct {
 	table             table.Model
+	origins           []string // origin endpoint per table row, same order
 	inActionSelection bool
 	keys              dashboardKeyMap
 }
@@ -58,16 +59,16 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 			return nil
 		case key.Matches(msg, d.keys.Pause):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "pause")
+			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "pause")
 		case key.Matches(msg, d.keys.Resume):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "resume")
+			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "resume")
 		case key.Matches(msg, d.keys.Stop):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "stop")
+			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "stop")
 		case key.Matches(msg, d.keys.Restart):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "restart")
+			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "restart")
 		}
 		// Unhandled keys fall through so navigation still works while the
 		// action menu is open.
@@ -79,6 +80,10 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, d.keys.Refresh):
 		m.err = nil
 		m.sourceErr = false
+		if m.pool == nil {
+			// The source never came up (e.g. bad kube context): retry it.
+			return m.connect(m.server)
+		}
 		return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 	case key.Matches(msg, d.keys.Actions):
 		if len(d.table.Rows()) > 0 {
@@ -94,7 +99,7 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 			selectedRow := d.table.SelectedRow()
 			if selectedRow != nil {
 				workerName := selectedRow[0]
-				origin := m.workerOrigins[workerName]
+				origin := d.selectedWorkerOrigin()
 				m.pushScreen(newDetailScreen(workerName, origin))
 				return m.fetchWorkerDetailsCmd(workerName, origin)
 			}
@@ -121,16 +126,19 @@ func (d *dashboardScreen) selectedWorkerName() string {
 
 // selectedWorkerOrigin returns the origin endpoint for the currently selected
 // table row.
-func (d *dashboardScreen) selectedWorkerOrigin(m *Model) string {
-	if len(d.table.Rows()) == 0 {
+func (d *dashboardScreen) selectedWorkerOrigin() string {
+	i := d.table.Cursor()
+	if i < 0 || i >= len(d.origins) {
 		return ""
 	}
-	return m.workerOrigins[d.table.SelectedRow()[0]]
+	return d.origins[i]
 }
 
-// setRows replaces the table rows while retaining the current selection.
-func (d *dashboardScreen) setRows(rows []table.Row) {
+// setRows replaces the table rows (and their origins) while retaining the
+// current selection.
+func (d *dashboardScreen) setRows(rows []table.Row, origins []string) {
 	selected := d.table.Cursor()
+	d.origins = origins
 	d.table.SetRows(rows)
 	if selected < len(rows) {
 		d.table.SetCursor(selected)
@@ -184,6 +192,7 @@ func (d *dashboardScreen) rebuildTable(m *Model) {
 	// clear them to avoid a panic in table.New (rows will be repopulated by the next fetch).
 	if len(rows) > 0 && len(rows[0]) != len(columns) {
 		rows = nil
+		d.origins = nil
 		selected = 0
 	}
 
@@ -281,16 +290,19 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 // renderConnection describes how the active server is reached: kube
 // context/namespace for kubernetes servers, otherwise an endpoint.
 func (d *dashboardScreen) renderConnection(m *Model) string {
-	var label string
+	return lipgloss.NewStyle().Foreground(ColorSubtle).Render("→ " + m.connectionLabel())
+}
+
+// connectionLabel names what the dashboard is connected to.
+func (m *Model) connectionLabel() string {
 	switch {
 	case m.selectedPodOrigin != "":
-		label = config.ShortOrigin(m.selectedPodOrigin)
+		return config.ShortOrigin(m.selectedPodOrigin)
 	case m.server.Kubernetes != nil:
-		label = fmt.Sprintf("%s/%s", m.server.Kubernetes.Context, m.server.Kubernetes.Namespace)
+		return fmt.Sprintf("%s/%s", m.server.Kubernetes.Context, m.server.Kubernetes.Namespace)
 	default:
-		label = m.server.DisplayEndpoint()
+		return m.server.DisplayEndpoint()
 	}
-	return lipgloss.NewStyle().Foreground(ColorSubtle).Render("→ " + label)
 }
 
 // renderPodHealth summarizes healthy/total discovered pods with a status dot.
@@ -332,8 +344,17 @@ func (m *Model) poolEndpoints() []string {
 
 // renderBody renders the dashboard body content.
 func (d *dashboardScreen) renderBody(m *Model) string {
+	if m.pool == nil && m.err == nil {
+		connecting := lipgloss.NewStyle().
+			Foreground(ColorSubtle).
+			Padding(2, 2).
+			Border(lipgloss.RoundedBorder()).
+			Render(fmt.Sprintf("Connecting to %s...", m.connectionLabel()))
+		return lipgloss.Place(m.width, d.table.Height()+2, lipgloss.Center, lipgloss.Center, connecting)
+	}
+
 	if !m.isHealthy {
-		text := fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.server.DisplayEndpoint())
+		text := fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.connectionLabel())
 		// A source/pool construction error (e.g. a bad kube context) is more
 		// useful than the placeholder endpoint; show it instead.
 		if m.err != nil {

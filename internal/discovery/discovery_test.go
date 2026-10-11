@@ -1,59 +1,71 @@
 package discovery
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
-func TestRegistryConcurrent(t *testing.T) {
-	r := newRegistry()
+// TestK8sSourceEndpointsFromStore covers EndpointSlice churn: an address that
+// sits in two slices (controller rebalancing, rolling updates) must survive the
+// deletion of either slice, and reads stay consistent under concurrent writes.
+func TestK8sSourceEndpointsFromStore(t *testing.T) {
+	ready := true
+	slice := func(name string, addrs ...string) *discoveryv1.EndpointSlice {
+		eps := make([]discoveryv1.Endpoint, len(addrs))
+		for i, a := range addrs {
+			eps[i] = discoveryv1.Endpoint{Addresses: []string{a}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}
+		}
+		return &discoveryv1.EndpointSlice{
+			ObjectMeta:  metav1.ObjectMeta{Name: name, Namespace: "default"},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints:   eps,
+		}
+	}
+
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	k := &k8sSource{store: store, path: "/varmq", fixedPort: 8080}
+
+	a := slice("a", "10.0.0.2", "10.0.0.1")
+	b := slice("b", "10.0.0.2", "10.0.0.3")
+	_ = store.Add(a)
+	_ = store.Add(b)
+
+	want := []string{"http://10.0.0.1:8080/varmq", "http://10.0.0.2:8080/varmq", "http://10.0.0.3:8080/varmq"}
+	if got := k.Endpoints(); !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	_ = store.Delete(a)
+	want = []string{"http://10.0.0.2:8080/varmq", "http://10.0.0.3:8080/varmq"}
+	if got := k.Endpoints(); !slices.Equal(got, want) {
+		t.Fatalf("after deleting overlapping slice: got %v, want %v", got, want)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			key := string(rune('a' + i%26))
-			r.add(key)
-			_ = r.Endpoints() // read concurrently with writers (race coverage)
-			r.remove(key)
+			s := slice(fmt.Sprintf("s%d", i), fmt.Sprintf("10.1.0.%d", i))
+			_ = store.Add(s)
+			_ = k.Endpoints() // read concurrently with writers (race coverage)
+			_ = store.Delete(s)
 		}(i)
 	}
 	wg.Wait()
-
-	if got := r.Endpoints(); len(got) != 0 {
-		t.Fatalf("want empty after churn, got %v", got)
-	}
-
-	r.add("http://b:8080/varmq")
-	r.add("http://a:8080/varmq")
-	r.add("http://c:8080/varmq")
-	r.remove("http://b:8080/varmq")
-
-	want := []string{"http://a:8080/varmq", "http://c:8080/varmq"}
-	endpoints := r.Endpoints()
-	if len(endpoints) != len(want) {
-		t.Fatalf("got %v, want %v", endpoints, want)
-	}
-	for i := range want {
-		if endpoints[i] != want[i] {
-			t.Fatalf("not sorted: got %v, want %v", endpoints, want)
-		}
-	}
-
-	// Snapshot must not alias internal map.
-	before := r.Endpoints()
-	r.add("http://a:8080/varmq") // no-op duplicate
-	r.remove("http://a:8080/varmq")
-	if before[0] != "http://a:8080/varmq" {
-		t.Fatal("snapshot aliased internal map")
+	if got := k.Endpoints(); !slices.Equal(got, want) {
+		t.Fatalf("after churn: got %v, want %v", got, want)
 	}
 }
 

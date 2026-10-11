@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -22,7 +24,7 @@ const syncTimeout = 10 * time.Second
 
 // k8sSource watches ready EndpointSlice endpoints and exposes their URLs.
 type k8sSource struct {
-	reg       *registry
+	store     cache.Store // informer cache of EndpointSlices; thread-safe
 	path      string
 	fixedPort int
 	stopCh    chan struct{}
@@ -54,7 +56,6 @@ func NewKubernetes(ref config.KubernetesRef) (Source, error) {
 	}
 
 	k := &k8sSource{
-		reg:       newRegistry(),
 		path:      path,
 		fixedPort: ref.Port,
 		stopCh:    make(chan struct{}),
@@ -67,10 +68,13 @@ func NewKubernetes(ref config.KubernetesRef) (Source, error) {
 			opts.LabelSelector = sel.String()
 		}),
 	).Discovery().V1().EndpointSlices().Informer()
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { k.apply(nil, obj) },
-		UpdateFunc: func(oldObj, newObj any) { k.apply(oldObj, newObj) },
-		DeleteFunc: func(obj any) { k.apply(obj, nil) },
+	k.store = informer.GetStore()
+
+	// Remember the latest list/watch failure (RBAC forbidden, unreachable API
+	// server) so a sync timeout can report the real cause.
+	var lastErr atomic.Pointer[error]
+	_ = informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
+		lastErr.Store(&err)
 	})
 
 	// Start the informer, then fail fast if the cache never syncs.
@@ -79,6 +83,9 @@ func NewKubernetes(ref config.KubernetesRef) (Source, error) {
 	defer cancel()
 	if !cache.WaitForCacheSync(syncCtx.Done(), informer.HasSynced) {
 		close(k.stopCh)
+		if err := lastErr.Load(); err != nil {
+			return nil, fmt.Errorf("EndpointSlice watcher for %q did not sync within %s: %w", selector, syncTimeout, *err)
+		}
 		return nil, fmt.Errorf("EndpointSlice watcher for %q did not sync within %s", selector, syncTimeout)
 	}
 
@@ -94,37 +101,6 @@ func kubeClient(contextName string) (kubernetes.Interface, error) {
 		return nil, fmt.Errorf("loading kubeconfig: %w", err)
 	}
 	return kubernetes.NewForConfig(restConfig)
-}
-
-// apply updates the registry for a slice add/update/delete: URLs contributed
-// by the old object are removed, URLs contributed by the new object are added.
-//
-// shortcut: the registry is a set, not reference-counted, so an address
-// present in two slices is dropped when either slice is removed even while the
-// other still contributes it; upgrade to ref-counting if overlapping slices
-// become common.
-func (k *k8sSource) apply(oldObj, newObj any) {
-	if old := endpointSliceOf(oldObj); old != nil {
-		for _, u := range k.urls(old) {
-			k.reg.remove(u)
-		}
-	}
-	if cur := endpointSliceOf(newObj); cur != nil {
-		for _, u := range k.urls(cur) {
-			k.reg.add(u)
-		}
-	}
-}
-
-func endpointSliceOf(obj any) *discoveryv1.EndpointSlice {
-	if tomb, ok := obj.(cache.DeletedFinalStateUnknown); ok {
-		obj = tomb.Obj
-	}
-	slice, ok := obj.(*discoveryv1.EndpointSlice)
-	if !ok {
-		return nil
-	}
-	return slice
 }
 
 // urls returns the endpoint URLs a slice contributes; nil when the slice has
@@ -159,7 +135,27 @@ func (k *k8sSource) urls(slice *discoveryv1.EndpointSlice) []string {
 	return urls
 }
 
-func (k *k8sSource) Endpoints() []string { return k.reg.Endpoints() }
+// Endpoints recomputes the ready URLs from every cached slice. Deriving the set
+// from the store (instead of applying add/remove events) keeps an address that
+// moves between slices, or appears in two at once, from being dropped.
+func (k *k8sSource) Endpoints() []string {
+	seen := make(map[string]struct{})
+	for _, obj := range k.store.List() {
+		slice, ok := obj.(*discoveryv1.EndpointSlice)
+		if !ok {
+			continue
+		}
+		for _, u := range k.urls(slice) {
+			seen[u] = struct{}{}
+		}
+	}
+	urls := make([]string, 0, len(seen))
+	for u := range seen {
+		urls = append(urls, u)
+	}
+	sort.Strings(urls)
+	return urls
+}
 
 func (k *k8sSource) Close() error {
 	select {

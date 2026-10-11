@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/goptics/varmq/cmd/vartop/internal/api"
@@ -35,9 +36,17 @@ func (e errMsg) Error() string { return e.err.Error() }
 // serverSwitchMsg carries the result of building a pool for a newly selected
 // server: either a ready pool, or the construction error.
 type serverSwitchMsg struct {
+	seq  int // matches Model.switchSeq for the latest requested build
 	srv  *config.Server
 	pool *api.Pool
 	err  error
+}
+
+// scopedMsg tags a result with the pool that produced it; Update drops it if
+// that pool is no longer active.
+type scopedMsg struct {
+	pool *api.Pool
+	msg  tea.Msg
 }
 
 // List item types

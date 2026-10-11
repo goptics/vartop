@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -84,7 +86,6 @@ func (s *switcherScreen) enter(m *Model) tea.Cmd {
 	case switchPodItem:
 		m.popScreen()
 		m.err = nil
-		m.workerOrigins = make(map[string]string)
 		m.selectedPodOrigin = item.origin
 		m.showNodeColumn = false
 		m.dashboardScreen().rebuildTable(m)
@@ -97,7 +98,10 @@ func (s *switcherScreen) enter(m *Model) tea.Cmd {
 // shown only under the currently expanded server.
 func (s *switcherScreen) rebuild(m *Model) {
 	var items []list.Item
-	for name, srv := range m.cfg.Servers {
+	// Sorted: map order is random and rebuild runs on every health tick, so an
+	// unsorted list would reshuffle under the cursor.
+	for _, name := range slices.Sorted(maps.Keys(m.cfg.Servers)) {
+		srv := m.cfg.Servers[name]
 		endpoints := srv.GetEndpoints()
 		podCount := len(endpoints)
 

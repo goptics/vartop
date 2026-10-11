@@ -48,11 +48,13 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 	}
 
 	rows := make([]table.Row, 0, len(msg))
-	origins := make(map[string]string, len(msg))
+	// One origin per row: every pod in a cluster runs the same worker names,
+	// so the name alone cannot route an action to the right pod.
+	origins := make([]string, 0, len(msg))
 
 	for _, w := range msg {
 		origin := config.ShortOrigin(w.Origin)
-		origins[w.Name] = w.Origin
+		origins = append(origins, w.Origin)
 
 		if m.showNodeColumn {
 			rows = append(rows, table.Row{
@@ -76,10 +78,8 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 		}
 	}
 
-	m.workerOrigins = origins
-
 	// Retain selection if possible
-	m.dashboardScreen().setRows(rows)
+	m.dashboardScreen().setRows(rows, origins)
 
 	return nil
 }
@@ -104,6 +104,13 @@ func (m *Model) handleError(msg errMsg) tea.Cmd {
 // handleServerSwitch applies the pool built for a newly selected server.
 // Construction errors keep the current pool and surface through the error display.
 func (m *Model) handleServerSwitch(msg serverSwitchMsg) tea.Cmd {
+	// A newer switch was requested while this one was building: discard it.
+	if msg.seq != m.switchSeq {
+		if msg.pool != nil {
+			_ = msg.pool.Close()
+		}
+		return nil
+	}
 	if msg.err != nil {
 		m.err = msg.err
 		m.sourceErr = true

@@ -26,11 +26,13 @@ type Model struct {
 	height     int
 	isHealthy  bool
 
+	// switchSeq numbers pool builds; only the latest serverSwitchMsg is applied.
+	switchSeq int
+
 	// Multi-endpoint state
-	workerOrigins     map[string]string // workerName -> origin endpoint (for action routing)
-	podHealth         map[string]bool   // per-endpoint health status
-	selectedPodOrigin string            // empty = merged view; non-empty = single pod view
-	showNodeColumn    bool              // false when viewing a single pod (Node column hidden)
+	podHealth         map[string]bool // per-endpoint health status
+	selectedPodOrigin string          // empty = merged view; non-empty = single pod view
+	showNodeColumn    bool            // false when viewing a single pod (Node column hidden)
 
 	screens  []screen
 	switcher *switcherScreen
@@ -45,24 +47,14 @@ func sourceFor(server *config.Server) (discovery.Source, error) {
 	return discovery.NewStatic(server.GetEndpoints()), nil
 }
 
-// NewModel initializes the application state.
+// NewModel initializes the application state. The pool is built in the
+// background by Init (a Kubernetes source may take seconds to sync), so the UI
+// renders a connecting state immediately instead of a blank terminal.
 func NewModel(cfg *config.Config, server *config.Server) *Model {
-	// Construction errors (e.g. a failing Kubernetes watcher) are surfaced
-	// through the TUI's existing error display instead of aborting startup.
-	source, err := sourceFor(server)
-	var pool *api.Pool
-	if err == nil {
-		pool = api.NewPool(source, server.Token)
-	}
-
 	m := &Model{
 		cfg:               cfg,
 		server:            server,
-		pool:              pool,
-		err:               err,
-		sourceErr:         err != nil,
 		isHealthy:         true, // Assume healthy initially
-		workerOrigins:     make(map[string]string),
 		podHealth:         make(map[string]bool),
 		selectedPodOrigin: "",
 		showNodeColumn:    true,
@@ -81,12 +73,21 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
-		m.checkHealthCmd(),
+		m.switchServerCmd(m.server, m.switchSeq),
 		m.tickCmd(),
 	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Drop results produced by a pool that has since been replaced, so a slow
+	// reply from the previous server never overwrites the current one.
+	if s, ok := msg.(scopedMsg); ok {
+		if s.pool != m.pool {
+			return m, nil
+		}
+		msg = s.msg
+	}
+
 	// Key messages are handled entirely by the active screen, which also
 	// forwards navigation keys to its embedded component (table/list).
 	if key, ok := msg.(tea.KeyMsg); ok {
@@ -140,13 +141,19 @@ func (m *Model) selectServer(serverName string) tea.Cmd {
 		m.err = err
 		return nil
 	}
-	return m.switchServerCmd(srv)
+	return m.connect(srv)
+}
+
+// connect builds a fresh pool for srv in the background. Each call supersedes
+// any build still in flight.
+func (m *Model) connect(srv *config.Server) tea.Cmd {
+	m.switchSeq++
+	return m.switchServerCmd(srv, m.switchSeq)
 }
 
 // resetPodView returns to the merged multi-pod view for a server.
 func (m *Model) resetPodView() {
 	m.err = nil
-	m.workerOrigins = make(map[string]string)
 	m.selectedPodOrigin = ""
 	m.showNodeColumn = true
 	m.dashboardScreen().rebuildTable(m)
