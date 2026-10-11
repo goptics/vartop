@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -21,45 +22,54 @@ type detailScreen struct {
 	inAction  bool // action mode
 	scrollY   int  // vertical scroll offset
 	maxScroll int  // maximum scroll value (0 if no overflow)
+
+	keys detailKeyMap
 }
 
 func newDetailScreen(workerName, origin string) *detailScreen {
-	return &detailScreen{workerName: workerName, origin: origin}
+	return &detailScreen{workerName: workerName, origin: origin, keys: newDetailKeyMap()}
 }
 
 func (d *detailScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return nil
 	}
-
 	if d.inAction {
-		switch key.String() {
-		case "ctrl+c", "q":
-			return tea.Quit
-		case "esc":
-			d.inAction = false
-			return nil
-		case "p":
-			d.inAction = false
-			return m.actionCurrentWorkerCmd(d.workerName, d.origin, "pause")
-		case "r":
-			d.inAction = false
-			return m.actionCurrentWorkerCmd(d.workerName, d.origin, "resume")
-		case "s":
-			d.inAction = false
-			return m.actionCurrentWorkerCmd(d.workerName, d.origin, "stop")
-		case "R":
-			d.inAction = false
-			return m.actionCurrentWorkerCmd(d.workerName, d.origin, "restart")
-		}
-		return nil
+		return d.handleActionKey(m, keyMsg)
 	}
+	return d.handleKey(m, keyMsg)
+}
 
-	switch key.String() {
-	case "ctrl+c", "q":
+// handleActionKey processes keys while the action menu is open.
+func (d *detailScreen) handleActionKey(m *Model, msg tea.KeyMsg) tea.Cmd {
+	switch {
+	case key.Matches(msg, d.keys.Quit):
 		return tea.Quit
-	case "esc":
+	case key.Matches(msg, d.keys.Back):
+		d.inAction = false
+	case key.Matches(msg, d.keys.Pause):
+		d.inAction = false
+		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "pause")
+	case key.Matches(msg, d.keys.Resume):
+		d.inAction = false
+		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "resume")
+	case key.Matches(msg, d.keys.Stop):
+		d.inAction = false
+		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "stop")
+	case key.Matches(msg, d.keys.Restart):
+		d.inAction = false
+		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "restart")
+	}
+	return nil
+}
+
+// handleKey processes keys in the normal (non-action) mode.
+func (d *detailScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
+	switch {
+	case key.Matches(msg, d.keys.Quit):
+		return tea.Quit
+	case key.Matches(msg, d.keys.Back):
 		m.popScreen()
 		d.details = nil
 		d.workerName = ""
@@ -67,47 +77,39 @@ func (d *detailScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
 		d.inAction = false
 		d.scrollY = 0 // Reset scroll
 		return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
-	case "a", "A":
+	case key.Matches(msg, d.keys.Actions):
 		if d.workerName != "" {
 			d.inAction = !d.inAction
 		}
-		return nil
-	case "r":
+	case key.Matches(msg, d.keys.Refresh):
 		if d.workerName != "" {
 			d.details = nil // Clear to show loading state
 			d.scrollY = 0
 			d.maxScroll = 0
 			return m.fetchWorkerDetailsCmd(d.workerName, d.origin)
 		}
-		return nil
-	case "up", "k":
+	case key.Matches(msg, d.keys.Up):
 		if d.scrollY > 0 {
 			d.scrollY--
 		}
-		return nil
-	case "down", "j":
+	case key.Matches(msg, d.keys.Down):
 		if d.scrollY < d.maxScroll {
 			d.scrollY++
 		}
-		return nil
-	case "pgup", "b":
+	case key.Matches(msg, d.keys.PageUp):
 		d.scrollY -= 10
 		if d.scrollY < 0 {
 			d.scrollY = 0
 		}
-		return nil
-	case "pgdown", " ":
+	case key.Matches(msg, d.keys.PageDown):
 		d.scrollY += 10
 		if d.scrollY > d.maxScroll {
 			d.scrollY = d.maxScroll
 		}
-		return nil
-	case "home", "g":
+	case key.Matches(msg, d.keys.Home):
 		d.scrollY = 0
-		return nil
-	case "end", "G":
+	case key.Matches(msg, d.keys.End):
 		d.scrollY = d.maxScroll
-		return nil
 	}
 	return nil
 }
@@ -328,27 +330,10 @@ func (d *detailScreen) renderFooter(m *Model) string {
 		pollInfo = fmt.Sprintf("↓ %d | Polling: %ds", d.scrollY, interval)
 	}
 
-	// Key bindings
-	var footerKeys string
-	if d.inAction {
-		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
-			HelpKeyStyle.Render("p"), HelpDescStyle.Render(" pause • "),
-			HelpKeyStyle.Render("r"), HelpDescStyle.Render(" resume • "),
-			HelpKeyStyle.Render("s"), HelpDescStyle.Render(" stop • "),
-			HelpKeyStyle.Render("R"), HelpDescStyle.Render(" restart"),
-		)
-	} else {
-		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
-			HelpKeyStyle.Render("a"), HelpDescStyle.Render(" actions • "),
-			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" scroll • "),
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit"),
-		)
-	}
+	keysView := helpFooter(d.keyMap(), m.width-lipgloss.Width(pollInfo)-4)
 
 	// Create footer layout
-	leftCol := lipgloss.NewStyle().Width(m.width - lipgloss.Width(pollInfo) - 2).Render(footerKeys)
+	leftCol := lipgloss.NewStyle().Width(m.width - lipgloss.Width(pollInfo) - 2).Render(keysView)
 	footerContent := lipgloss.JoinHorizontal(lipgloss.Right, leftCol, pollInfo)
 
 	return FooterStyle.Width(m.width).Padding(0, 1).Render(footerContent)

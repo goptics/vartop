@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -16,6 +17,7 @@ import (
 type switcherScreen struct {
 	switcher list.Model
 	expanded string
+	keys     switcherKeyMap
 }
 
 func newSwitcherScreen() *switcherScreen {
@@ -23,15 +25,15 @@ func newSwitcherScreen() *switcherScreen {
 	l.Title = "Switch"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
-	return &switcherScreen{switcher: l}
+	return &switcherScreen{switcher: l, keys: newSwitcherKeyMap()}
 }
 
 func (s *switcherScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
-	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
-		case "ctrl+c", "q":
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch {
+		case key.Matches(keyMsg, s.keys.Quit):
 			return tea.Quit
-		case "esc":
+		case key.Matches(keyMsg, s.keys.Close):
 			if s.expanded != "" {
 				s.expanded = ""
 				s.rebuild(m)
@@ -39,13 +41,13 @@ func (s *switcherScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
 			}
 			m.popScreen()
 			return nil
-		case "backspace", "h":
+		case key.Matches(keyMsg, s.keys.Collapse):
 			if s.expanded != "" {
 				s.expanded = ""
 				s.rebuild(m)
 			}
 			return nil
-		case "enter":
+		case key.Matches(keyMsg, s.keys.Select):
 			return s.enter(m)
 		}
 	}
@@ -137,23 +139,9 @@ func (s *switcherScreen) View(m *Model) string {
 	switcherContent := s.switcher.View()
 
 	// Custom footer for switcher
-	var footerKeys string
-	if s.expanded != "" {
-		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
-			HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" select • "),
-			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" collapse • "),
-			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" navigate"),
-		)
-	} else {
-		footerKeys = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit • "),
-			HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" expand/select • "),
-			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" navigate"),
-		)
-	}
+	keysView := helpFooter(s.keyMap(), m.width-4)
 
-	footer := FooterStyle.Width(m.width).Padding(0, 1).Render(footerKeys)
+	footer := FooterStyle.Width(m.width).Padding(0, 1).Render(keysView)
 
 	// Calculate spacing
 	switcherHeight := lipgloss.Height(switcherContent)

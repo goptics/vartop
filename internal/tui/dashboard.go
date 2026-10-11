@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -15,6 +16,7 @@ import (
 type dashboardScreen struct {
 	table             table.Model
 	inActionSelection bool
+	keys              dashboardKeyMap
 }
 
 func newDashboardScreen() *dashboardScreen {
@@ -35,7 +37,7 @@ func newDashboardScreen() *dashboardScreen {
 	)
 	t.SetStyles(TableStyles())
 
-	return &dashboardScreen{table: t}
+	return &dashboardScreen{table: t, keys: newDashboardKeyMap()}
 }
 
 func (d *dashboardScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
@@ -50,20 +52,20 @@ func (d *dashboardScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
 
 func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 	if d.inActionSelection {
-		switch msg.String() {
-		case "esc":
+		switch {
+		case key.Matches(msg, d.keys.Back):
 			d.inActionSelection = false
 			return nil
-		case "p":
+		case key.Matches(msg, d.keys.Pause):
 			d.inActionSelection = false
 			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "pause")
-		case "r":
+		case key.Matches(msg, d.keys.Resume):
 			d.inActionSelection = false
 			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "resume")
-		case "s":
+		case key.Matches(msg, d.keys.Stop):
 			d.inActionSelection = false
 			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "stop")
-		case "R":
+		case key.Matches(msg, d.keys.Restart):
 			d.inActionSelection = false
 			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(m), "restart")
 		}
@@ -71,21 +73,21 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 		// action menu is open.
 	}
 
-	switch msg.String() {
-	case "ctrl+c", "q":
+	switch {
+	case key.Matches(msg, d.keys.Quit):
 		return tea.Quit
-	case "r":
+	case key.Matches(msg, d.keys.Refresh):
 		m.err = nil
 		return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
-	case "a", "A":
+	case key.Matches(msg, d.keys.Actions):
 		if len(d.table.Rows()) > 0 {
 			d.inActionSelection = !d.inActionSelection
 		}
 		return nil
-	case "tab":
+	case key.Matches(msg, d.keys.Switch):
 		m.pushScreen(m.switcher)
 		return nil
-	case "enter":
+	case key.Matches(msg, d.keys.Detail):
 		// Navigate to worker detail view
 		if m.isHealthy && len(d.table.Rows()) > 0 {
 			selectedRow := d.table.SelectedRow()
@@ -96,9 +98,6 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 				return m.fetchWorkerDetailsCmd(workerName, origin)
 			}
 		}
-		return nil
-	case "esc":
-		// Return to dashboard from detail view (detail handles its own esc).
 		return nil
 	}
 
@@ -231,7 +230,8 @@ func (d *dashboardScreen) View(m *Model) string {
 	return BaseStyle.Render(fullContent)
 }
 
-// renderHeader renders the dashboard header.
+// renderHeader renders the dashboard status bar: server name, connection
+// (kube context/namespace or endpoint), pod health and the last refresh time.
 func (d *dashboardScreen) renderHeader(m *Model) string {
 	var statusStyle lipgloss.Style
 	var statusText string
@@ -247,39 +247,14 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 
 	title := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
 
-	// Build endpoint/pod info
-	var endpointInfo string
-	endpoints := m.server.GetEndpoints()
-	if m.selectedPodOrigin != "" {
-		// Single pod view
-		short := config.ShortOrigin(m.selectedPodOrigin)
-		var dot string
-		if m.podHealth[m.selectedPodOrigin] {
-			dot = StatusStyleRunning.Render("●")
-		} else {
-			dot = StatusStyleStopped.Render("○")
-		}
-		endpointInfo = lipgloss.NewStyle().Foreground(ColorSubtle).Render(
-			fmt.Sprintf("→ %s %s", dot, short),
-		)
-	} else if len(endpoints) > 1 {
-		// Merged view: compact summary
-		total := len(endpoints)
-		healthy := 0
-		for _, ep := range endpoints {
-			if m.podHealth[ep] {
-				healthy++
-			}
-		}
-		endpointInfo = lipgloss.NewStyle().Foreground(ColorSubtle).Render(
-			fmt.Sprintf("→ %d pods, %d healthy", total, healthy),
-		)
-	} else {
-		endpointInfo = lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("→ %s", m.server.DisplayEndpoint()))
-	}
-
-	// Left side: title, status, endpoint
-	leftContent := lipgloss.JoinHorizontal(lipgloss.Left, title, statusIndicator, " ", endpointInfo)
+	leftContent := lipgloss.JoinHorizontal(lipgloss.Left,
+		title,
+		statusIndicator,
+		"  ",
+		d.renderConnection(m),
+		"  ",
+		d.renderPodHealth(m),
+	)
 
 	// Updated time in top-right
 	lastUpdateStr := "Never"
@@ -299,9 +274,59 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 		updatedInfo,
 	)
 
-	return lipgloss.NewStyle().
-		Padding(1, 2).
-		Render(headerContent)
+	return StatusBarStyle.Render(headerContent)
+}
+
+// renderConnection describes how the active server is reached: kube
+// context/namespace for kubernetes servers, otherwise an endpoint.
+func (d *dashboardScreen) renderConnection(m *Model) string {
+	var label string
+	switch {
+	case m.selectedPodOrigin != "":
+		label = config.ShortOrigin(m.selectedPodOrigin)
+	case m.server.Kubernetes != nil:
+		label = fmt.Sprintf("%s/%s", m.server.Kubernetes.Context, m.server.Kubernetes.Namespace)
+	default:
+		label = m.server.DisplayEndpoint()
+	}
+	return lipgloss.NewStyle().Foreground(ColorSubtle).Render("→ " + label)
+}
+
+// renderPodHealth summarizes healthy/total discovered pods with a status dot.
+func (d *dashboardScreen) renderPodHealth(m *Model) string {
+	endpoints := m.poolEndpoints()
+	total := len(endpoints)
+	healthy := 0
+	for _, ep := range endpoints {
+		if m.podHealth[ep] {
+			healthy++
+		}
+	}
+
+	dot := StatusStyleStopped.Render("○")
+	switch {
+	case total > 0 && healthy == total:
+		dot = StatusStyleRunning.Render("●")
+	case healthy > 0:
+		dot = StatusStyleWarning.Render("◐")
+	}
+
+	text := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("%d/%d pods", healthy, total))
+	return lipgloss.JoinHorizontal(lipgloss.Left, dot, " ", text)
+}
+
+// poolEndpoints returns the endpoint URL of every discovered pod. The pool
+// reconciles against the active discovery source (static or kubernetes).
+func (m *Model) poolEndpoints() []string {
+	if m.pool == nil {
+		return nil
+	}
+	clients := m.pool.Clients()
+	endpoints := make([]string, 0, len(clients))
+	for _, c := range clients {
+		endpoints = append(endpoints, c.PrimaryEndpoint())
+	}
+	return endpoints
 }
 
 // renderBody renders the dashboard body content.
@@ -330,33 +355,14 @@ func (d *dashboardScreen) renderBody(m *Model) string {
 
 // renderFooter renders the dashboard footer.
 func (d *dashboardScreen) renderFooter(m *Model) string {
-	// Only polling info now (updated time moved to header)
+	// Only polling info now (updated time moved to status bar)
 	interval := m.server.Interval
 	if interval <= 0 {
 		interval = 5
 	}
 	pollInfo := fmt.Sprintf("Polling: %ds", interval)
 
-	// Key bindings
-	var keysView string
-	if d.inActionSelection {
-		keysView = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("esc"), HelpDescStyle.Render(" back • "),
-			HelpKeyStyle.Render("p"), HelpDescStyle.Render(" pause • "),
-			HelpKeyStyle.Render("r"), HelpDescStyle.Render(" resume • "),
-			HelpKeyStyle.Render("s"), HelpDescStyle.Render(" stop • "),
-			HelpKeyStyle.Render("R"), HelpDescStyle.Render(" restart"),
-		)
-	} else {
-		keysView = lipgloss.JoinHorizontal(lipgloss.Center,
-			HelpKeyStyle.Render("↑/↓"), HelpDescStyle.Render(" move • "),
-			HelpKeyStyle.Render("enter"), HelpDescStyle.Render(" view details • "),
-			HelpKeyStyle.Render("a"), HelpDescStyle.Render(" actions • "),
-			HelpKeyStyle.Render("r"), HelpDescStyle.Render(" refresh • "),
-			HelpKeyStyle.Render("tab"), HelpDescStyle.Render(" switch • "),
-			HelpKeyStyle.Render("q"), HelpDescStyle.Render(" quit"),
-		)
-	}
+	keysView := helpFooter(d.keyMap(), m.width-lipgloss.Width(pollInfo)-4)
 
 	// Create footer layout
 	leftCol := lipgloss.NewStyle().Width(m.width - lipgloss.Width(pollInfo) - 2).Render(keysView)

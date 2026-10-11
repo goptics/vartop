@@ -27,6 +27,13 @@ var (
 			Padding(0, 1).
 			MarginBottom(1)
 
+	// StatusBarStyle is the dashboard's top status band: server, connection,
+	// pod health and last refresh, on the palette's header background.
+	StatusBarStyle = lipgloss.NewStyle().
+			Background(ColorHeaderBg).
+			Foreground(ColorFg).
+			Padding(1, 2)
+
 	TitleStyle = lipgloss.NewStyle().
 			Foreground(ColorBg).
 			Background(ColorHighlight).
