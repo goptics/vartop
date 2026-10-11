@@ -216,6 +216,10 @@ var serverSetCmd = &cobra.Command{
 			return fmt.Errorf("unknown key '%s'. valid keys: endpoint, token, interval", key)
 		}
 
+		if err := server.Validate(); err != nil {
+			return err
+		}
+
 		if err := config.Save(cfg); err != nil {
 			return err
 		}
