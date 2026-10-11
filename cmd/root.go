@@ -42,9 +42,18 @@ concurrencies, and metrics from varmq mux servers.`,
 		m := tui.NewModel(cfg, server)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 
-		_, err = p.Run()
+		finalModel, err := p.Run()
 		// Quit tears down the pool's discovery source (stops any informer).
-		if closeErr := m.Close(); err == nil {
+		// Bubbletea swaps in a model copy on every Update (value receivers), so
+		// only the final model holds the current pool after a server switch.
+		var closeErr error
+		switch m := finalModel.(type) {
+		case tui.Model:
+			closeErr = m.Close()
+		case *tui.Model:
+			closeErr = m.Close()
+		}
+		if err == nil {
 			err = closeErr
 		}
 		return err
