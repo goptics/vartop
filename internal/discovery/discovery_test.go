@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -172,5 +173,25 @@ func TestNewKubernetesBadContext(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("NewKubernetes hung on nonexistent context")
+	}
+}
+
+func TestK8sSourcePodName(t *testing.T) {
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	_ = store.Add(&discoveryv1.EndpointSlice{
+		ObjectMeta:  metav1.ObjectMeta{Name: "s", Namespace: "default"},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{
+			{Addresses: []string{"10.0.0.1"}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Name: "app-a"}},
+			{Addresses: []string{"10.0.0.2"}},
+		},
+	})
+	k := &k8sSource{store: store, path: "/varmq", fixedPort: 8080}
+
+	if got := k.PodName("http://10.0.0.1:8080/varmq"); got != "app-a" {
+		t.Fatalf("PodName = %q, want app-a", got)
+	}
+	if got := k.PodName("http://10.0.0.2:8080/varmq"); got != "" {
+		t.Fatalf("no TargetRef: PodName = %q, want empty", got)
 	}
 }

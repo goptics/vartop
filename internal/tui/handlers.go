@@ -7,8 +7,6 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
 // Event handlers for different message types
@@ -53,7 +51,7 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 	origins := make([]string, 0, len(msg))
 
 	for _, w := range msg {
-		origin := config.ShortOrigin(w.Origin)
+		origin := m.podName(w.Origin)
 		origins = append(origins, w.Origin)
 
 		if m.showNodeColumn {

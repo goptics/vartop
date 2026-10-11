@@ -60,6 +60,17 @@ func (p *Pool) Clients() []*Client {
 	return clients
 }
 
+// PodName returns a display name for a pod endpoint: the pod name when the
+// source knows it (kubernetes), otherwise the endpoint's host:port.
+func (p *Pool) PodName(endpoint string) string {
+	if n, ok := p.source.(interface{ PodName(string) string }); ok {
+		if name := n.PodName(endpoint); name != "" {
+			return name
+		}
+	}
+	return config.ShortOrigin(endpoint)
+}
+
 // Close delegates to the underlying discovery source.
 func (p *Pool) Close() error {
 	p.mu.Lock()

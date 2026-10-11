@@ -9,8 +9,6 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/goptics/varmq/cmd/vartop/internal/config"
 )
 
 // switcherScreen is the server/pod switcher overlay. It is a singleton owned by
@@ -102,7 +100,12 @@ func (s *switcherScreen) rebuild(m *Model) {
 	// unsorted list would reshuffle under the cursor.
 	for _, name := range slices.Sorted(maps.Keys(m.cfg.Servers)) {
 		srv := m.cfg.Servers[name]
+		// The active server's pods come from live discovery; others fall back
+		// to static config (empty for kubernetes servers, so no count).
 		endpoints := srv.GetEndpoints()
+		if srv == m.server {
+			endpoints = m.poolEndpoints()
+		}
 		podCount := len(endpoints)
 
 		// Count healthy pods
@@ -126,7 +129,7 @@ func (s *switcherScreen) rebuild(m *Model) {
 		if expanded && podCount > 1 {
 			for _, ep := range endpoints {
 				items = append(items, switchPodItem{
-					name:    config.ShortOrigin(ep),
+					name:    m.podName(ep),
 					server:  name,
 					origin:  ep,
 					healthy: m.podHealth[ep],

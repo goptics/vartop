@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -237,5 +239,60 @@ func TestSwitcherOrderStable(t *testing.T) {
 		if strings.Join(names, ",") != "alpha,local,mid,zeta" {
 			t.Fatalf("switcher order = %v", names)
 		}
+	}
+}
+
+// fakeK8sSource stands in for a kubernetes discovery source: live endpoints
+// plus pod names.
+type fakeK8sSource struct{ pods map[string]string }
+
+func (f fakeK8sSource) Endpoints() []string {
+	return slices.Sorted(maps.Keys(f.pods))
+}
+func (f fakeK8sSource) Close() error              { return nil }
+func (f fakeK8sSource) PodName(url string) string { return f.pods[url] }
+
+// TestSwitcherKubernetesServer covers a kubernetes server, which has no static
+// endpoints: when active, its pods come from the live pool and are labeled by
+// pod name; when inactive, it shows no count.
+func TestSwitcherKubernetesServer(t *testing.T) {
+	m := testModel(t)
+	k8s := &config.Server{Name: "k8s", Kubernetes: &config.KubernetesRef{Namespace: "default", Service: "app"}}
+	m.cfg.Servers["k8s"] = k8s
+
+	m.switcher.rebuild(m)
+	for _, it := range m.switcher.switcher.Items() {
+		if s := it.(switchServerItem); s.name == "k8s" && s.podCount != 0 {
+			t.Fatalf("inactive k8s podCount = %d, want 0", s.podCount)
+		}
+	}
+
+	m.server = k8s
+	m.pool = api.NewPool(fakeK8sSource{pods: map[string]string{
+		"http://10.0.0.1:8080/varmq": "app-a",
+		"http://10.0.0.2:8080/varmq": "app-b",
+	}}, "")
+	m.switcher.expanded = "k8s"
+	m.switcher.rebuild(m)
+
+	var pods []string
+	for _, it := range m.switcher.switcher.Items() {
+		switch it := it.(type) {
+		case switchServerItem:
+			if it.name == "k8s" && it.podCount != 2 {
+				t.Fatalf("active k8s podCount = %d, want 2", it.podCount)
+			}
+		case switchPodItem:
+			pods = append(pods, it.name+"="+it.origin)
+		}
+	}
+	want := "app-a=http://10.0.0.1:8080/varmq,app-b=http://10.0.0.2:8080/varmq"
+	if got := strings.Join(pods, ","); got != want {
+		t.Fatalf("pod rows = %s, want %s", got, want)
+	}
+
+	m.handleWorkers(workersMsg{{Name: "orders", Origin: "http://10.0.0.2:8080/varmq"}})
+	if row := m.dashboardScreen().table.Rows()[0]; !strings.Contains(row[1], "app-b") {
+		t.Fatalf("node column = %q, want pod name app-b", row[1])
 	}
 }

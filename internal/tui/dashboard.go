@@ -297,7 +297,7 @@ func (d *dashboardScreen) renderConnection(m *Model) string {
 func (m *Model) connectionLabel() string {
 	switch {
 	case m.selectedPodOrigin != "":
-		return config.ShortOrigin(m.selectedPodOrigin)
+		return m.podName(m.selectedPodOrigin)
 	case m.server.Kubernetes != nil:
 		return fmt.Sprintf("%s/%s", m.server.Kubernetes.Context, m.server.Kubernetes.Namespace)
 	default:
@@ -340,6 +340,14 @@ func (m *Model) poolEndpoints() []string {
 		endpoints = append(endpoints, c.PrimaryEndpoint())
 	}
 	return endpoints
+}
+
+// podName labels a pod endpoint, preferring the discovered pod name.
+func (m *Model) podName(origin string) string {
+	if m.pool == nil {
+		return config.ShortOrigin(origin)
+	}
+	return m.pool.PodName(origin)
 }
 
 // renderBody renders the dashboard body content.

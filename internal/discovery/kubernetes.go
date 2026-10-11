@@ -106,8 +106,15 @@ func kubeClient(contextName string) (kubernetes.Interface, error) {
 // urls returns the endpoint URLs a slice contributes; nil when the slice has
 // no usable port or address type.
 func (k *k8sSource) urls(slice *discoveryv1.EndpointSlice) []string {
+	var urls []string
+	k.visit(slice, func(u string, _ *discoveryv1.Endpoint) { urls = append(urls, u) })
+	return urls
+}
+
+// visit calls fn with each ready endpoint URL a slice contributes.
+func (k *k8sSource) visit(slice *discoveryv1.EndpointSlice, fn func(url string, ep *discoveryv1.Endpoint)) {
 	if slice.AddressType != discoveryv1.AddressTypeIPv4 && slice.AddressType != discoveryv1.AddressTypeIPv6 {
-		return nil
+		return
 	}
 	port := k.fixedPort
 	if port == 0 {
@@ -119,20 +126,37 @@ func (k *k8sSource) urls(slice *discoveryv1.EndpointSlice) []string {
 		}
 	}
 	if port == 0 {
-		return nil
+		return
 	}
 
-	var urls []string
 	for i := range slice.Endpoints {
 		ep := &slice.Endpoints[i]
 		if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
 			continue
 		}
 		for _, addr := range ep.Addresses {
-			urls = append(urls, "http://"+net.JoinHostPort(addr, strconv.Itoa(port))+k.path)
+			fn("http://"+net.JoinHostPort(addr, strconv.Itoa(port))+k.path, ep)
 		}
 	}
-	return urls
+}
+
+// PodName returns the name of the pod serving url (the endpoint's TargetRef),
+// or "" when unknown.
+//
+// ponytail: linear scan of the slice cache per call; index by URL if clusters
+// grow to thousands of pods.
+func (k *k8sSource) PodName(url string) string {
+	name := ""
+	for _, obj := range k.store.List() {
+		if slice, ok := obj.(*discoveryv1.EndpointSlice); ok {
+			k.visit(slice, func(u string, ep *discoveryv1.Endpoint) {
+				if u == url && ep.TargetRef != nil {
+					name = ep.TargetRef.Name
+				}
+			})
+		}
+	}
+	return name
 }
 
 // Endpoints recomputes the ready URLs from every cached slice. Deriving the set
