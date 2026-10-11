@@ -33,15 +33,19 @@ var serverListCmd = &cobra.Command{
 				prefix = "* "
 			}
 
-			// Check health
-			client := api.NewClient(server)
-			status := "Active"
-			if err := client.GetHealth(); err != nil {
-				status = "Inactive"
+			if server.Kubernetes != nil {
+				// Kubernetes servers are reached through EndpointSlice discovery,
+				// so the static endpoint health probe does not apply.
+				fmt.Printf("%s%s [kubernetes %s/%s]\n", prefix, name, server.Kubernetes.Context, server.Kubernetes.Namespace)
+			} else {
+				client := api.NewClient(server)
+				status := "Active"
+				if err := client.GetHealth(); err != nil {
+					status = "Inactive"
+				}
+				fmt.Printf("%s%s [%s]\n", prefix, name, status)
+				fmt.Printf("    Endpoint: %s\n", server.DisplayEndpoint())
 			}
-
-			fmt.Printf("%s%s [%s]\n", prefix, name, status)
-			fmt.Printf("    Endpoint: %s\n", server.DisplayEndpoint())
 			if server.Token != "" {
 				fmt.Printf("    Token:    ***\n")
 			}
