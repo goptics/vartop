@@ -40,7 +40,12 @@ func (m *Model) handleHealth(msg healthMsg) tea.Cmd {
 // handleWorkers processes worker list updates
 func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 	m.lastUpdate = time.Now()
-	m.err = nil
+	// A pool/source construction failure stays visible until the pool is
+	// replaced (server switch or manual refresh); other errors clear on a
+	// successful fetch.
+	if !m.sourceErr {
+		m.err = nil
+	}
 
 	rows := make([]table.Row, 0, len(msg))
 	origins := make(map[string]string, len(msg))
@@ -101,6 +106,7 @@ func (m *Model) handleError(msg errMsg) tea.Cmd {
 func (m *Model) handleServerSwitch(msg serverSwitchMsg) tea.Cmd {
 	if msg.err != nil {
 		m.err = msg.err
+		m.sourceErr = true
 		return nil
 	}
 
@@ -111,6 +117,7 @@ func (m *Model) handleServerSwitch(msg serverSwitchMsg) tea.Cmd {
 	m.server = msg.srv
 	m.pool = msg.pool
 	m.err = nil
+	m.sourceErr = false
 	m.switcher.rebuild(m)
 
 	return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())

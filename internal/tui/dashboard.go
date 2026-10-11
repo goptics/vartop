@@ -41,13 +41,13 @@ func newDashboardScreen() *dashboardScreen {
 }
 
 func (d *dashboardScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
 		var cmd tea.Cmd
 		d.table, cmd = d.table.Update(msg)
 		return cmd
 	}
-	return d.handleKey(m, key)
+	return d.handleKey(m, keyMsg)
 }
 
 func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
@@ -78,6 +78,7 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 		return tea.Quit
 	case key.Matches(msg, d.keys.Refresh):
 		m.err = nil
+		m.sourceErr = false
 		return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 	case key.Matches(msg, d.keys.Actions):
 		if len(d.table.Rows()) > 0 {
@@ -332,12 +333,19 @@ func (m *Model) poolEndpoints() []string {
 // renderBody renders the dashboard body content.
 func (d *dashboardScreen) renderBody(m *Model) string {
 	if !m.isHealthy {
+		text := fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.server.DisplayEndpoint())
+		// A source/pool construction error (e.g. a bad kube context) is more
+		// useful than the placeholder endpoint; show it instead.
+		if m.err != nil {
+			text = fmt.Sprintf("⚠️  %v\nPolling in background...", m.err)
+		}
+
 		offlineMsg := lipgloss.NewStyle().
 			Foreground(ColorSubtle).
 			Padding(2, 2).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorError).
-			Render(fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.server.DisplayEndpoint()))
+			Render(text)
 
 		return lipgloss.Place(m.width, d.table.Height()+2, lipgloss.Center, lipgloss.Center, offlineMsg)
 	}

@@ -20,6 +20,7 @@ type Model struct {
 	pool   *api.Pool
 
 	err        error
+	sourceErr  bool // source/pool construction failed; keep err until pool replaced
 	lastUpdate time.Time
 	width      int
 	height     int
@@ -59,6 +60,7 @@ func NewModel(cfg *config.Config, server *config.Server) *Model {
 		server:            server,
 		pool:              pool,
 		err:               err,
+		sourceErr:         err != nil,
 		isHealthy:         true, // Assume healthy initially
 		workerOrigins:     make(map[string]string),
 		podHealth:         make(map[string]bool),

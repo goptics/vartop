@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -95,5 +97,32 @@ func TestDashboardQuitKey(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatalf("q command produced %T, want tea.QuitMsg", cmd())
+	}
+}
+
+// TestConstructionErrorStaysVisible covers a failed pool/source build (e.g. a
+// bad kube context): the error must render while the dashboard is offline and
+// must survive a successful worker fetch (which otherwise clears m.err).
+func TestConstructionErrorStaysVisible(t *testing.T) {
+	m := testModel(t)
+	m.pool = nil
+	m.isHealthy = false
+	m.err = errors.New(`building kube client for context "x": boom`)
+	m.sourceErr = true
+
+	if view := m.View(); !strings.Contains(view, "building kube client") {
+		t.Fatalf("offline view missing construction error:\n%s", view)
+	}
+
+	m.handleWorkers(nil)
+	if m.err == nil {
+		t.Fatal("handleWorkers cleared a construction error")
+	}
+
+	// The flag is the switch that lets a normal fetch error clear again.
+	m.sourceErr = false
+	m.handleWorkers(nil)
+	if m.err != nil {
+		t.Fatalf("non-construction error not cleared: %v", m.err)
 	}
 }

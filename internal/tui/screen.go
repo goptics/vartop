@@ -51,7 +51,9 @@ func (m *Model) detailScreen() (*detailScreen, bool) {
 	return d, ok
 }
 
-// dashboardScreen returns the dashboard at the base of the stack.
+// dashboardScreen returns the dashboard at the base of the stack. The dashboard
+// is always installed at index 0 (NewModel) and the base is never popped, so the
+// assertion always succeeds.
 func (m *Model) dashboardScreen() *dashboardScreen {
 	d, _ := m.screens[0].(*dashboardScreen)
 	return d
