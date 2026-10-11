@@ -166,22 +166,23 @@ func (m Model) actionWorkerCmd(workerName, origin, action string) tea.Cmd {
 	}
 }
 
-// actionCurrentWorkerCmd returns a command that performs an action on the currently viewed worker.
-func (m Model) actionCurrentWorkerCmd(action string) tea.Cmd {
-	if m.currentWorkerName == "" {
+// actionCurrentWorkerCmd returns a command that performs an action on the
+// worker currently open in the detail view.
+func (m Model) actionCurrentWorkerCmd(workerName, origin, action string) tea.Cmd {
+	if workerName == "" {
 		return nil
 	}
 
 	return func() tea.Msg {
-		c, err := m.clientFor(m.currentWorkerOrigin)
+		c, err := m.clientFor(origin)
 		if err != nil {
 			return errMsg{wrapError(fmt.Sprintf("failed to %s worker", action), err)}
 		}
-		err = c.Action(m.currentWorkerName, action, m.currentWorkerOrigin)
+		err = c.Action(workerName, action, origin)
 		if err != nil {
 			return errMsg{wrapError(fmt.Sprintf("failed to %s worker", action), err)}
 		}
-		return m.fetchWorkerDetailsCmd(m.currentWorkerName, m.currentWorkerOrigin)()
+		return m.fetchWorkerDetailsCmd(workerName, origin)()
 	}
 }
 

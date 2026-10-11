@@ -24,12 +24,12 @@ func (m *Model) handleHealth(msg healthMsg) tea.Cmd {
 	}
 
 	// Rebuild switcher so health dots stay current
-	m.rebuildSwitcherItems()
+	m.switcher.rebuild(m)
 
-	if m.isHealthy && !m.showSwitcher {
-		if m.showWorkerDetail && m.currentWorkerName != "" {
-			cmds = append(cmds, m.fetchWorkerDetailsCmd(m.currentWorkerName, m.currentWorkerOrigin))
-		} else if !m.showWorkerDetail {
+	if m.isHealthy && !m.isSwitcherActive() {
+		if d, ok := m.detailScreen(); ok && d.workerName != "" {
+			cmds = append(cmds, m.fetchWorkerDetailsCmd(d.workerName, d.origin))
+		} else if !m.isDetailActive() {
 			cmds = append(cmds, m.fetchWorkersCmd())
 		}
 	}
@@ -74,11 +74,7 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 	m.workerOrigins = origins
 
 	// Retain selection if possible
-	selected := m.table.Cursor()
-	m.table.SetRows(rows)
-	if selected < len(rows) {
-		m.table.SetCursor(selected)
-	}
+	m.dashboardScreen().setRows(rows)
 
 	return nil
 }
@@ -87,8 +83,10 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 func (m *Model) handleWorkerDetails(msg workerDetailsMsg) tea.Cmd {
 	m.lastUpdate = time.Now()
 	m.err = nil
-	m.workerDetails = msg
-	m.recalculateMaxScroll()
+	if d, ok := m.detailScreen(); ok {
+		d.details = msg
+		d.recalculateMaxScroll(m.height)
+	}
 	return nil
 }
 
@@ -113,73 +111,9 @@ func (m *Model) handleServerSwitch(msg serverSwitchMsg) tea.Cmd {
 	m.server = msg.srv
 	m.pool = msg.pool
 	m.err = nil
-	m.rebuildSwitcherItems()
+	m.switcher.rebuild(m)
 
 	return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
-}
-
-// rebuildTable reconstructs the table with the current width and showNodeColumn setting.
-func (m *Model) rebuildTable() {
-	tHeight := m.height - 12
-
-	var columns []table.Column
-	var fixedWidths int
-	if m.showNodeColumn {
-		// 7 columns + cell padding (7 × 2 = 14)
-		fixedWidths = 12 + 12 + 12 + 12 + 10 + 8 + 14
-		nameWidth := m.width - fixedWidths
-		if nameWidth < 12 {
-			nameWidth = 12
-		}
-		columns = []table.Column{
-			{Title: "Name", Width: nameWidth},
-			{Title: "Node", Width: 12},
-			{Title: "Status", Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
-			{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
-		}
-	} else {
-		// 6 columns + cell padding (6 × 2 = 12)
-		fixedWidths = 12 + 12 + 12 + 10 + 8 + 12
-		nameWidth := m.width - fixedWidths
-		if nameWidth < 12 {
-			nameWidth = 12
-		}
-		columns = []table.Column{
-			{Title: "Name", Width: nameWidth},
-			{Title: "Status", Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
-			{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
-		}
-	}
-
-	s := TableStyles()
-	selected := m.table.Cursor()
-	rows := m.table.Rows()
-
-	// If existing rows have a different cell count than new columns,
-	// clear them to avoid a panic in table.New (rows will be repopulated by the next fetch).
-	if len(rows) > 0 && len(rows[0]) != len(columns) {
-		rows = nil
-		selected = 0
-	}
-
-	t := table.New(
-		table.WithColumns(columns),
-		table.WithRows(rows),
-		table.WithFocused(true),
-	)
-	if tHeight > 0 {
-		t.SetHeight(tHeight)
-	}
-	t.SetStyles(s)
-	t.SetCursor(selected)
-
-	m.table = t
 }
 
 // handleWindowSize processes terminal resize events
@@ -187,42 +121,19 @@ func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
 	m.width = msg.Width
 	m.height = msg.Height
 
-	m.rebuildTable()
+	m.dashboardScreen().rebuildTable(m)
 
 	// Update switcher dimensions
 	lHeight := msg.Height - 6
 	if lHeight > 0 {
-		m.switcher.SetSize(msg.Width-2, lHeight)
+		m.switcher.switcher.SetSize(msg.Width-2, lHeight)
 	}
 
 	// Hide default help, we'll show custom footer
-	m.switcher.SetShowHelp(false)
+	m.switcher.switcher.SetShowHelp(false)
 
 	// Recalculate scroll limits for worker detail view
-	m.recalculateMaxScroll()
-}
-
-// recalculateMaxScroll updates the maximum scroll value for worker detail view
-func (m *Model) recalculateMaxScroll() {
-	if !m.showWorkerDetail || m.workerDetails == nil {
-		m.workerDetailMaxScroll = 0
-		return
-	}
-
-	// Estimate content height based on actual worker details
-	// Header ~6 lines, config ~15 lines (5 items * 3 lines), metrics ~20 lines
-	estimatedContentHeight := 45
-	footerHeight := 3
-	availableHeight := m.height - footerHeight - 2
-
-	maxScroll := estimatedContentHeight - availableHeight
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	m.workerDetailMaxScroll = maxScroll
-
-	// Clamp current scroll position
-	if m.workerDetailScrollY > m.workerDetailMaxScroll {
-		m.workerDetailScrollY = m.workerDetailMaxScroll
+	if d, ok := m.detailScreen(); ok {
+		d.recalculateMaxScroll(m.height)
 	}
 }
