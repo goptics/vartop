@@ -31,8 +31,6 @@ type healthMsg struct {
 // errMsg carries an error that should be displayed to the user
 type errMsg struct{ err error }
 
-func (e errMsg) Error() string { return e.err.Error() }
-
 // serverSwitchMsg carries the result of building a pool for a newly selected
 // server: either a ready pool, or the construction error.
 type serverSwitchMsg struct {
