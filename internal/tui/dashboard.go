@@ -22,16 +22,35 @@ type dashboardScreen struct {
 	keys              dashboardKeyMap
 }
 
-func newDashboardScreen() *dashboardScreen {
-	columns := []table.Column{
-		{Title: "Name", Width: 18},
-		{Title: "Node", Width: 12},
+// center renders v centred in a cell of the given width.
+func center(width int, v any) string {
+	return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(fmt.Sprint(v))
+}
+
+// dashboardColumns returns the table columns; the name column takes whatever
+// width the fixed columns and cell padding leave over.
+func dashboardColumns(width int, showNode bool) []table.Column {
+	cols := []table.Column{
 		{Title: "Status", Width: 12},
-		{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
-		{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
-		{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
-		{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
+		{Title: center(12, "Concurrency"), Width: 12},
+		{Title: center(12, "Processing"), Width: 12},
+		{Title: center(10, "Pending"), Width: 10},
+		{Title: center(8, "Idle"), Width: 8},
 	}
+	if showNode {
+		cols = slices.Insert(cols, 0, table.Column{Title: "Node", Width: 12})
+	}
+	// fixed widths plus cell padding (2 per column, name included)
+	fixed := 2 * (len(cols) + 1)
+	for _, c := range cols {
+		fixed += c.Width
+	}
+	return slices.Insert(cols, 0, table.Column{Title: "Name", Width: max(12, width-fixed)})
+}
+
+func newDashboardScreen() *dashboardScreen {
+	// Width 98 gives the name column its initial 18 until the first resize.
+	columns := dashboardColumns(98, true)
 
 	t := table.New(
 		table.WithColumns(columns),
@@ -151,40 +170,7 @@ func (d *dashboardScreen) setRows(rows []table.Row, origins []string) {
 func (d *dashboardScreen) rebuildTable(m *Model) {
 	tHeight := m.height - 12
 
-	var columns []table.Column
-	var fixedWidths int
-	if m.showNodeColumn {
-		// 7 columns + cell padding (7 × 2 = 14)
-		fixedWidths = 12 + 12 + 12 + 12 + 10 + 8 + 14
-		nameWidth := m.width - fixedWidths
-		if nameWidth < 12 {
-			nameWidth = 12
-		}
-		columns = []table.Column{
-			{Title: "Name", Width: nameWidth},
-			{Title: "Node", Width: 12},
-			{Title: "Status", Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
-			{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
-		}
-	} else {
-		// 6 columns + cell padding (6 × 2 = 12)
-		fixedWidths = 12 + 12 + 12 + 10 + 8 + 12
-		nameWidth := m.width - fixedWidths
-		if nameWidth < 12 {
-			nameWidth = 12
-		}
-		columns = []table.Column{
-			{Title: "Name", Width: nameWidth},
-			{Title: "Status", Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Concurrency"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render("Processing"), Width: 12},
-			{Title: lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render("Pending"), Width: 10},
-			{Title: lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render("Idle"), Width: 8},
-		}
-	}
+	columns := dashboardColumns(m.width, m.showNodeColumn)
 
 	s := TableStyles()
 	selected := d.table.Cursor()

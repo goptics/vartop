@@ -1,12 +1,11 @@
 package tui
 
 import (
-	"fmt"
+	"slices"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Event handlers for different message types
@@ -59,26 +58,18 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 		}
 		origins = append(origins, w.Origin)
 
-		if m.showNodeColumn {
-			rows = append(rows, table.Row{
-				w.Name,
-				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(origin),
-				w.Status,
-				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.Concurrency)),
-				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.NumProcessing)),
-				lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render(fmt.Sprint(w.NumPending)),
-				lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render(fmt.Sprint(w.NumIdleWorkers)),
-			})
-		} else {
-			rows = append(rows, table.Row{
-				w.Name,
-				w.Status,
-				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.Concurrency)),
-				lipgloss.NewStyle().Width(12).Align(lipgloss.Center).Render(fmt.Sprint(w.NumProcessing)),
-				lipgloss.NewStyle().Width(10).Align(lipgloss.Center).Render(fmt.Sprint(w.NumPending)),
-				lipgloss.NewStyle().Width(8).Align(lipgloss.Center).Render(fmt.Sprint(w.NumIdleWorkers)),
-			})
+		row := table.Row{
+			w.Name,
+			w.Status,
+			center(12, w.Concurrency),
+			center(12, w.NumProcessing),
+			center(10, w.NumPending),
+			center(8, w.NumIdleWorkers),
 		}
+		if m.showNodeColumn {
+			row = slices.Insert(row, 1, center(12, origin))
+		}
+		rows = append(rows, row)
 	}
 
 	// Retain selection if possible
