@@ -84,7 +84,6 @@ func (m *Model) handleWorkerDetails(msg workerDetailsMsg) tea.Cmd {
 	m.err = nil
 	if d, ok := m.detailScreen(); ok {
 		d.details = msg
-		d.recalculateMaxScroll(m.height)
 	}
 	return nil
 }
@@ -139,9 +138,4 @@ func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) {
 
 	// Hide default help, we'll show custom footer
 	m.switcher.switcher.SetShowHelp(false)
-
-	// Recalculate scroll limits for worker detail view
-	if d, ok := m.detailScreen(); ok {
-		d.recalculateMaxScroll(m.height)
-	}
 }

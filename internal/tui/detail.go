@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -19,9 +20,8 @@ type detailScreen struct {
 	workerName string
 	origin     string
 
-	inAction  bool // action mode
-	scrollY   int  // vertical scroll offset
-	maxScroll int  // maximum scroll value (0 if no overflow)
+	inAction bool // action mode
+	vp       viewport.Model
 
 	keys detailKeyMap
 }
@@ -75,7 +75,7 @@ func (d *detailScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 		d.workerName = ""
 		d.origin = ""
 		d.inAction = false
-		d.scrollY = 0 // Reset scroll
+		d.vp.GotoTop()
 		return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 	case key.Matches(msg, d.keys.Actions):
 		if d.workerName != "" {
@@ -84,64 +84,28 @@ func (d *detailScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, d.keys.Refresh):
 		if d.workerName != "" {
 			d.details = nil // Clear to show loading state
-			d.scrollY = 0
-			d.maxScroll = 0
+			d.vp.GotoTop()
 			return m.fetchWorkerDetailsCmd(d.workerName, d.origin)
 		}
 	case key.Matches(msg, d.keys.Up):
-		if d.scrollY > 0 {
-			d.scrollY--
-		}
+		d.vp.LineUp(1)
 	case key.Matches(msg, d.keys.Down):
-		if d.scrollY < d.maxScroll {
-			d.scrollY++
-		}
+		d.vp.LineDown(1)
 	case key.Matches(msg, d.keys.PageUp):
-		d.scrollY -= 10
-		if d.scrollY < 0 {
-			d.scrollY = 0
-		}
+		d.vp.PageUp()
 	case key.Matches(msg, d.keys.PageDown):
-		d.scrollY += 10
-		if d.scrollY > d.maxScroll {
-			d.scrollY = d.maxScroll
-		}
+		d.vp.PageDown()
 	case key.Matches(msg, d.keys.Home):
-		d.scrollY = 0
+		d.vp.GotoTop()
 	case key.Matches(msg, d.keys.End):
-		d.scrollY = d.maxScroll
+		d.vp.GotoBottom()
 	}
 	return nil
 }
 
-// recalculateMaxScroll updates the maximum scroll value for the detail view.
-func (d *detailScreen) recalculateMaxScroll(height int) {
-	if d.details == nil {
-		d.maxScroll = 0
-		return
-	}
-
-	// Estimate content height based on actual worker details
-	// Header ~6 lines, config ~15 lines (5 items * 3 lines), metrics ~20 lines
-	estimatedContentHeight := 45
-	footerHeight := 3
-	availableHeight := height - footerHeight - 2
-
-	maxScroll := estimatedContentHeight - availableHeight
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	d.maxScroll = maxScroll
-
-	// Clamp current scroll position
-	if d.scrollY > d.maxScroll {
-		d.scrollY = d.maxScroll
-	}
-}
-
 // View renders the complete worker detail view.
 func (d *detailScreen) View(m *Model) string {
-	footer := d.renderFooter(m)
+	footer := d.renderFooter(m, d.vp.YOffset)
 	footerHeight := lipgloss.Height(footer)
 
 	if d.details == nil {
@@ -185,35 +149,15 @@ func (d *detailScreen) View(m *Model) string {
 	bodyContent = lipgloss.NewStyle().Padding(0, 1).Render(bodyContent)
 	fullBodyContent := lipgloss.JoinVertical(lipgloss.Left, "", header, "", bodyContent)
 
-	// Calculate viewport and scrolling
-	availableHeight := m.height - footerHeight - 2
-	contentHeight := lipgloss.Height(fullBodyContent)
-
-	// Clamp scroll offset
-	maxScroll := max(0, contentHeight-availableHeight)
-	if d.scrollY > maxScroll {
-		d.scrollY = maxScroll
-	}
-	if d.scrollY < 0 {
-		d.scrollY = 0
-	}
-
-	// Apply scrolling if content overflows
-	var visibleContent string
-	if contentHeight > availableHeight {
-		lines := strings.Split(fullBodyContent, "\n")
-		start := d.scrollY
-		end := min(start+availableHeight, len(lines))
-		if start >= len(lines) {
-			start = len(lines) - 1
-		}
-		if end > len(lines) {
-			end = len(lines)
-		}
-		visibleContent = strings.Join(lines[start:end], "\n")
-	} else {
-		visibleContent = fullBodyContent
-	}
+	// The scroll indicator can wrap the footer onto another line, so size the
+	// viewport for that case to keep its height (and the scroll limits) stable.
+	footerHeight = max(footerHeight, lipgloss.Height(d.renderFooter(m, 1)))
+	d.vp.Width, d.vp.Height = m.width, m.height-footerHeight-2
+	d.vp.SetContent(fullBodyContent)
+	d.vp.SetYOffset(d.vp.YOffset) // re-clamp after a resize
+	footer = d.renderFooter(m, d.vp.YOffset)
+	footerHeight = lipgloss.Height(footer)
+	visibleContent := d.vp.View()
 
 	// Anchor footer at bottom with proper spacing
 	bodyViewHeight := lipgloss.Height(visibleContent)
@@ -317,7 +261,7 @@ func (d *detailScreen) renderHeader(m *Model) string {
 }
 
 // renderFooter renders the worker detail view footer.
-func (d *detailScreen) renderFooter(m *Model) string {
+func (d *detailScreen) renderFooter(m *Model, scrollY int) string {
 	// Only polling info now (updated time moved to header)
 	interval := m.server.Interval
 	if interval <= 0 {
@@ -326,8 +270,8 @@ func (d *detailScreen) renderFooter(m *Model) string {
 
 	// Add scroll indicator if scrolling is active
 	pollInfo := fmt.Sprintf("Polling: %ds", interval)
-	if d.scrollY > 0 {
-		pollInfo = fmt.Sprintf("↓ %d | Polling: %ds", d.scrollY, interval)
+	if scrollY > 0 {
+		pollInfo = fmt.Sprintf("↓ %d | Polling: %ds", scrollY, interval)
 	}
 
 	keysView := helpFooter(d.keyMap(), m.width-lipgloss.Width(pollInfo)-4)
