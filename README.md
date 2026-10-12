@@ -148,7 +148,7 @@ Every screen shows its available keys in a help footer at the bottom.
 | --- | --- |
 | <kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>k</kbd> / <kbd>j</kbd> | Navigate worker rows |
 | <kbd>Enter</kbd> | View worker details |
-| <kbd>a</kbd> | Toggle action mode (pause, resume, stop, restart) |
+| <kbd>a</kbd> | Enter action mode (pause, resume, stop, restart); <kbd>Esc</kbd> leaves it |
 | <kbd>r</kbd> | Refresh data (also retries a server connection that failed, e.g. a bad kube context) |
 | <kbd>Tab</kbd> | Open Switch view (servers and pods) |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | Quit |
@@ -160,7 +160,7 @@ Every screen shows its available keys in a help footer at the bottom.
 | <kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>k</kbd> / <kbd>j</kbd> | Scroll one line |
 | <kbd>PgUp</kbd> / <kbd>b</kbd>, <kbd>PgDn</kbd> / <kbd>Space</kbd> | Scroll one page |
 | <kbd>g</kbd> / <kbd>Home</kbd>, <kbd>G</kbd> / <kbd>End</kbd> | Jump to top / bottom |
-| <kbd>a</kbd> | Toggle action mode |
+| <kbd>a</kbd> | Enter action mode |
 | <kbd>r</kbd> | Refresh worker details |
 | <kbd>Esc</kbd> | Return to dashboard |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | Quit |
