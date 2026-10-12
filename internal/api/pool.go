@@ -34,7 +34,7 @@ func PoolFor(server *config.Server) (*Pool, error) {
 		}
 		return NewPool(source, server.Token), nil
 	}
-	return NewPool(discovery.NewStatic(server.GetEndpoints()), server.Token), nil
+	return NewPool(discovery.NewStatic(server.Endpoints), server.Token), nil
 }
 
 // NewPool returns a Pool backed by the given endpoint source.

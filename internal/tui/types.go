@@ -139,8 +139,3 @@ func createSpacing(totalHeight, contentHeight, footerHeight, margin int) int {
 	}
 	return spacing
 }
-
-// Error wrapping helper
-func wrapError(action string, err error) error {
-	return fmt.Errorf("%s: %w", action, err)
-}

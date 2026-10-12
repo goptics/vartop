@@ -158,7 +158,7 @@ func (m Model) fetchWorkerDetailsCmd(workerName, origin string) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		details, err := c.GetWorker(workerName, origin)
+		details, err := c.GetWorker(workerName)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -171,11 +171,10 @@ func (m Model) actionWorkerCmd(workerName, origin, action string) tea.Cmd {
 	return m.scoped(func() tea.Msg {
 		c, err := m.clientFor(origin)
 		if err != nil {
-			return errMsg{wrapError(fmt.Sprintf("failed to %s worker %s", action, workerName), err)}
+			return errMsg{fmt.Errorf("failed to %s worker %s: %w", action, workerName, err)}
 		}
-		err = c.Action(workerName, action, origin)
-		if err != nil {
-			return errMsg{wrapError(fmt.Sprintf("failed to %s worker %s", action, workerName), err)}
+		if err := c.Action(workerName, action); err != nil {
+			return errMsg{fmt.Errorf("failed to %s worker %s: %w", action, workerName, err)}
 		}
 		return m.fetchWorkersCmd()()
 	})
@@ -191,11 +190,10 @@ func (m Model) actionCurrentWorkerCmd(workerName, origin, action string) tea.Cmd
 	return m.scoped(func() tea.Msg {
 		c, err := m.clientFor(origin)
 		if err != nil {
-			return errMsg{wrapError(fmt.Sprintf("failed to %s worker", action), err)}
+			return errMsg{fmt.Errorf("failed to %s worker: %w", action, err)}
 		}
-		err = c.Action(workerName, action, origin)
-		if err != nil {
-			return errMsg{wrapError(fmt.Sprintf("failed to %s worker", action), err)}
+		if err := c.Action(workerName, action); err != nil {
+			return errMsg{fmt.Errorf("failed to %s worker: %w", action, err)}
 		}
 		return m.fetchWorkerDetailsCmd(workerName, origin)()
 	})
@@ -209,13 +207,6 @@ func (m Model) tickCmd() tea.Cmd {
 	}
 
 	return tea.Tick(time.Duration(interval)*time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
-}
-
-// initialTickCmd returns the first tick command to start the polling cycle
-func initialTickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }

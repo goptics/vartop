@@ -79,18 +79,6 @@ func (c *Client) PrimaryEndpoint() string {
 	return c.endpoint
 }
 
-// resolveOrigin returns origin if non-empty, otherwise falls back to primary endpoint.
-func (c *Client) resolveOrigin(origin string) (string, error) {
-	if origin != "" {
-		return origin, nil
-	}
-	primary := c.PrimaryEndpoint()
-	if primary == "" {
-		return "", fmt.Errorf("no endpoints configured")
-	}
-	return primary, nil
-}
-
 // doRequest sends the HTTP request, adds auth headers if configured, and parses any errors.
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	if c.token != "" {
@@ -192,13 +180,9 @@ func (c *Client) ListWorkers() ([]WorkerSummary, error) {
 	return workers, nil
 }
 
-// GetWorker fetches detailed info and metrics for a single worker from the given origin endpoint.
-func (c *Client) GetWorker(name, origin string) (*WorkerDetails, error) {
-	ep, err := c.resolveOrigin(origin)
-	if err != nil {
-		return nil, err
-	}
-
+// GetWorker fetches detailed info and metrics for a single worker.
+func (c *Client) GetWorker(name string) (*WorkerDetails, error) {
+	ep := c.endpoint
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/workers/%s", ep, name), nil)
 	if err != nil {
 		return nil, err
@@ -221,13 +205,9 @@ func (c *Client) GetWorker(name, origin string) (*WorkerDetails, error) {
 	return &worker, nil
 }
 
-// Action dispatches a specific action (pause, resume, restart, stop) to a worker at the given origin.
-func (c *Client) Action(workerName, action, origin string) error {
-	ep, err := c.resolveOrigin(origin)
-	if err != nil {
-		return err
-	}
-
+// Action dispatches a specific action (pause, resume, restart, stop) to a worker.
+func (c *Client) Action(workerName, action string) error {
+	ep := c.endpoint
 	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/workers/%s/actions/%s", ep, workerName, action), nil)
 	if err != nil {
 		return err
@@ -241,13 +221,9 @@ func (c *Client) Action(workerName, action, origin string) error {
 	return c.handleResponse(resp, nil)
 }
 
-// TuneConcurrency updates the concurrency of a given worker at the given origin.
-func (c *Client) TuneConcurrency(workerName string, concurrency int, origin string) error {
-	ep, err := c.resolveOrigin(origin)
-	if err != nil {
-		return err
-	}
-
+// TuneConcurrency updates the concurrency of a given worker.
+func (c *Client) TuneConcurrency(workerName string, concurrency int) error {
+	ep := c.endpoint
 	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/workers/%s/config/concurrency/%d", ep, workerName, concurrency), nil)
 	if err != nil {
 		return err

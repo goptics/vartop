@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -93,11 +94,6 @@ func (s *Server) Validate() error {
 	return nil
 }
 
-// GetEndpoints returns the list of endpoints to query.
-func (s *Server) GetEndpoints() []string {
-	return s.Endpoints
-}
-
 // DisplayEndpoint returns a human-readable representation of the endpoint(s).
 // For single endpoints, returns the full URL; for multi-pod, returns "N pods".
 func (s *Server) DisplayEndpoint() string {
@@ -110,23 +106,12 @@ func (s *Server) DisplayEndpoint() string {
 	return fmt.Sprintf("%d pods", len(s.Endpoints))
 }
 
-// ShortOrigin returns a compact display label for a given endpoint URL.
+// ShortOrigin returns a compact display label (the host) for an endpoint URL.
 func ShortOrigin(endpoint string) string {
-	// Strip scheme
-	u := endpoint
-	for _, prefix := range []string{"https://", "http://"} {
-		if len(u) > len(prefix) && u[:len(prefix)] == prefix {
-			u = u[len(prefix):]
-			break
-		}
+	if u, err := url.Parse(endpoint); err == nil && u.Hostname() != "" {
+		return u.Hostname()
 	}
-	// Take host only (before first / or :)
-	for i, c := range u {
-		if c == '/' || c == ':' {
-			return u[:i]
-		}
-	}
-	return u
+	return endpoint
 }
 
 // Config represents the schema of the vartop configuration file.

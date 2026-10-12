@@ -102,7 +102,7 @@ func (s *switcherScreen) rebuild(m *Model) {
 		srv := m.cfg.Servers[name]
 		// The active server's pods come from live discovery; others fall back
 		// to static config (empty for kubernetes servers, so no count).
-		endpoints := srv.GetEndpoints()
+		endpoints := srv.Endpoints
 		if srv == m.server {
 			endpoints = m.poolEndpoints()
 		}

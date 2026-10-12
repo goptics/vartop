@@ -241,3 +241,18 @@ func TestLoadNullServer(t *testing.T) {
 		t.Fatalf("Load() error = %v, want it to name server %q", err, "a")
 	}
 }
+
+func TestShortOrigin(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://10.0.0.5:8080/varmq":  "10.0.0.5",
+		"https://staging.example.com": "staging.example.com",
+		"http://[fd00::1]:8080/varmq": "fd00::1",
+		"http://pod-0:8080/varmq":     "pod-0",
+		"localhost:8080":              "localhost:8080", // no scheme: no host to parse, shown as-is
+		"":                            "",
+	} {
+		if got := ShortOrigin(in); got != want {
+			t.Errorf("ShortOrigin(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -101,7 +101,7 @@ var actionCmd = &cobra.Command{
 
 		desc := fmt.Sprintf("Sending '%s' action to worker '%s'", action, workerName)
 		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
-			return c.Action(workerName, action, c.PrimaryEndpoint())
+			return c.Action(workerName, action)
 		})
 	},
 }
@@ -121,7 +121,7 @@ var concurrencyCmd = &cobra.Command{
 
 		desc := fmt.Sprintf("Updating concurrency of worker '%s' to %d", workerName, concurrency)
 		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
-			return c.TuneConcurrency(workerName, concurrency, c.PrimaryEndpoint())
+			return c.TuneConcurrency(workerName, concurrency)
 		})
 	},
 }

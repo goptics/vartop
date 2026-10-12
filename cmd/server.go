@@ -43,7 +43,7 @@ var serverListCmd = &cobra.Command{
 			} else {
 				// Active if any configured endpoint is healthy.
 				status := "Inactive"
-				for _, ep := range server.GetEndpoints() {
+				for _, ep := range server.Endpoints {
 					if api.NewClient(ep, server.Token).GetHealth() == nil {
 						status = "Active"
 						break
