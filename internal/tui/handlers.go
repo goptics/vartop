@@ -51,7 +51,12 @@ func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
 	origins := make([]string, 0, len(msg))
 
 	for _, w := range msg {
-		origin := m.podName(w.Origin)
+		// Label the row with the instance that actually served it; behind a
+		// load balancer that differs from refresh to refresh.
+		origin := w.Instance
+		if origin == "" {
+			origin = m.podName(w.Origin)
+		}
 		origins = append(origins, w.Origin)
 
 		if m.showNodeColumn {

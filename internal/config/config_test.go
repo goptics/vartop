@@ -35,6 +35,36 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "dns",
+			server:  &Server{Name: "dns", DNS: &DNSRef{Host: "varmq-headless", Port: 8080}},
+			wantErr: false,
+		},
+		{
+			name:    "dns and endpoints",
+			server:  &Server{Name: "bad", Endpoints: []string{"http://a:1/varmq"}, DNS: &DNSRef{Host: "varmq", Port: 8080}},
+			wantErr: true,
+		},
+		{
+			name:    "dns and kubernetes",
+			server:  &Server{Name: "bad", Kubernetes: &KubernetesRef{Context: "prod", Namespace: "default", Service: "varmq"}, DNS: &DNSRef{Host: "varmq", Port: 8080}},
+			wantErr: true,
+		},
+		{
+			name:    "dns missing host",
+			server:  &Server{Name: "bad", DNS: &DNSRef{Port: 8080}},
+			wantErr: true,
+		},
+		{
+			name:    "dns missing port",
+			server:  &Server{Name: "bad", DNS: &DNSRef{Host: "varmq"}},
+			wantErr: true,
+		},
+		{
+			name:    "dns port out of range",
+			server:  &Server{Name: "bad", DNS: &DNSRef{Host: "varmq", Port: 70000}},
+			wantErr: true,
+		},
+		{
 			name:    "neither endpoints nor kubernetes",
 			server:  &Server{Name: "bad"},
 			wantErr: true,

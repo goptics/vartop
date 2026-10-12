@@ -32,7 +32,7 @@ func TestServerSetEndpointOnKubernetesServerRejected(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected validation error, got nil")
 	}
-	if !strings.Contains(err.Error(), "exactly one of endpoints or kubernetes") {
+	if !strings.Contains(err.Error(), "exactly one of endpoints, kubernetes or dns") {
 		t.Fatalf("error %q does not mention endpoints/kubernetes conflict", err.Error())
 	}
 

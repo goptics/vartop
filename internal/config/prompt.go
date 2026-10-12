@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -62,6 +63,8 @@ func PromptServer() (*Server, error) {
 		discoveryType string
 		service       string
 		selector      string
+		dnsHost       string
+		dnsPort       string
 		token         string
 	)
 
@@ -85,6 +88,7 @@ func PromptServer() (*Server, error) {
 				Options(
 					huh.NewOption("Static endpoints", "endpoints"),
 					huh.NewOption("Kubernetes", "kubernetes"),
+					huh.NewOption("DNS (all addresses of a hostname)", "dns"),
 				).
 				Value(&serverType),
 		),
@@ -161,6 +165,29 @@ func PromptServer() (*Server, error) {
 		).WithHideFunc(func() bool { return serverType != "kubernetes" || discoveryType != "selector" }),
 		huh.NewGroup(
 			huh.NewInput().
+				Title("DNS Host").
+				Description("Hostname resolving to every instance, e.g. a headless service or compose service name").
+				Value(&dnsHost).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("host cannot be empty")
+					}
+					return nil
+				}),
+			huh.NewInput().
+				Title("Port").
+				Description("Port each instance serves the varmq mux on").
+				Value(&dnsPort).
+				Placeholder("8080").
+				Validate(func(s string) error {
+					if p, err := strconv.Atoi(s); err != nil || p <= 0 || p > 65535 {
+						return fmt.Errorf("port must be between 1 and 65535")
+					}
+					return nil
+				}),
+		).WithHideFunc(func() bool { return serverType != "dns" }),
+		huh.NewGroup(
+			huh.NewInput().
 				Title("Auth Token (Optional)").
 				Description("Bearer token if your server requires authentication").
 				Value(&token),
@@ -191,6 +218,9 @@ func PromptServer() (*Server, error) {
 		case "selector":
 			server.Kubernetes.Selector = selector
 		}
+	case "dns":
+		port, _ := strconv.Atoi(dnsPort) // validated by the form
+		server.DNS = &DNSRef{Host: dnsHost, Port: port}
 	}
 
 	if err := server.Validate(); err != nil {

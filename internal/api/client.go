@@ -5,10 +5,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/goptics/vartop/internal/config"
 )
+
+// InstanceHeader is the varmq response header naming the process that
+// answered (varmq.InstanceHeader).
+const InstanceHeader = "X-Varmq-Instance"
+
+// maxSeenInstances caps how many distinct instance IDs a Client remembers.
+const maxSeenInstances = 16
 
 // Client is a REST API client for a single varmq mux server endpoint.
 // Multi-pod servers get one Client per endpoint through a Pool.
@@ -16,6 +24,10 @@ type Client struct {
 	endpoint   string
 	token      string
 	httpClient *http.Client
+
+	mu           sync.Mutex
+	lastInstance string              // instance that answered the latest request
+	seen         map[string]struct{} // distinct instances seen (capped)
 }
 
 // WorkerSummary matches the API response of GET /workers or GET /workers/{name}
@@ -27,6 +39,7 @@ type WorkerSummary struct {
 	NumPending     int    `json:"num_pending"`
 	NumIdleWorkers int    `json:"num_idle_workers"`
 	Origin         string `json:"-"` // Endpoint this worker was fetched from (set by ListWorkers)
+	Instance       string `json:"-"` // varmq instance that served it (InstanceHeader), if reported
 }
 
 // WorkerDetails matches the extended API response of GET /workers/{name}
@@ -84,7 +97,45 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
+	if err == nil {
+		c.recordInstance(resp.Header.Get(InstanceHeader))
+	}
+	return resp, err
+}
+
+// recordInstance remembers which varmq instance answered. More than one
+// distinct instance behind a single endpoint means it is load-balanced.
+func (c *Client) recordInstance(id string) {
+	if id == "" {
+		return // older varmq without the header
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastInstance = id
+	if c.seen == nil {
+		c.seen = make(map[string]struct{})
+	}
+	if len(c.seen) < maxSeenInstances {
+		c.seen[id] = struct{}{}
+	}
+}
+
+// LastInstance returns the instance ID that answered the latest request, or
+// "" if the server does not report one.
+func (c *Client) LastInstance() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastInstance
+}
+
+// SeenInstances returns how many distinct instances have answered this
+// client's endpoint (capped at maxSeenInstances). Above 1 means the endpoint
+// is load-balanced: each request reaches one instance, not all of them.
+func (c *Client) SeenInstances() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.seen)
 }
 
 // handleResponse expects a successful JSON body or returns a parsed APIError.
@@ -127,6 +178,7 @@ func (c *Client) ListWorkers() ([]WorkerSummary, error) {
 		return nil, fmt.Errorf("failed to fetch workers from %s: %w", config.ShortOrigin(endpoint), err)
 	}
 
+	instance := resp.Header.Get(InstanceHeader)
 	var workers []WorkerSummary
 	if err := c.handleResponse(resp, &workers); err != nil {
 		return nil, err
@@ -134,6 +186,7 @@ func (c *Client) ListWorkers() ([]WorkerSummary, error) {
 
 	for i := range workers {
 		workers[i].Origin = endpoint
+		workers[i].Instance = instance
 	}
 
 	return workers, nil
@@ -156,12 +209,14 @@ func (c *Client) GetWorker(name, origin string) (*WorkerDetails, error) {
 		return nil, fmt.Errorf("failed to fetch worker %s: %w", name, err)
 	}
 
+	instance := resp.Header.Get(InstanceHeader)
 	var worker WorkerDetails
 	if err := c.handleResponse(resp, &worker); err != nil {
 		return nil, err
 	}
 
 	worker.Origin = ep
+	worker.Instance = instance
 
 	return &worker, nil
 }

@@ -37,6 +37,9 @@ var serverListCmd = &cobra.Command{
 				// Kubernetes servers are reached through EndpointSlice discovery,
 				// so the static endpoint health probe does not apply.
 				fmt.Printf("%s%s [kubernetes %s/%s]\n", prefix, name, server.Kubernetes.Context, server.Kubernetes.Namespace)
+			} else if server.DNS != nil {
+				// DNS servers resolve to their instances at connect time.
+				fmt.Printf("%s%s [dns %s:%d]\n", prefix, name, server.DNS.Host, server.DNS.Port)
 			} else {
 				// Active if any configured endpoint is healthy.
 				status := "Inactive"
@@ -94,6 +97,8 @@ var serverAddCmd = &cobra.Command{
 		switch {
 		case server.Kubernetes != nil:
 			fmt.Printf("Added kubernetes server '%s' (%s/%s)\n", server.Name, server.Kubernetes.Context, server.Kubernetes.Namespace)
+		case server.DNS != nil:
+			fmt.Printf("Added dns server '%s' (%s:%d)\n", server.Name, server.DNS.Host, server.DNS.Port)
 		case len(server.Endpoints) > 1:
 			fmt.Printf("Added server '%s' with %d endpoints\n", server.Name, len(server.Endpoints))
 		default:

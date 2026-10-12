@@ -2,9 +2,13 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -294,5 +298,28 @@ func TestSwitcherKubernetesServer(t *testing.T) {
 	m.handleWorkers(workersMsg{{Name: "orders", Origin: "http://10.0.0.2:8080/varmq"}})
 	if row := m.dashboardScreen().table.Rows()[0]; !strings.Contains(row[1], "app-b") {
 		t.Fatalf("node column = %q, want pod name app-b", row[1])
+	}
+}
+
+// TestLoadBalancedWarning covers a single URL answered by two different
+// instances: the dashboard must say it is load-balanced.
+func TestLoadBalancedWarning(t *testing.T) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(api.InstanceHeader, fmt.Sprintf("pod-%d", n.Add(1)%2))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	m := testModel(t)
+	m.pool = api.NewPool(discovery.NewStatic([]string{srv.URL}), "")
+	c := m.pool.Clients()[0]
+	_ = c.GetHealth()
+	if strings.Contains(m.View(), "Load-balanced") {
+		t.Fatal("warning shown after a single instance")
+	}
+	_ = c.GetHealth()
+	if view := m.View(); !strings.Contains(view, "Load-balanced endpoint") {
+		t.Fatalf("missing load-balanced warning:\n%s", view)
 	}
 }

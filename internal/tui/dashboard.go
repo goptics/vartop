@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -288,7 +290,7 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 }
 
 // renderConnection describes how the active server is reached: kube
-// context/namespace for kubernetes servers, otherwise an endpoint.
+// context/namespace, dns host, or an endpoint.
 func (d *dashboardScreen) renderConnection(m *Model) string {
 	return lipgloss.NewStyle().Foreground(ColorSubtle).Render("→ " + m.connectionLabel())
 }
@@ -300,6 +302,8 @@ func (m *Model) connectionLabel() string {
 		return m.podName(m.selectedPodOrigin)
 	case m.server.Kubernetes != nil:
 		return fmt.Sprintf("%s/%s", m.server.Kubernetes.Context, m.server.Kubernetes.Namespace)
+	case m.server.DNS != nil:
+		return fmt.Sprintf("dns:%s:%d", m.server.DNS.Host, m.server.DNS.Port)
 	default:
 		return m.server.DisplayEndpoint()
 	}
@@ -340,6 +344,25 @@ func (m *Model) poolEndpoints() []string {
 		endpoints = append(endpoints, c.PrimaryEndpoint())
 	}
 	return endpoints
+}
+
+// loadBalancedWarning explains, when an endpoint has been answered by more
+// than one varmq instance, that it is a load balancer: each refresh shows only
+// whichever instance served it. Detection is best-effort; a keep-alive
+// connection pinned to one instance never reveals the others.
+func (m *Model) loadBalancedWarning() string {
+	if m.pool == nil {
+		return ""
+	}
+	lb := m.pool.LoadBalanced()
+	if len(lb) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, ep := range slices.Sorted(maps.Keys(lb)) {
+		parts = append(parts, fmt.Sprintf("%s (%d instances seen)", config.ShortOrigin(ep), lb[ep]))
+	}
+	return fmt.Sprintf("⚠️  Load-balanced endpoint: %s. Each refresh shows one instance; use kubernetes or dns discovery to see all.", strings.Join(parts, ", "))
 }
 
 // podName labels a pod endpoint, preferring the discovered pod name.
@@ -384,6 +407,9 @@ func (d *dashboardScreen) renderBody(m *Model) string {
 	if m.err != nil {
 		errorView = lipgloss.NewStyle().Foreground(ColorError).Padding(0, 1).Render(fmt.Sprintf("⚠️  Error: %v", m.err))
 		errorView += "\n"
+	}
+	if lb := m.loadBalancedWarning(); lb != "" {
+		errorView += lipgloss.NewStyle().Foreground(ColorWarning).Padding(0, 1).Render(lb) + "\n"
 	}
 
 	tableView := lipgloss.NewStyle().Padding(1, 1).Render(d.table.View())

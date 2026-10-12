@@ -27,26 +27,52 @@ type KubernetesRef struct {
 	Path      string `json:"path,omitempty"` // default "/varmq"
 }
 
+// DNSRef discovers varmq instances by resolving a hostname to all of its
+// addresses (e.g. a headless Kubernetes Service, Docker Compose service name,
+// or Consul DNS) and dialing each one.
+type DNSRef struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	Path string `json:"path,omitempty"` // default "/varmq"
+}
+
 // Server represents a single varmq server connection definition.
 type Server struct {
 	Name       string         `json:"name"`
 	Endpoints  []string       `json:"endpoints,omitempty"`
 	Kubernetes *KubernetesRef `json:"kubernetes,omitempty"`
+	DNS        *DNSRef        `json:"dns,omitempty"`
 	Token      string         `json:"token,omitempty"`
 	Interval   int            `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
 }
 
-// Validate checks that exactly one of Endpoints or Kubernetes is configured and
-// that the Kubernetes block, when present, has the required fields.
+// Validate checks that exactly one of Endpoints, Kubernetes or DNS is
+// configured and that the chosen block has its required fields.
 func (s *Server) Validate() error {
 	hasEndpoints := len(s.Endpoints) > 0
 	hasKubernetes := s.Kubernetes != nil
+	hasDNS := s.DNS != nil
 
-	if hasEndpoints && hasKubernetes {
-		return fmt.Errorf("server %q: exactly one of endpoints or kubernetes must be set, got both", s.Name)
+	set := 0
+	for _, has := range []bool{hasEndpoints, hasKubernetes, hasDNS} {
+		if has {
+			set++
+		}
 	}
-	if !hasEndpoints && !hasKubernetes {
-		return fmt.Errorf("server %q: exactly one of endpoints or kubernetes must be set, got neither", s.Name)
+	if set > 1 {
+		return fmt.Errorf("server %q: exactly one of endpoints, kubernetes or dns must be set, got %d", s.Name, set)
+	}
+	if set == 0 {
+		return fmt.Errorf("server %q: exactly one of endpoints, kubernetes or dns must be set, got neither", s.Name)
+	}
+
+	if hasDNS {
+		if s.DNS.Host == "" {
+			return fmt.Errorf("server %q: dns host is required", s.Name)
+		}
+		if s.DNS.Port <= 0 || s.DNS.Port > 65535 {
+			return fmt.Errorf("server %q: dns port must be between 1 and 65535", s.Name)
+		}
 	}
 
 	if hasKubernetes {

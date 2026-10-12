@@ -68,6 +68,12 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 			fmt.Fprintf(w, "  %s: failed: %v\n", origin, errs[i])
 			continue
 		}
+		// Name the instance that answered: behind a load balancer the
+		// action reached only that one.
+		if id := c.LastInstance(); id != "" && id != origin {
+			fmt.Fprintf(w, "  %s: ok (instance %s)\n", origin, id)
+			continue
+		}
 		fmt.Fprintf(w, "  %s: ok\n", origin)
 	}
 
