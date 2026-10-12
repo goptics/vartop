@@ -14,6 +14,7 @@
   <a href="#usage"><strong>Usage</strong></a> ·
   <a href="#configuration"><strong>Configuration</strong></a> ·
   <a href="#kubernetes"><strong>Kubernetes</strong></a> ·
+  <a href="#load-balancers"><strong>Load balancers</strong></a> ·
   <a href="#keyboard-shortcuts"><strong>Shortcuts</strong></a>
 </p>
 
@@ -35,6 +36,8 @@
 - **Worker Detail View** — drill into a single worker to see full configuration, runtime metrics (submitted, completed, successful, failed), and success rate
 - **Multi-Server & Multi-Pod Support** — configure multiple varmq servers, each with a static list of pod endpoints. View merged worker stats across all pods, or drill into a single pod via the Switch view
 - **Kubernetes Discovery** — point a server at a Service or label selector and vartop watches its EndpointSlices, following pods as they scale, restart, or roll out; pods are labelled by pod name
+- **DNS Discovery** — point a server at a hostname that resolves to every instance (headless Service, Docker Compose service, Consul) and vartop re-resolves it every few seconds
+- **Load-Balancer Detection** — varmq names the instance behind every response; if one URL is answered by several instances, vartop warns that it is a load balancer and labels each row with the instance that served it
 - **Worker Control** — pause, resume, restart, and stop workers directly from the TUI or CLI
 - **Concurrency Tuning** — adjust worker pool size in real time without restarting, via `vartop concurrency` (CLI)
 - **Interactive Onboarding** — guided first-run wizard to configure your first server connection
@@ -66,7 +69,7 @@ make build   # binary at bin/vartop
    vartop
    ```
 
-2. **Add more servers** (optional). `server add` opens the same interactive wizard: pick a name, then either a **static endpoint** or **Kubernetes** discovery (context, namespace, service or label selector), and an optional token:
+2. **Add more servers** (optional). `server add` opens the same interactive wizard: pick a name, then a **static endpoint**, **Kubernetes** discovery (context, namespace, service or label selector), or **DNS** discovery (host and port), and an optional token:
 
    ```bash
    vartop server add
@@ -111,7 +114,7 @@ make build   # binary at bin/vartop
 | Command | Description |
 | --- | --- |
 | `vartop server list` | List all servers with health status |
-| `vartop server add` | Register a new server via the interactive wizard (static or Kubernetes) |
+| `vartop server add` | Register a new server via the interactive wizard (static, Kubernetes or DNS) |
 | `vartop server use <name>` | Set the default server |
 | `vartop server remove <name>` | Remove a server |
 | `vartop server remove --all` | Remove all servers |
@@ -198,7 +201,7 @@ Configuration lives in your OS user config directory, created on first run (dire
 
 ### Schema
 
-Each server uses **exactly one** of `endpoints` (static list) or `kubernetes` (live discovery). Setting both, or neither, is rejected when the config is loaded.
+Each server uses **exactly one** of `endpoints` (static list), `kubernetes` or `dns` (live discovery). Setting more than one, or none, is rejected when the config is loaded.
 
 ```json
 {
@@ -220,6 +223,14 @@ Each server uses **exactly one** of `endpoints` (static list) or `kubernetes` (l
         "path": "/varmq"
       },
       "token": "optional-bearer-token"
+    },
+    "headless": {
+      "name": "headless",
+      "dns": {
+        "host": "varmq-headless.workers.svc.cluster.local",
+        "port": 8080,
+        "path": "/varmq"
+      }
     }
   }
 }
@@ -228,8 +239,9 @@ Each server uses **exactly one** of `endpoints` (static list) or `kubernetes` (l
 | Field | Description | Default |
 | --- | --- | --- |
 | `default_server` | Server to use when no `-s` flag is given | *(none)* |
-| `servers.<name>.endpoints` | Static list of mux endpoint URLs (one for a single pod, several for multi-pod) | *(one of endpoints / kubernetes)* |
-| `servers.<name>.kubernetes` | Kubernetes discovery block, see below | *(one of endpoints / kubernetes)* |
+| `servers.<name>.endpoints` | Static list of mux endpoint URLs (one for a single pod, several for multi-pod) | *(one of endpoints / kubernetes / dns)* |
+| `servers.<name>.kubernetes` | Kubernetes discovery block, see [Kubernetes](#kubernetes) | *(one of endpoints / kubernetes / dns)* |
+| `servers.<name>.dns` | DNS discovery block, see [DNS](#dns) | *(one of endpoints / kubernetes / dns)* |
 | `servers.<name>.token` | Bearer token for authentication (sent as `Authorization` header) | *(none)* |
 | `servers.<name>.interval` | Polling interval in seconds | `5` |
 
@@ -267,6 +279,40 @@ Only **ready** endpoints are used, so pods that are starting up or terminating a
 
 If the watcher can't sync within 10 seconds (wrong context, no access, API server unreachable), vartop shows the underlying error. Press <kbd>r</kbd> to retry.
 
+### DNS
+
+Resolves a hostname to **all** of its addresses and dials each one, re-resolving every 5 seconds so instances that scale out or move are picked up. Works anywhere a name returns one address per instance:
+
+- a Kubernetes **headless** Service (`clusterIP: None`) — no kubeconfig or RBAC needed, handy when vartop runs inside the cluster
+- a Docker Compose service name with several replicas (`tasks.<service>` on Swarm)
+- Consul, Nomad, or AWS Cloud Map service DNS
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `host` | Hostname to resolve (A/AAAA records) | *(required)* |
+| `port` | Port each instance serves the mux on | *(required)* |
+| `path` | Mux API path on each instance | `/varmq` |
+
+An unresolvable host fails at connect time with the lookup error; a failed refresh later keeps the last known instances. Like Kubernetes discovery, instances are dialed directly over `http://`, so their addresses must be reachable from vartop. The `server add` wizard asks for host and port; edit the config file to change `path`.
+
+## Load balancers
+
+If a server is configured with a single **load-balancer URL** (an ingress, nginx, a cloud LB, or a normal ClusterIP Service), every request reaches *one* instance chosen by the balancer:
+
+- the dashboard shows only that instance's workers, and it can change on every refresh
+- an action (pause, stop, …) reaches one random instance, not all of them; a `pause` and the following `resume` can land on different instances
+
+vartop can't aggregate through a balancer, so instead it makes the situation visible. varmq (with this feature) adds an `X-Varmq-Instance` header naming the process that answered every API request, defaulting to the hostname (the pod name on Kubernetes) and settable via `varmq.InstanceID`. vartop uses it to:
+
+- label each worker row, and each CLI result line (`ok (instance pod-c)`), with the instance that served it
+- show a **Load-balanced endpoint** warning once one URL has been answered by more than one instance
+
+Detection is best-effort: a balancer that keeps a client on one backend per connection (most L4 balancers, kube-proxy) may never reveal a second instance.
+
+**To see every instance, skip the balancer:** use [`kubernetes`](#kubernetes) discovery, [`dns`](#dns) with a headless Service or service-discovery name, or list the instance URLs in `endpoints`. A cloud load balancer's own hostname resolves to the balancer's nodes, not your instances, so `dns` doesn't help there.
+
+> **Distributed queues:** with a shared (e.g. Redis) queue, every instance reports the same queue length as *Pending*, so don't add Pending up across rows.
+
 ## Architecture
 
 ```
@@ -277,7 +323,7 @@ vartop
 │   └── workers.go          # Worker action & concurrency subcommands (fan out to all pods)
 ├── internal/
 │   ├── api/
-│   │   ├── client.go       # REST client for one varmq mux endpoint
+│   │   ├── client.go       # REST client for one varmq mux endpoint (+ instance header tracking)
 │   │   └── pool.go         # One client per discovered pod, reconciled from a discovery source
 │   ├── config/
 │   │   ├── config.go       # Config load/save + validation (<config dir>/vartop/config.json)
@@ -285,7 +331,8 @@ vartop
 │   ├── discovery/
 │   │   ├── discovery.go    # Source interface: live set of ready endpoint URLs
 │   │   ├── static.go       # Fixed endpoint list from config
-│   │   └── kubernetes.go   # EndpointSlice informer (client-go) for a service or selector
+│   │   ├── kubernetes.go   # EndpointSlice informer (client-go) for a service or selector
+│   │   └── dns.go          # Re-resolves a hostname to every instance address
 │   └── tui/
 │       ├── model.go        # Root Bubble Tea model — shared state, update loop, screen stack
 │       ├── screen.go       # Screen interface + push/pop navigation
