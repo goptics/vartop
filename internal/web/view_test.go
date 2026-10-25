@@ -412,6 +412,23 @@ func TestKPIsPendingIsMaxPerPodSummedOverWorkers(t *testing.T) {
 	}
 }
 
+// TestFleetRatesSkipWorkerlessPods: a healthy pod running no workers has no
+// rate to give, so it must not make every KPI point partial.
+func TestFleetRatesSkipWorkerlessPods(t *testing.T) {
+	s := snap(atTick(0),
+		okPod("http://a", map[string]*Sample{"w": rated(smp("Running", 1, 0, 0, 0), 2, 0.5)}),
+		okPod("http://b", map[string]*Sample{"w": rated(smp("Running", 1, 0, 0, 0), 3, 0.5)}),
+		okPod("http://c", map[string]*Sample{}),
+	)
+	k := BuildDashboard([]*Snapshot{s}, "", 5*time.Second).KPIs
+	if p := k.Completed[0]; p.Partial || p.Gap || p.Title != stamp(s)+" · 5.0/s · 2/2 pods" {
+		t.Errorf("completed point = %+v, want solid 5.0/s from 2/2 pods", p)
+	}
+	if p := k.Failed[0]; p.Partial || p.Title != stamp(s)+" · 60.0/min · 2/2 pods" {
+		t.Errorf("failed point = %+v, want solid 60.0/min from 2/2 pods", p)
+	}
+}
+
 func TestKPIGapsWithoutRates(t *testing.T) {
 	// First snapshot: no sample has a rate yet.
 	s := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 12)}))

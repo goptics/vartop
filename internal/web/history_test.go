@@ -147,6 +147,56 @@ func TestAppendFillsRatesAcrossSnapshots(t *testing.T) {
 	}
 }
 
+// TestAppendCarriesRateOverEarlyPoll: a poll under half an interval after
+// the last one (PollNow after an action) repeats the last rate instead of
+// leaving a gap, and the next regular tick is rated against the sample
+// before it.
+func TestAppendCarriesRateOverEarlyPoll(t *testing.T) {
+	iv := 5 * time.Second
+	t0 := time.Unix(1000, 0)
+	sample := func(at time.Duration, completed, failed uint64) *Sample {
+		s := &Sample{At: t0.Add(at)}
+		s.Instance = "i"
+		s.Metrics.Completed, s.Metrics.Failed = completed, failed
+		return s
+	}
+	appendTo := func(h *History, samples ...*Sample) {
+		for _, s := range samples {
+			h.Append(&Snapshot{At: s.At, Pods: []PodSnapshot{{Endpoint: "p", Workers: map[string]*Sample{"w": s}}}})
+		}
+	}
+
+	s0 := sample(0, 100, 0)
+	s1 := sample(5*time.Second, 150, 5) // 10/s, 1/s
+	early := sample(5008*time.Millisecond, 151, 5)
+	s2 := sample(10*time.Second, 250, 15) // against s1: 20/s, 2/s
+	appendTo(NewHistory(iv), s0, s1, early, s2)
+	for _, c := range []struct {
+		name         string
+		s            *Sample
+		wantC, wantF float64
+	}{{"t0+5s", s1, 10, 1}, {"early t0+5.008s", early, 10, 1}, {"t0+10s", s2, 20, 2}} {
+		if !c.s.RateOK || c.s.CompletedRate != c.wantC || c.s.FailedRate != c.wantF {
+			t.Errorf("%s: RateOK=%v completed=%v failed=%v, want true %v %v",
+				c.name, c.s.RateOK, c.s.CompletedRate, c.s.FailedRate, c.wantC, c.wantF)
+		}
+	}
+
+	// With no rate to repeat, an early poll is still a gap.
+	first, soon := sample(0, 100, 0), sample(8*time.Millisecond, 101, 0)
+	appendTo(NewHistory(iv), first, soon)
+	if soon.RateOK {
+		t.Errorf("early poll after an unrated sample has RateOK (completed=%v)", soon.CompletedRate)
+	}
+	// So is one whose counter went back (a restart), which becomes the base:
+	// rated against r1 instead, r2's counter would be back too, a gap.
+	r0, r1, reset, r2 := sample(0, 100, 0), sample(5*time.Second, 150, 0), sample(5008*time.Millisecond, 2, 0), sample(10*time.Second, 52, 0)
+	appendTo(NewHistory(iv), r0, r1, reset, r2)
+	if reset.RateOK || !r2.RateOK {
+		t.Errorf("reset: RateOK=%v, next: RateOK=%v; want a gap, then a rate against the reset", reset.RateOK, r2.RateOK)
+	}
+}
+
 func TestHistoryConcurrentAppendAndRead(t *testing.T) {
 	const appends = 1000
 	iv := 5 * time.Second

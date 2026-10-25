@@ -176,8 +176,8 @@ func TestPollOnceWorkerFetchErrorMarksPod(t *testing.T) {
 
 	// Not a 404: the worker may still exist, so the pod is unknown rather
 	// than healthy-without-w2.
-	if !strings.Contains(pod.Err, "boom") {
-		t.Errorf("Err = %q, want the w2 fetch error", pod.Err)
+	if !strings.HasPrefix(pod.Err, "worker w2: ") || !strings.Contains(pod.Err, "boom") {
+		t.Errorf("Err = %q, want the w2 fetch error, naming w2", pod.Err)
 	}
 }
 

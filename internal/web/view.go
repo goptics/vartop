@@ -462,8 +462,9 @@ func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 }
 
 // fleetRates charts a rate summed over every worker per snapshot, scaled by
-// scale (60 for /min). Every non-load-balanced pod, healthy or errored, is
-// expected; one contributes when it has a worker with a valid rate.
+// scale (60 for /min). Every non-load-balanced pod is expected, errored or
+// healthy, except a healthy one running no workers, which has no rate to
+// give; one contributes when it has a worker with a valid rate.
 func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale float64, unit string) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
@@ -473,10 +474,14 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 			if p.LoadBalanced > 1 {
 				continue
 			}
-			expected++
 			if p.Err != "" {
+				expected++
 				continue
 			}
+			if len(p.Workers) == 0 {
+				continue
+			}
+			expected++
 			var got bool
 			for _, sm := range p.Workers {
 				if sm.RateOK {

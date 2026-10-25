@@ -147,7 +147,7 @@ func pollOnce(ctx context.Context, pool *api.Pool) *Snapshot {
 // pollPod lists one pod's workers, then fetches every worker concurrently. A
 // failed or timed-out list marks the pod errored. A worker that answers 404
 // was removed since the list and is skipped; any other fetch error also marks
-// the pod errored, since that worker's state is unknown, not absent.
+// the pod errored, naming the worker, since its state is unknown, not absent.
 //
 // ponytail: no per-pod request limit; add a semaphore of ~4 if TIME_WAIT
 // build-up or tick latency shows up.
@@ -183,7 +183,7 @@ func pollPod(ctx context.Context, c *api.Client) PodSnapshot {
 		case errors.As(errs[i], &apiErr) && apiErr.StatusCode == http.StatusNotFound:
 			// removed since the list: skip
 		case pod.Err == "":
-			pod.Err = errs[i].Error()
+			pod.Err = "worker " + w.Name + ": " + errs[i].Error()
 		}
 	}
 	return pod

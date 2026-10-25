@@ -63,6 +63,10 @@ func (h *History) Interval() time.Duration { return h.interval }
 // Append fills the rate fields of every sample in s from the previous sample of
 // the same worker on the same pod, then publishes s, evicting the oldest
 // snapshot when the ring is full. s must not be modified afterwards.
+//
+// A sample that comes early (see early), as PollNow's after an action does,
+// repeats the previous sample's rate instead of being a gap, and does not
+// replace it as the base: the next regular tick is rated against it.
 func (h *History) Append(s *Snapshot) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -70,7 +74,12 @@ func (h *History) Append(s *Snapshot) {
 	for _, pod := range s.Pods {
 		for name, sm := range pod.Workers {
 			key := pod.Endpoint + "\x00" + name
-			sm.CompletedRate, sm.FailedRate, sm.RateOK = rate(h.last[key], sm, h.interval)
+			prev := h.last[key]
+			if early(prev, sm, h.interval) {
+				sm.CompletedRate, sm.FailedRate, sm.RateOK = prev.CompletedRate, prev.FailedRate, true
+				continue
+			}
+			sm.CompletedRate, sm.FailedRate, sm.RateOK = rate(prev, sm, h.interval)
 			// ponytail: never pruned; entries for vanished pods are tiny and
 			// fall out of rate()'s 3x window anyway.
 			h.last[key] = sm
@@ -107,6 +116,15 @@ func (h *History) Latest() *Snapshot {
 		return nil
 	}
 	return h.ring[(h.next-1+len(h.ring))%len(h.ring)]
+}
+
+// early reports whether cur came under half an interval after prev, which
+// has a rate to repeat, from the same instance with no counter gone back.
+// A restart or another instance is never early: rate makes it a gap.
+func early(prev, cur *Sample, interval time.Duration) bool {
+	return prev != nil && prev.RateOK && cur.At.Sub(prev.At) < interval/2 &&
+		cur.Instance == prev.Instance &&
+		cur.Metrics.Completed >= prev.Metrics.Completed && cur.Metrics.Failed >= prev.Metrics.Failed
 }
 
 // rate derives per-second completed and failed rates between two samples of
