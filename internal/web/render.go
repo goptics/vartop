@@ -29,7 +29,9 @@ type Page struct {
 	Health                      HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
-	// LBWarning is the load-balancer notice. Banner is the stale-tab notice.
+	// LBWarning is the load-balancer notice. Banner is a notice about what
+	// this tab shows: its server changed, its pod is gone, or its worker is
+	// not found.
 	// Connecting is the whole "Connecting to {label}…" message. Err is a
 	// failure to show; with no view model set it also offers a Retry form
 	// that posts Server to /server.
