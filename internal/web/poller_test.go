@@ -307,15 +307,22 @@ func TestTicksDoNotOverlap(t *testing.T) {
 	f.Delay = 1500 * time.Millisecond // 1.5 × the 1s interval
 	s := newTestSession(t, srv.URL)
 
-	waitUntil(t, 8*time.Second, "three list calls", func() bool {
-		return countCalls(f.calls(), "GET /workers") >= 3
-	})
+	waitUntil(t, 8*time.Second, "three snapshots", func() bool { return len(s.History.Snapshots()) >= 3 })
 
+	// Inline ticks with the timer reset after each one start 0.8s (the
+	// deadline-cut tick) + 1s (the interval) apart; overlapping or
+	// ticker-driven ticks would start 1s apart.
+	snaps := s.History.Snapshots()
+	for i := 1; i < len(snaps); i++ {
+		if gap := snaps[i].At.Sub(snaps[i-1].At); gap < 1500*time.Millisecond {
+			t.Errorf("tick %d started %v after the previous one, want ≥ 1.5s (tick time + interval)", i, gap)
+		}
+	}
 	if got := f.maxListConcurrency(); got != 1 {
 		t.Errorf("max concurrent list calls = %d, want 1", got)
 	}
 	// The 0.8 × interval tick deadline cuts each 1.5s list short.
-	if latest := s.History.Latest(); latest == nil || podByEndpoint(t, latest, srv.URL).Err == "" {
-		t.Errorf("latest snapshot %+v: want the pod errored by the tick deadline", latest)
+	if err := podByEndpoint(t, snaps[len(snaps)-1], srv.URL).Err; err == "" {
+		t.Error("latest pod is healthy; want it errored by the tick deadline")
 	}
 }
