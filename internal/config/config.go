@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -45,6 +46,18 @@ type Server struct {
 	DNS        *DNSRef        `json:"dns,omitempty"`
 	Token      string         `json:"token,omitempty"`
 	Interval   int            `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+}
+
+// defaultPollInterval is used when Server.Interval is unset or non-positive.
+const defaultPollInterval = 5 * time.Second
+
+// PollInterval returns the polling interval, falling back to 5s when
+// Interval is 0 or negative.
+func (s *Server) PollInterval() time.Duration {
+	if s.Interval <= 0 {
+		return defaultPollInterval
+	}
+	return time.Duration(s.Interval) * time.Second
 }
 
 // Validate checks that exactly one of Endpoints, Kubernetes or DNS is

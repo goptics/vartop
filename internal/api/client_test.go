@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,16 +14,18 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/goptics/vartop/internal/config"
 )
 
 // recordedRequest captures what a test server saw.
 type recordedRequest struct {
-	Method  string
-	Path    string
-	Auth    string
-	HasAuth bool
+	Method      string
+	Path        string
+	EscapedPath string
+	Auth        string
+	HasAuth     bool
 }
 
 // recordingServer answers every request with the given status, headers and body
@@ -35,10 +38,11 @@ func recordingServer(t *testing.T, status int, header map[string]string, body st
 		mu.Lock()
 		_, has := r.Header["Authorization"]
 		reqs = append(reqs, recordedRequest{
-			Method:  r.Method,
-			Path:    r.URL.Path,
-			Auth:    r.Header.Get("Authorization"),
-			HasAuth: has,
+			Method:      r.Method,
+			Path:        r.URL.Path,
+			EscapedPath: r.URL.EscapedPath(),
+			Auth:        r.Header.Get("Authorization"),
+			HasAuth:     has,
 		})
 		mu.Unlock()
 		for k, v := range header {
@@ -363,5 +367,57 @@ func TestPoolForKubernetesBadContext(t *testing.T) {
 	}
 	if pool != nil {
 		t.Errorf("pool = %v, want nil on error", pool)
+	}
+}
+
+func TestCtxMethodsHonourCancel(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-block }))
+	t.Cleanup(func() { close(block); srv.Close() })
+	c := NewClient(srv.URL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.ListWorkersCtx(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want DeadlineExceeded", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("did not return promptly on ctx deadline")
+	}
+}
+
+func TestGetWorkerCtxKeepsEscapedPath(t *testing.T) {
+	srv, got := recordingServer(t, http.StatusOK, nil, `{"name":"a/b c"}`)
+	c := NewClient(srv.URL, "")
+	if _, err := c.GetWorkerCtx(context.Background(), url.PathEscape("a/b c")); err != nil {
+		t.Fatal(err)
+	}
+	if p := got()[0].EscapedPath; p != "/workers/a%2Fb%20c" {
+		t.Fatalf("path = %q", p)
+	}
+}
+
+func TestMutatingCtxMethodsKeepEscapedPath(t *testing.T) {
+	name := url.PathEscape("a/b c")
+	tests := []struct {
+		name     string
+		call     func(c *Client) error
+		wantPath string
+	}{
+		{"action", func(c *Client) error { return c.ActionCtx(context.Background(), name, "pause") }, "/workers/a%2Fb%20c/actions/pause"},
+		{"tune concurrency", func(c *Client) error { return c.TuneConcurrencyCtx(context.Background(), name, 4) }, "/workers/a%2Fb%20c/config/concurrency/4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, got := recordingServer(t, http.StatusOK, nil, "")
+			if err := tt.call(NewClient(srv.URL, "")); err != nil {
+				t.Fatal(err)
+			}
+			reqs := got()
+			if len(reqs) != 1 || reqs[0].Method != http.MethodPatch || reqs[0].EscapedPath != tt.wantPath {
+				t.Fatalf("requests = %+v, want one PATCH %s", reqs, tt.wantPath)
+			}
+		})
 	}
 }

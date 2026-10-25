@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -155,8 +156,13 @@ func (c *Client) handleResponse(resp *http.Response, target interface{}) error {
 
 // ListWorkers retrieves workers from the client endpoint and tags them with the origin.
 func (c *Client) ListWorkers() ([]WorkerSummary, error) {
+	return c.ListWorkersCtx(context.Background())
+}
+
+// ListWorkersCtx is ListWorkers with a cancellable request context.
+func (c *Client) ListWorkersCtx(ctx context.Context) ([]WorkerSummary, error) {
 	endpoint := c.endpoint
-	req, err := http.NewRequest(http.MethodGet, endpoint+"/workers", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/workers", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +188,14 @@ func (c *Client) ListWorkers() ([]WorkerSummary, error) {
 
 // GetWorker fetches detailed info and metrics for a single worker.
 func (c *Client) GetWorker(name string) (*WorkerDetails, error) {
+	return c.GetWorkerCtx(context.Background(), name)
+}
+
+// GetWorkerCtx is GetWorker with a cancellable request context. The name is
+// used as given: callers pass it already path-escaped.
+func (c *Client) GetWorkerCtx(ctx context.Context, name string) (*WorkerDetails, error) {
 	ep := c.endpoint
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/workers/%s", ep, name), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/workers/%s", ep, name), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -207,8 +219,14 @@ func (c *Client) GetWorker(name string) (*WorkerDetails, error) {
 
 // Action dispatches a specific action (pause, resume, restart, stop) to a worker.
 func (c *Client) Action(workerName, action string) error {
+	return c.ActionCtx(context.Background(), workerName, action)
+}
+
+// ActionCtx is Action with a cancellable request context. The worker name is
+// used as given: callers pass it already path-escaped.
+func (c *Client) ActionCtx(ctx context.Context, workerName, action string) error {
 	ep := c.endpoint
-	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/workers/%s/actions/%s", ep, workerName, action), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("%s/workers/%s/actions/%s", ep, workerName, action), nil)
 	if err != nil {
 		return err
 	}
@@ -223,8 +241,14 @@ func (c *Client) Action(workerName, action string) error {
 
 // TuneConcurrency updates the concurrency of a given worker.
 func (c *Client) TuneConcurrency(workerName string, concurrency int) error {
+	return c.TuneConcurrencyCtx(context.Background(), workerName, concurrency)
+}
+
+// TuneConcurrencyCtx is TuneConcurrency with a cancellable request context.
+// The worker name is used as given: callers pass it already path-escaped.
+func (c *Client) TuneConcurrencyCtx(ctx context.Context, workerName string, concurrency int) error {
 	ep := c.endpoint
-	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/workers/%s/config/concurrency/%d", ep, workerName, concurrency), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("%s/workers/%s/config/concurrency/%d", ep, workerName, concurrency), nil)
 	if err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidate(t *testing.T) {
@@ -253,6 +254,17 @@ func TestShortOrigin(t *testing.T) {
 	} {
 		if got := ShortOrigin(in); got != want {
 			t.Errorf("ShortOrigin(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestPollInterval(t *testing.T) {
+	for _, tc := range []struct {
+		in   int
+		want time.Duration
+	}{{0, 5 * time.Second}, {-1, 5 * time.Second}, {1, time.Second}, {30, 30 * time.Second}} {
+		if got := (&Server{Interval: tc.in}).PollInterval(); got != tc.want {
+			t.Errorf("Interval %d: got %v want %v", tc.in, got, tc.want)
 		}
 	}
 }
