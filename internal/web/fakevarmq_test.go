@@ -92,6 +92,17 @@ func (f *fakeVarmq) calls() []string {
 	return slices.Clone(f.Calls)
 }
 
+// worker returns a copy of the named worker's current state; ok is false
+// if f has no such worker.
+func (f *fakeVarmq) worker(name string) (w fakeWorker, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if fw := f.Workers[name]; fw != nil {
+		return *fw, true
+	}
+	return fakeWorker{}, false
+}
+
 // maxListConcurrency is the most GET /workers requests ever in flight at once.
 func (f *fakeVarmq) maxListConcurrency() int {
 	f.mu.Lock()

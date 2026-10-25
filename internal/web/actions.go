@@ -124,6 +124,13 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (string, *Session
 	return "", nil
 }
 
+// mutationCtx is the context varmq calls run under: r's values without its
+// cancellation. htmx aborts a request when another control fires (hx-sync
+// replace), which cancels r's context; PATCHes cut off midway would leave an
+// action applied on some pods and not others, with no results shown. Each
+// call is still bounded by the client's timeout.
+func mutationCtx(r *http.Request) context.Context { return context.WithoutCancel(r.Context()) }
+
 // badRequest answers 400 with msg, escaped: htmx inserts it into #errors as
 // HTML. Callers never put request input in msg.
 func badRequest(w http.ResponseWriter, msg string) {
@@ -143,7 +150,7 @@ func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(r.Context(), s.Clients(), pod, labelsOf(s.History.Latest()), func(ctx context.Context, c *api.Client) error {
+	results, err := fanOut(mutationCtx(r), s.Clients(), pod, labelsOf(s.History.Latest()), func(ctx context.Context, c *api.Client) error {
 		return c.ActionCtx(ctx, url.PathEscape(name), action)
 	})
 	if err != nil {
@@ -176,7 +183,7 @@ func (h *handler) concurrency(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(r.Context(), s.Clients(), pod, labelsOf(latest), func(ctx context.Context, c *api.Client) error {
+	results, err := fanOut(mutationCtx(r), s.Clients(), pod, labelsOf(latest), func(ctx context.Context, c *api.Client) error {
 		if cur, ok := current[c.PrimaryEndpoint()]; ok && cur == n {
 			return noChange(fmt.Sprintf("already %d", n))
 		}
@@ -236,12 +243,13 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := mutationCtx(r)
 	perName := make([][]ActionResult, len(names))
 	var wg sync.WaitGroup
 	for i, name := range names {
 		wg.Go(func() {
 			// targets is already scoped, so this cannot fail.
-			res, _ := fanOut(r.Context(), targets, "", labels, func(ctx context.Context, c *api.Client) error {
+			res, _ := fanOut(ctx, targets, "", labels, func(ctx context.Context, c *api.Client) error {
 				return c.ActionCtx(ctx, url.PathEscape(name), action)
 			})
 			for j := range res {
@@ -272,7 +280,7 @@ func (h *handler) switchServer(w http.ResponseWriter, r *http.Request) {
 }
 
 // respond answers an executed action: results, after waiting up to
-// settleWait for a snapshot that shows them, then the #live region of the
+// settleWait (less if the browser gives up) for a snapshot that shows them, then the #live region of the
 // page the request came from as an out-of-band swap.
 func (h *handler) respond(w http.ResponseWriter, r *http.Request, key string, s *Session, pod, worker string, results []ActionResult) {
 	if slices.ContainsFunc(results, func(res ActionResult) bool { return res.Outcome != "no change" }) {

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -190,6 +191,55 @@ func TestActionResponsesNeverCarryToken(t *testing.T) {
 				t.Errorf("POST %s: header %s contains the token", c.path, k)
 			}
 		}
+	}
+}
+
+// TestMutationsFinishWhenBrowserAborts: htmx aborts an action request when
+// another control fires (hx-sync replace), which closes the connection. The
+// PATCHes already under way must still complete on every pod, or an action
+// would be half-applied with no results shown.
+func TestMutationsFinishWhenBrowserAborts(t *testing.T) {
+	for _, c := range []struct {
+		path string
+		form url.Values
+		done func(fakeWorker) bool
+	}{
+		{"/workers/orders/actions/stop", multi(), func(w fakeWorker) bool { return w.Status == "Stopped" }},
+		{"/workers/orders/concurrency", multi("n", "9"), func(w fakeWorker) bool { return w.Concurrency == 9 }},
+		{"/bulk/pause", multi("names", "orders", "confirm", "1"), func(w fakeWorker) bool { return w.Status == "Paused" }},
+	} {
+		t.Run(strings.TrimPrefix(c.path, "/"), func(t *testing.T) {
+			t.Parallel()
+			fa, fb, aSrv, bSrv := twoFakes(t)
+			srv, _ := newTestServer(t, aSrv, bSrv)
+			fb.mu.Lock()
+			fb.Delay = time.Second // b answers slowly; it drops the request if vartop gives up on it
+			fb.mu.Unlock()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := postRequest(t, srv, c.path, c.form).WithContext(ctx)
+			sent := make(chan error, 1)
+			go func() {
+				resp, err := srv.Client().Do(req)
+				if err == nil {
+					resp.Body.Close()
+				}
+				sent <- err
+			}()
+			waitUntil(t, 3*time.Second, "b's PATCH under way", func() bool { return len(patches(fb)) == 1 })
+			cancel() // the browser aborts
+			if err := <-sent; err == nil {
+				t.Fatal("the request completed before it was aborted; the test proves nothing")
+			}
+
+			for _, f := range []*fakeVarmq{fa, fb} {
+				waitUntil(t, 3*time.Second, "orders changed on "+f.Instance, func() bool {
+					w, _ := f.worker("orders")
+					return c.done(w)
+				})
+			}
+		})
 	}
 }
 
