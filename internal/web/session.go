@@ -29,6 +29,7 @@ type Manager struct {
 	pending string     // server being connected, "" if none
 	err     error      // last build error, cleared by a successful build
 	failed  string     // server whose build set err, "" when err is nil
+	active  string     // server of cur, "" when cur is nil; set with cur
 	closed  bool
 }
 
@@ -91,7 +92,7 @@ func (m *Manager) connect(seq uint64, srv *config.Server) {
 		m.mu.Unlock()
 		return
 	}
-	m.err, m.failed = nil, ""
+	m.err, m.failed, m.active = nil, "", name
 	old := m.cur.Swap(NewSession(srv, pool))
 	m.mu.Unlock()
 
@@ -104,6 +105,16 @@ func (m *Manager) connect(seq uint64, srv *config.Server) {
 // and after Close. A session it returned may be closed by a later switch;
 // its History stays readable.
 func (m *Manager) Current() *Session { return m.cur.Load() }
+
+// Active returns the active session and the name (configuration key) of its
+// server, read together: "" and nil until the first build succeeds, and
+// after Close. Server names are keys, never config.Server.Name, which the
+// configuration does not keep equal to its key.
+func (m *Manager) Active() (string, *Session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active, m.cur.Load()
+}
 
 // Pending returns the name of the server being connected, "" if none.
 func (m *Manager) Pending() string {
@@ -141,7 +152,7 @@ func (m *Manager) Close() error {
 	}
 	m.closed = true
 	m.seq++
-	m.pending = ""
+	m.pending, m.active = "", ""
 	old := m.cur.Swap(nil)
 	m.mu.Unlock()
 

@@ -145,7 +145,8 @@ func serverChanged(active string) string { return "Server changed to " + active 
 func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p, s := h.page(r)
 	if s != nil {
-		d := BuildDashboard(fill(&p, s.History), p.Pod, s.History.Interval())
+		snaps := fill(&p, s.History) // first: it drops an unknown p.Pod
+		d := BuildDashboard(snaps, p.Pod, s.History.Interval())
 		p.Dashboard = &d
 	}
 	h.render(w, "dashboard", http.StatusOK, p)
@@ -199,12 +200,12 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 // connecting or error message is sent as the Banner instead.
 func (h *handler) page(r *http.Request) (Page, *Session) {
 	p := Page{Servers: h.m.Servers(), SelfURL: r.URL.RequestURI(), Health: Health(nil)}
-	want := r.FormValue("server")
-	// Pending before Current: connect clears pending and swaps the session
+	want := r.FormValue("server") // a configuration key, like every server name here
+	// Pending before Active: connect clears pending and swaps the session
 	// under one lock, so this order never sees the old session with nothing
 	// pending mid-switch, which would show a stale banner for a moment.
 	pending := h.m.Pending()
-	cur := h.m.Current()
+	active, cur := h.m.Active()
 
 	switch {
 	case pending != "" && (want == pending || cur == nil):
@@ -212,8 +213,8 @@ func (h *handler) page(r *http.Request) (Page, *Session) {
 		p.Connecting = "Connecting to " + ConnectionLabel(h.m.cfg.Servers[pending]) + "…"
 	case cur == nil:
 		h.failure(&p, want)
-	case want == "" || want == cur.Server.Name:
-		p.Server = cur.Server.Name
+	case want == "" || want == active:
+		p.Server = active
 		p.Pod = r.FormValue("pod")
 		if want == "" {
 			// Bind the poller to the server shown; the path stays escaped.
@@ -227,8 +228,8 @@ func (h *handler) page(r *http.Request) (Page, *Session) {
 	case want == h.m.Failed():
 		h.failure(&p, want)
 	default:
-		p.Server = cur.Server.Name
-		p.Banner = serverChanged(cur.Server.Name)
+		p.Server = active
+		p.Banner = serverChanged(active)
 		fill(&p, cur.History)
 	}
 

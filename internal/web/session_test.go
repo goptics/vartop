@@ -199,6 +199,31 @@ func TestFailedNamesLastFailedBuild(t *testing.T) {
 	}
 }
 
+func TestActiveNamesConfigKey(t *testing.T) {
+	src := &recordingSource{}
+	cfg := &config.Config{Servers: map[string]*config.Server{"prod-eu": {Name: "Production EU", Interval: 1}}}
+	m := NewManager(cfg, func(*config.Server) (*api.Pool, error) { return api.NewPool(src, ""), nil })
+	t.Cleanup(func() { _ = m.Close() })
+	if name, s := m.Active(); name != "" || s != nil {
+		t.Fatalf("Active() = %q, %v before any build, want none", name, s)
+	}
+
+	if err := m.Switch("prod-eu"); err != nil {
+		t.Fatal(err)
+	}
+	waitForServer(t, m, "Production EU")
+	if name, s := m.Active(); name != "prod-eu" || s != m.Current() {
+		t.Errorf("Active() = %q, %v; want the key prod-eu and the current session", name, s)
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if name, s := m.Active(); name != "" || s != nil {
+		t.Errorf("Active() = %q, %v after Close, want none", name, s)
+	}
+}
+
 func TestSupersededBuildIsClosed(t *testing.T) {
 	t.Run("newer finishes first", func(t *testing.T) {
 		m, g := newGatedManager(t, "b", "c")

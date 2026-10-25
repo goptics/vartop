@@ -34,16 +34,25 @@ func newTestServer(t *testing.T, fakes ...*httptest.Server) (*httptest.Server, *
 		"multi": {Name: "multi", Interval: 1, Endpoints: endpoints, Token: testToken},
 		"b":     {Name: "b", Interval: 1, Endpoints: []string{"http://b.invalid"}, Token: testToken},
 	}}
+	m := startManager(t, cfg, "multi")
+	return serve(t, m), m
+}
+
+// startManager returns a Manager over cfg (pools from api.PoolFor) with the
+// server keyed name active and its first snapshot in. It is closed when the
+// test ends.
+func startManager(t *testing.T, cfg *config.Config, name string) *Manager {
+	t.Helper()
 	m := NewManager(cfg, api.PoolFor)
 	t.Cleanup(func() { _ = m.Close() })
-	if err := m.Switch("multi"); err != nil {
-		t.Fatalf("Switch(multi): %v", err)
+	if err := m.Switch(name); err != nil {
+		t.Fatalf("Switch(%s): %v", name, err)
 	}
 	waitUntil(t, 3*time.Second, "first snapshot", func() bool {
 		s := m.Current()
 		return s != nil && s.History.Latest() != nil
 	})
-	return serve(t, m), m
+	return m
 }
 
 // serve starts the web UI for m on a listener from Listen, allowing the
@@ -369,6 +378,33 @@ func TestStaleServerParamShowsBanner(t *testing.T) {
 	_, body = fetch(t, srv, "/?server=multi", false)
 	if strings.Contains(body, "Server changed") || !strings.Contains(body, "orders") {
 		t.Error("GET /?server=multi should show multi's data without the banner")
+	}
+}
+
+// TestServerIdentityIsConfigKey: pages name servers by configuration key,
+// which config.Server.Name need not equal.
+func TestServerIdentityIsConfigKey(t *testing.T) {
+	_, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 1}})
+	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
+		"prod-eu": {Name: "Production EU", Interval: 1, Endpoints: []string{fSrv.URL}},
+		"dev":     {Name: "dev", Interval: 1, Endpoints: []string{"http://dev.invalid"}},
+	}}, "prod-eu")
+	srv := serve(t, m)
+
+	for _, path := range []string{"/?server=prod-eu", "/"} {
+		_, body := fetch(t, srv, path, false)
+		if strings.Contains(body, "Server changed") || !strings.Contains(body, ">orders<") {
+			t.Errorf("GET %s should show prod-eu's data without the banner", path)
+		}
+		for _, want := range []string{`<option value="prod-eu" selected>`, `hx-get="/?server=prod-eu"`, `name="server" value="prod-eu"`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("GET %s lacks %q", path, want)
+			}
+		}
+	}
+	_, body := fetch(t, srv, "/?server="+url.QueryEscape("Production EU"), false)
+	if !strings.Contains(body, "Server changed to prod-eu — reload") {
+		t.Error("?server=<config.Server.Name> should be stale: names are keys")
 	}
 }
 
