@@ -59,7 +59,8 @@ func (p Page) Scope() string {
 
 // ActionResult is one pod's outcome of an action. Outcome is "ok",
 // "no change" or "failed"; Msg, when set, is shown in parentheses after it.
-type ActionResult struct{ Pod, Endpoint, Outcome, Msg string }
+// Worker names the worker when one response covers several (bulk).
+type ActionResult struct{ Worker, Pod, Endpoint, Outcome, Msg string }
 
 // ConfirmView is the bulk-action confirmation panel: Names × Pods on Server.
 type ConfirmView struct {

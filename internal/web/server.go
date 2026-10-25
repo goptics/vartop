@@ -63,7 +63,7 @@ func AllowedHosts(ln net.Listener) []string {
 }
 
 // handler serves the pages of the active session. Pages read only the
-// session's History; nothing here calls varmq.
+// session's History; only the POST routes in actions.go call varmq.
 type handler struct {
 	m    *Manager
 	tmpl map[string]*template.Template
@@ -71,7 +71,8 @@ type handler struct {
 
 // NewHandler returns the web UI for m. Guards, outermost first: the Host
 // allowlist (every method), cross-origin protection, and "HX-Request: true"
-// on POST; each refuses with 403.
+// on every method but GET and HEAD; each refuses with 403. The POST routes
+// that change state are registered here so every guard wraps them.
 func NewHandler(m *Manager, hosts []string) (http.Handler, error) {
 	tmpl, err := parseTemplates()
 	if err != nil {
@@ -88,6 +89,10 @@ func NewHandler(m *Manager, hosts []string) (http.Handler, error) {
 	mux.HandleFunc("GET /grid", h.grid)
 	mux.HandleFunc("GET /workers/{name}", h.detail)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+	mux.HandleFunc("POST /workers/{name}/actions/{action}", h.action)
+	mux.HandleFunc("POST /workers/{name}/concurrency", h.concurrency)
+	mux.HandleFunc("POST /bulk/{action}", h.bulk)
+	mux.HandleFunc("POST /server", h.switchServer)
 
 	return denyFraming(allowHosts(hosts, http.NewCrossOriginProtection().Handler(requireHTMX(mux)))), nil
 }
@@ -113,12 +118,12 @@ func allowHosts(hosts []string, next http.Handler) http.Handler {
 	})
 }
 
-// requireHTMX refuses a POST without "HX-Request: true". A form on another
-// site cannot set that header, and a script would need a CORS preflight,
-// which this server never answers.
+// requireHTMX refuses any request but a GET or HEAD without "HX-Request:
+// true". A form on another site cannot set that header, and a script would
+// need a CORS preflight, which this server never answers.
 func requireHTMX(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && !isHTMX(r) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !isHTMX(r) {
 			http.Error(w, "forbidden: not an htmx request", http.StatusForbidden)
 			return
 		}
