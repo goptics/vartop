@@ -379,7 +379,6 @@ func TestDetailRenders(t *testing.T) {
 
 	// Scope names the selected pod, in the confirm text and the pod field.
 	p.Pod = "http://a:3000"
-	p.Pods[0].Selected = true
 	body = run(t, "detail", "layout", p)
 	for _, want := range []string{`hx-confirm="Stop a/b c on a (dev)?"`, `name="pod" value="http://a:3000"`} {
 		if !strings.Contains(body, want) {

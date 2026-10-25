@@ -17,10 +17,7 @@ import (
 var assets embed.FS
 
 // PodOption is one entry of the pod select.
-type PodOption struct {
-	Endpoint, Label string
-	Selected        bool
-}
+type PodOption struct{ Endpoint, Label string }
 
 // Page is everything a full page needs. Handlers fill it; templates never
 // compute anything the view models do not already carry.
@@ -30,6 +27,7 @@ type Page struct {
 	Pods                        []PodOption
 	IntervalSec                 int
 	Health                      HealthView
+	Updated                     string // clock time of the newest snapshot, "" before the first
 
 	// LBWarning is the load-balancer notice. Banner is the stale-tab notice.
 	// Connecting is the whole "Connecting to {label}…" message. Err is a

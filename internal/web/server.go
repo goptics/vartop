@@ -150,6 +150,7 @@ func serverChanged(active string) string { return "Server changed to " + active 
 
 func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p, s := h.page(r)
+	p.Title = pageTitle("vartop", p.Server)
 	if s != nil {
 		if snaps := fill(&p, s.History); !podGone(&p, snaps) {
 			d := BuildDashboard(snaps, p.Pod, s.History.Interval())
@@ -161,10 +162,12 @@ func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 	p, s := h.page(r)
+	p.Title = pageTitle("Pod grid", p.Server)
 	if s != nil {
 		g := BuildGrid(latestOf(fill(&p, s.History)))
 		p.Grid = &g
 	}
+	p.Pods = nil // the grid shows every pod: no pod select
 	h.render(w, "grid", http.StatusOK, p)
 }
 
@@ -174,6 +177,7 @@ func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	p, s := h.page(r)
+	p.Title = pageTitle(name, p.Server)
 	status := http.StatusOK
 	if s != nil {
 		snaps := fill(&p, s.History)
@@ -193,6 +197,14 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.render(w, "detail", status, p)
+}
+
+// pageTitle is a page's document title: what it shows, then its server.
+func pageTitle(what, server string) string {
+	if server == "" {
+		return what
+	}
+	return what + " · " + server
 }
 
 // page starts the Page for r. It returns the active session when the page
@@ -268,10 +280,11 @@ func fill(p *Page, hist *History) []*Snapshot {
 	p.Health = Health(latest)
 	p.LBWarning = LBWarning(latest)
 
-	p.Pods = nil
+	p.Pods, p.Updated = nil, ""
 	if latest != nil {
+		p.Updated = pointTime(latest)
 		for _, ps := range latest.Pods {
-			p.Pods = append(p.Pods, PodOption{Endpoint: ps.Endpoint, Label: ps.Label, Selected: ps.Endpoint == p.Pod})
+			p.Pods = append(p.Pods, PodOption{Endpoint: ps.Endpoint, Label: ps.Label})
 		}
 	}
 	return snaps
@@ -318,7 +331,8 @@ func latestOf(snaps []*Snapshot) *Snapshot {
 func (h *handler) render(w http.ResponseWriter, set string, status int, p Page) {
 	var buf bytes.Buffer
 	if err := h.tmpl[set].ExecuteTemplate(&buf, "layout", p); err != nil {
-		http.Error(w, "render "+set+": "+err.Error(), http.StatusInternalServerError)
+		// Escaped: htmx inserts an error response into #errors as HTML.
+		http.Error(w, template.HTMLEscapeString("render "+set+": "+err.Error()), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

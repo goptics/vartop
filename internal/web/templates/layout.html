@@ -30,6 +30,7 @@
 <div id="status">{{if not .Connecting}}
   <span class="health" title="healthy / total pods">{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}} pods</span>
   {{if gt .IntervalSec 0}}<span class="interval">refresh every {{.IntervalSec}}s</span>{{end}}
+  {{with .Updated}}<span class="updated">updated {{.}}</span>{{end}}
   {{if .LBWarning}}<p class="lb" role="note">{{.LBWarning}}</p>{{end}}{{end}}
 </div>
 <div id="errors" role="alert">{{if .Err}}<p class="err">{{.Err}}</p>{{end}}</div>

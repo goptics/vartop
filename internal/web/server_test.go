@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -277,9 +278,9 @@ func TestPagesRender(t *testing.T) {
 		path string
 		want []string
 	}{
-		{"/", []string{"orders", "emails", `hx-get="/?server=multi"`}},
-		{"/grid", []string{"orders", "emails", `hx-get="/grid?server=multi"`}},
-		{"/workers/orders", []string{"orders", "Pods reporting:", `hx-get="/workers/orders?server=multi"`}},
+		{"/", []string{"orders", "emails", `hx-get="/?server=multi"`, "<title>vartop · multi</title>"}},
+		{"/grid", []string{"orders", "emails", `hx-get="/grid?server=multi"`, "<title>Pod grid · multi</title>"}},
+		{"/workers/orders", []string{"orders", "Pods reporting:", `hx-get="/workers/orders?server=multi"`, "<title>orders · multi</title>"}},
 	} {
 		status, body := fetch(t, srv, c.path, false)
 		if status != http.StatusOK {
@@ -302,6 +303,15 @@ func TestPagesRender(t *testing.T) {
 		_, body = fetch(t, srv, "/?pod="+url.QueryEscape("http://gone.invalid"), false)
 		if !strings.Contains(body, "Pod http://gone.invalid is no longer reported — reload") || strings.Contains(body, `<tr id="w-`) {
 			t.Error("an unknown pod should show the gone-pod banner and no rows")
+		}
+	})
+
+	// The grid shows every pod, so it offers no pod select.
+	t.Run("pod select", func(t *testing.T) {
+		for path, want := range map[string]bool{"/": true, "/workers/orders": true, "/grid": false, "/grid?server=other": false} {
+			if _, body := fetch(t, srv, path, false); strings.Contains(body, `<select name="pod">`) != want {
+				t.Errorf("GET %s: pod select shown = %v, want %v", path, !want, want)
+			}
 		}
 	})
 
@@ -392,6 +402,39 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	// The full page polls without the pod.
 	if _, body := fetch(t, srv, dash, false); !strings.Contains(body, `hx-get="/?server=multi"`) {
 		t.Error("full load of a gone pod still polls it")
+	}
+}
+
+// TestStatusShowsUpdateTime: #status, which every poll refreshes, shows the
+// newest snapshot's time, so a page whose polls stopped is visibly stale.
+func TestStatusShowsUpdateTime(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	srv, m := newTestServer(t, aSrv, bSrv)
+	h := m.Current().History
+
+	for _, path := range []string{"/", "/grid", "/workers/orders"} {
+		before := stamp(h.Latest())
+		_, body := fetch(t, srv, path, true)
+		after := stamp(h.Latest()) // a tick may land mid-request
+		_, status, _ := strings.Cut(body, `<div id="status">`)
+		status, _, _ = strings.Cut(status, "</div>")
+		if !strings.Contains(status, "updated "+before) && !strings.Contains(status, "updated "+after) {
+			t.Errorf("GET %s: #status lacks \"updated %s\":\n%s", path, after, status)
+		}
+	}
+}
+
+// TestRenderErrorIsEscaped: htmx inserts a 500 body into #errors as HTML.
+func TestRenderErrorIsEscaped(t *testing.T) {
+	boom := template.Must(template.New("boom").Funcs(template.FuncMap{
+		"fail": func() (string, error) { return "", errors.New("<b>bad</b>") },
+	}).Parse(`{{define "layout"}}{{fail}}{{end}}`))
+	h := &handler{tmpl: map[string]*template.Template{"dashboard": boom}}
+
+	rec := httptest.NewRecorder()
+	h.render(rec, "dashboard", http.StatusOK, Page{})
+	if body := rec.Body.String(); rec.Code != http.StatusInternalServerError || strings.Contains(body, "<b>") || !strings.Contains(body, "&lt;b&gt;bad&lt;/b&gt;") {
+		t.Errorf("render error = %d %q, want 500 with the error escaped", rec.Code, body)
 	}
 }
 
