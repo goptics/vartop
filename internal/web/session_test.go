@@ -178,6 +178,27 @@ func TestSwitchFailureKeepsOld(t *testing.T) {
 	}
 }
 
+func TestFailedNamesLastFailedBuild(t *testing.T) {
+	m, g := newGatedManager(t, "a", "b")
+	if m.Failed() != "" {
+		t.Fatalf("Failed() = %q before any build, want none", m.Failed())
+	}
+
+	if err := m.Switch("a"); err != nil {
+		t.Fatal(err)
+	}
+	g.release("a", errors.New("a unreachable"))
+	waitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
+	if m.Failed() != "a" {
+		t.Errorf("Failed() = %q after a's build failed, want a", m.Failed())
+	}
+
+	activate(t, m, g, "b")
+	if m.Failed() != "" {
+		t.Errorf("Failed() = %q after a successful build, want none", m.Failed())
+	}
+}
+
 func TestSupersededBuildIsClosed(t *testing.T) {
 	t.Run("newer finishes first", func(t *testing.T) {
 		m, g := newGatedManager(t, "b", "c")

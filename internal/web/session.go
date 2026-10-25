@@ -28,6 +28,7 @@ type Manager struct {
 	seq     uint64     // bumped by every switch; a build applies only if it is unchanged
 	pending string     // server being connected, "" if none
 	err     error      // last build error, cleared by a successful build
+	failed  string     // server whose build set err, "" when err is nil
 	closed  bool
 }
 
@@ -82,13 +83,15 @@ func (m *Manager) connect(seq uint64, srv *config.Server) {
 		}
 		return
 	}
+	// seq is unchanged, so pending still names this build's server.
+	name := m.pending
 	m.pending = ""
 	if err != nil {
-		m.err = err
+		m.err, m.failed = err, name
 		m.mu.Unlock()
 		return
 	}
-	m.err = nil
+	m.err, m.failed = nil, ""
 	old := m.cur.Swap(NewSession(srv, pool))
 	m.mu.Unlock()
 
@@ -114,6 +117,14 @@ func (m *Manager) Err() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.err
+}
+
+// Failed returns the name of the server whose build failed with Err, "" when
+// Err is nil.
+func (m *Manager) Failed() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failed
 }
 
 // Servers returns the configured server names, sorted.
