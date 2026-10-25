@@ -428,8 +428,8 @@ func TestResultsRender(t *testing.T) {
 func TestConfirmRenders(t *testing.T) {
 	body := run(t, "confirm", "confirm", ConfirmView{
 		Action: "pause", Server: "dev", Pod: "",
-		Names: []string{"orders", "a&b"},
-		Pods:  []PodColumn{{Endpoint: "http://a:3000", Label: "pod-a"}, {Endpoint: "http://b:3000", Label: "pod-b"}},
+		Pods: []PodColumn{{Endpoint: "http://a:3000", Label: "pod-a"}, {Endpoint: "http://b:3000", Label: "pod-b", Err: "<i>down</i>"}},
+		Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true, false}}, {Name: "a&b", Absent: []bool{false, false}}},
 	})
 	for _, want := range []string{
 		`hx-post="/bulk/pause"`,
@@ -439,6 +439,9 @@ func TestConfirmRenders(t *testing.T) {
 		`<input type="hidden" name="names" value="orders">`,
 		`<input type="hidden" name="names" value="a&amp;b">`,
 		"pod-a", "pod-b", "orders", "a&amp;b", "dev",
+		`<small class="err">&lt;i&gt;down&lt;/i&gt;</small>`,
+		`<th scope="row" class="name">orders</th><td><span class="na">not on this pod</span></td><td>pause</td>`,
+		`<th scope="row" class="name">a&amp;b</th><td>pause</td><td>pause</td>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("confirm lacks %q:\n%s", want, body)

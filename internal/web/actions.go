@@ -72,7 +72,8 @@ func podScope(clients []*api.Client, pod string) ([]*api.Client, error) {
 }
 
 // outcome is the result of err on endpoint: varmq's 409 ("already in that
-// state") and a skip are no change, any other error is a failure.
+// state"), its 404 (the pod lacks the worker: actions fan out to every pod
+// in scope) and a skip are no change, any other error is a failure.
 func outcome(endpoint string, labels map[string]string, err error) ActionResult {
 	r := ActionResult{Pod: cmp.Or(labels[endpoint], config.ShortOrigin(endpoint)), Endpoint: endpoint, Outcome: "ok"}
 	var skip noChange
@@ -83,6 +84,8 @@ func outcome(endpoint string, labels map[string]string, err error) ActionResult 
 		r.Outcome, r.Msg = "no change", string(skip)
 	case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict:
 		r.Outcome, r.Msg = "no change", apiErr.Message
+	case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound:
+		r.Outcome, r.Msg = "no change", "not on this pod"
 	default:
 		r.Outcome, r.Msg = "failed", err.Error()
 	}
@@ -228,16 +231,22 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.PostFormValue("confirm") != "1" {
-		cv := ConfirmView{Action: action, Server: key, Pod: pod, Names: names}
+		cv := ConfirmView{Action: action, Server: key, Pod: pod, Rows: make([]ConfirmRow, len(names))}
+		for i, name := range names {
+			cv.Rows[i].Name = name
+		}
 		for _, c := range targets {
 			ep := c.PrimaryEndpoint()
 			col := PodColumn{Endpoint: ep, Label: cmp.Or(labels[ep], config.ShortOrigin(ep))}
-			if latest != nil {
-				if i := slices.IndexFunc(latest.Pods, func(p PodSnapshot) bool { return p.Endpoint == ep }); i >= 0 {
-					col.Err = latest.Pods[i].Err
-				}
+			seen := podsOf(latest, ep) // nil when latest lacks the pod
+			if seen != nil {
+				col.Err = seen[0].Err
 			}
 			cv.Pods = append(cv.Pods, col)
+			for i := range cv.Rows {
+				absent := seen != nil && seen[0].Err == "" && seen[0].Workers[cv.Rows[i].Name] == nil
+				cv.Rows[i].Absent = append(cv.Rows[i].Absent, absent)
+			}
 		}
 		h.fragments(w, fragment{"confirm", "confirm", cv})
 		return

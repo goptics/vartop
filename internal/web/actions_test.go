@@ -146,6 +146,18 @@ func TestAction409IsNoChange(t *testing.T) {
 	}
 }
 
+// TestActionOnPodLackingWorker: a worker action fans out to every pod in
+// scope; one that lacks the worker (varmq's 404) has nothing to change.
+func TestActionOnPodLackingWorker(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	srv, _ := newTestServer(t, aSrv, bSrv)
+
+	_, body := post(t, srv, "/workers/emails/actions/resume", multi(), true)
+	if r := resultsOf(body); strings.Count(r, `<li class="ok">`) != 1 || !strings.Contains(r, `<li class="nochange">`) || !strings.Contains(r, "no change (not on this pod)") {
+		t.Errorf("want ok on a and no change (not on this pod) on b:\n%s", r)
+	}
+}
+
 func TestActionPartialFailureIs200(t *testing.T) {
 	fa, _, aSrv, bSrv := twoFakes(t)
 	srv, _ := newTestServer(t, aSrv, bSrv)
@@ -535,8 +547,17 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 			t.Errorf("confirm panel lacks %q:\n%s", want, body)
 		}
 	}
-	if n := strings.Count(body, `<td>pause</td>`); n != 4 {
-		t.Errorf("confirm panel has %d cells, want 2 names × 2 pods", n)
+	// emails is not on b: its cell says so; the other three are sent.
+	absent := `<td><span class="na">not on this pod</span></td>`
+	if n, m := strings.Count(body, `<td>pause</td>`), strings.Count(body, absent); n != 3 || m != 1 {
+		t.Errorf("confirm panel has %d pause and %d absent cells, want 3 and 1 (2 names × 2 pods)", n, m)
+	}
+	emailsRow := `<td>pause</td>` + absent // pods are sorted by endpoint
+	if bSrv.URL < aSrv.URL {
+		emailsRow = absent + `<td>pause</td>`
+	}
+	if _, emails, _ := strings.Cut(body, `<th scope="row" class="name">emails</th>`); !strings.HasPrefix(emails, emailsRow) {
+		t.Errorf("emails row should read pause on a, absent on b:\n%s", body)
 	}
 	noPatches(t, fa, fb)
 
@@ -546,10 +567,14 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 		t.Fatalf("execute step = %d, want 200", resp.StatusCode)
 	}
 	wantPatches(t, fa, "PATCH /workers/orders/actions/pause", "PATCH /workers/emails/actions/pause")
-	// emails is not on b: varmq's 404 is a failure there.
+	// Bulk still fans out to every pod in scope; varmq's 404 for emails on
+	// b is no change, not a failure.
 	wantPatches(t, fb, "PATCH /workers/orders/actions/pause", "PATCH /workers/emails/actions/pause")
 	if n := strings.Count(resultsOf(body), "<li "); n != 4 {
 		t.Errorf("%d results, want one per name × pod:\n%s", n, body)
+	}
+	if r := resultsOf(body); strings.Count(r, "no change (not on this pod)") != 1 || strings.Contains(r, `<li class="failed">`) {
+		t.Errorf("emails on b should read no change (not on this pod), nothing failed:\n%s", r)
 	}
 	for _, want := range []string{`<span class="worker">orders</span>`, `<span class="worker">emails</span>`} {
 		if strings.Count(body, want) != 2 {

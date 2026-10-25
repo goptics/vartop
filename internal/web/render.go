@@ -60,11 +60,21 @@ func (p Page) Scope() string {
 // Worker names the worker when one response covers several (bulk).
 type ActionResult struct{ Worker, Pod, Endpoint, Outcome, Msg string }
 
-// ConfirmView is the bulk-action confirmation panel: Names × Pods on Server.
+// ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
+// on Server. A down pod's column carries its Err.
 type ConfirmView struct {
 	Action, Server, Pod string
-	Names               []string
 	Pods                []PodColumn
+	Rows                []ConfirmRow
+}
+
+// ConfirmRow is one worker of the confirmation panel. Absent is aligned with
+// ConfirmView.Pods: true where the pod's newest snapshot is healthy and
+// lacks the worker. A down or not yet polled pod is never marked: the
+// action is sent to every pod in scope either way.
+type ConfirmRow struct {
+	Name   string
+	Absent []bool
 }
 
 // funcs are the template functions of every set.
