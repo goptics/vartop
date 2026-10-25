@@ -351,16 +351,33 @@ type fragment struct {
 	data       any
 }
 
-// fragments answers 200 with frags rendered in order. It renders into a
-// buffer first so a template error never leaves half a response.
+// fragments answers 200 with frags rendered in order, then #errors out of
+// band: empty, so an earlier failure does not outlive this response. Each
+// fragment is rendered into a buffer first so a template error never leaves
+// half of one. A failing first fragment (what the request did) is a 500; a
+// later one (the #live refresh, after varmq was called) is left out and
+// named in #errors, so the results still show.
 func (h *handler) fragments(w http.ResponseWriter, frags ...fragment) {
-	var buf bytes.Buffer
-	for _, f := range frags {
-		if err := h.tmpl[f.set].ExecuteTemplate(&buf, f.entry, f.data); err != nil {
-			http.Error(w, template.HTMLEscapeString("render "+f.set+"/"+f.entry+": "+err.Error()), http.StatusInternalServerError)
-			return
+	var buf, part bytes.Buffer
+	var failed string
+	for i, f := range frags {
+		part.Reset()
+		if err := h.tmpl[f.set].ExecuteTemplate(&part, f.entry, f.data); err != nil {
+			msg := "render " + f.set + "/" + f.entry + ": " + err.Error()
+			if i == 0 {
+				http.Error(w, template.HTMLEscapeString(msg), http.StatusInternalServerError)
+				return
+			}
+			failed = cmp.Or(failed, "could not refresh the page: "+msg)
+			continue
 		}
+		buf.Write(part.Bytes())
 	}
+	buf.WriteString(`<div id="errors" hx-swap-oob="innerHTML">`)
+	if failed != "" {
+		fmt.Fprintf(&buf, `<p class="err">%s</p>`, template.HTMLEscapeString(failed))
+	}
+	buf.WriteString(`</div>`)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)

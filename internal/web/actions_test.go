@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -637,6 +638,61 @@ func TestActionRefreshesPageItCameFrom(t *testing.T) {
 	// The bulk confirm step changes nothing, so it refreshes nothing.
 	if _, body := post(t, srv, "/bulk/pause", multi("names", "orders"), true); liveOOB(body) != "" {
 		t.Error("the confirm panel carries an oob #live")
+	}
+}
+
+// TestActionResponsesClearErrors: every action and confirm response empties
+// #errors out of band, so an earlier failure does not outlive a success.
+func TestActionResponsesClearErrors(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	srv, _ := newTestServer(t, aSrv, bSrv)
+	clear := `<div id="errors" hx-swap-oob="innerHTML"></div>`
+
+	for _, c := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/workers/orders/actions/pause", multi()},
+		{"/workers/orders/concurrency", multi("n", "6")},
+		{"/bulk/resume", multi("names", "orders")},
+		{"/bulk/resume", multi("names", "orders", "confirm", "1")},
+	} {
+		if resp, body := post(t, srv, c.path, c.form, true); resp.StatusCode != http.StatusOK || !strings.Contains(body, clear) {
+			t.Errorf("POST %s %v = %d, want 200 with %s:\n%s", c.path, c.form, resp.StatusCode, clear, body)
+		}
+	}
+}
+
+// TestFailedRefreshKeepsResults: once varmq was called, a failing #live
+// refresh must not turn the response into a 500 that hides the results.
+func TestFailedRefreshKeepsResults(t *testing.T) {
+	tmpl, err := parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl["dashboard"] = template.Must(template.New("broken").Parse(`{{define "live_oob"}}<div id="live">{{.Nope}}</div>{{end}}`))
+	h := &handler{tmpl: tmpl}
+
+	rec := httptest.NewRecorder()
+	h.fragments(rec,
+		fragment{"results", "results", []ActionResult{{Pod: "a", Endpoint: "http://a:3000", Outcome: "ok"}}},
+		fragment{"dashboard", "live_oob", Page{}})
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, `<li class="ok">`) {
+		t.Fatalf("= %d, want 200 with the results:\n%s", rec.Code, body)
+	}
+	if strings.Contains(body, `<div id="live"`) {
+		t.Error("half-rendered #live in the response")
+	}
+	if !strings.Contains(body, `<div id="errors" hx-swap-oob="innerHTML"><p class="err">could not refresh the page: render dashboard/live_oob: `) {
+		t.Errorf("no note in #errors about the failed refresh:\n%s", body)
+	}
+
+	// Without results there is nothing to keep.
+	rec = httptest.NewRecorder()
+	h.fragments(rec, fragment{"dashboard", "live_oob", Page{}})
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("failing first fragment = %d, want 500", rec.Code)
 	}
 }
 
