@@ -492,3 +492,39 @@ func TestPathEscapeFunc(t *testing.T) {
 		t.Errorf("pathEscape = %q", buf.String())
 	}
 }
+
+// cssRule returns the declarations of the rule with exactly this selector.
+func cssRule(t *testing.T, css, selector string) string {
+	t.Helper()
+	m := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(selector) + `\s*\{([^}]*)\}`).FindStringSubmatch(css)
+	if m == nil {
+		t.Fatalf("app.css has no rule %q", selector)
+	}
+	return m[1]
+}
+
+func TestCSSPartialPointsAreHollowEverywhere(t *testing.T) {
+	b, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(b)
+	// ".failed .spark .dot" (0,3,0) outranks ".spark .partial" (0,2,0), so the
+	// failed chart needs its own hollow fill or partial points turn solid red.
+	for _, sel := range []string{".spark .partial", ".failed .spark .partial"} {
+		if rule := cssRule(t, css, sel); !strings.Contains(rule, "fill: var(--panel)") {
+			t.Errorf("%s does not restore the hollow fill: %s", sel, rule)
+		}
+	}
+}
+
+func TestCSSLeavesCopyVerbatim(t *testing.T) {
+	// Mandated UI copy such as "Pending (max/pod)" must render as written.
+	b, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "text-transform: uppercase") {
+		t.Error("app.css uppercases text; headers must render exactly as templated")
+	}
+}
