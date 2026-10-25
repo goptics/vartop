@@ -87,37 +87,60 @@ func TestSnapshotsReturnsCopy(t *testing.T) {
 func TestAppendFillsRatesAcrossSnapshots(t *testing.T) {
 	iv := 5 * time.Second
 	t0 := time.Unix(1000, 0)
+	t1 := t0.Add(iv)
 	h := NewHistory(iv)
 
-	sample := func(at time.Time, completed uint64) *Sample {
+	sample := func(name string, at time.Time, completed, failed uint64) *Sample {
 		s := &Sample{At: at}
-		s.Name = "w"
-		s.Metrics.Completed = completed
+		s.Name = name
+		s.Metrics.Completed, s.Metrics.Failed = completed, failed
 		return s
 	}
-	// "w" exists on both pods; p2 only shows up in the second snapshot, so the
-	// shared worker name must not borrow p1's history.
+	// p1 runs workers "w" and "x" with different counters, so each must get its
+	// own rate (the key includes the worker name). p0 shows up only in the
+	// second snapshot with the same worker names, and is listed before p1 so that
+	// when Append reaches it p1's t0 samples are still the stored previous ones:
+	// borrowing them would give a valid 5s gap and RateOK==true (the key
+	// includes the endpoint).
 	first := &Snapshot{At: t0, Pods: []PodSnapshot{
-		{Endpoint: "p1", Workers: map[string]*Sample{"w": sample(t0, 0)}},
+		{Endpoint: "p1", Workers: map[string]*Sample{
+			"w": sample("w", t0, 100, 0),
+			"x": sample("x", t0, 1000, 5),
+		}},
 	}}
-	t1 := t0.Add(iv)
 	second := &Snapshot{At: t1, Pods: []PodSnapshot{
-		{Endpoint: "p1", Workers: map[string]*Sample{"w": sample(t1, 50)}},
-		{Endpoint: "p2", Workers: map[string]*Sample{"w": sample(t1, 500)}},
+		{Endpoint: "p0", Workers: map[string]*Sample{
+			"w": sample("w", t1, 5000, 50),
+			"x": sample("x", t1, 6000, 60),
+		}},
+		{Endpoint: "p1", Workers: map[string]*Sample{
+			"w": sample("w", t1, 150, 10),
+			"x": sample("x", t1, 1020, 5),
+		}},
 	}}
 
 	h.Append(first)
-	if first.Pods[0].Workers["w"].RateOK {
-		t.Error("first sample for a worker has RateOK")
+	for name, s := range first.Pods[0].Workers {
+		if s.RateOK {
+			t.Errorf("first sample of p1/%s has RateOK", name)
+		}
 	}
 	h.Append(second)
 
-	p1 := second.Pods[0].Workers["w"]
-	if !p1.RateOK || p1.CompletedRate != 10 || p1.FailedRate != 0 {
-		t.Errorf("p1: RateOK=%v completed=%v failed=%v, want true 10 0", p1.RateOK, p1.CompletedRate, p1.FailedRate)
+	for _, tc := range []struct {
+		worker       string
+		wantC, wantF float64
+	}{{"w", 10, 2}, {"x", 4, 0}} {
+		s := second.Pods[1].Workers[tc.worker]
+		if !s.RateOK || s.CompletedRate != tc.wantC || s.FailedRate != tc.wantF {
+			t.Errorf("p1/%s: RateOK=%v completed=%v failed=%v, want true %v %v",
+				tc.worker, s.RateOK, s.CompletedRate, s.FailedRate, tc.wantC, tc.wantF)
+		}
 	}
-	if p2 := second.Pods[1].Workers["w"]; p2.RateOK {
-		t.Errorf("p2 appeared only in the second snapshot but RateOK=true (completed=%v)", p2.CompletedRate)
+	for name, s := range second.Pods[0].Workers {
+		if s.RateOK {
+			t.Errorf("p0/%s appeared only in the second snapshot but RateOK=true (completed=%v)", name, s.CompletedRate)
+		}
 	}
 	if h.Latest() != second {
 		t.Error("Latest is not the second snapshot")
