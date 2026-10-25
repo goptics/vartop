@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -293,8 +292,9 @@ func fill(p *Page, hist *History) []*Snapshot {
 // podGone reports whether p.Pod names a pod the newest of snaps lacks: one
 // that left discovery, or one never seen (a stale bookmark). p then gets the
 // banner saying so, naming the pod by the label of the last snapshot that
-// had it, and a SelfURL without the pod. Callers must then show no data:
-// another pod's, under this pod's name, would mislead. With no snapshot yet
+// had it. Callers must then show no data: another pod's, under this pod's
+// name, would mislead. SelfURL keeps the pod, so every poll says the same,
+// and shows the pod's data again should it come back. With no snapshot yet
 // nothing is known, so nothing is gone.
 func podGone(p *Page, snaps []*Snapshot) bool {
 	latest := latestOf(snaps)
@@ -309,12 +309,6 @@ func podGone(p *Page, snaps []*Snapshot) bool {
 		}
 	}
 	p.Banner = "Pod " + label + " is no longer reported — reload"
-	if u, err := url.ParseRequestURI(p.SelfURL); err == nil {
-		q := u.Query()
-		q.Del("pod")
-		u.RawQuery = q.Encode()
-		p.SelfURL = u.RequestURI()
-	}
 	return true
 }
 

@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"html"
 	"html/template"
 	"io"
 	"net"
@@ -399,9 +400,20 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 			}
 		}
 	}
-	// The full page polls without the pod.
-	if _, body := fetch(t, srv, dash, false); !strings.Contains(body, `hx-get="/?server=multi"`) {
-		t.Error("full load of a gone pod still polls it")
+	// The full page keeps polling the pod: each poll still shows the banner
+	// and nothing else, never a merged fallback (and the pod's data again
+	// should it come back).
+	_, body := fetch(t, srv, dash, false)
+	_, poller, _ := strings.Cut(body, `<div id="poller"`)
+	_, pollURL, _ := strings.Cut(poller, `hx-get="`)
+	pollURL, _, _ = strings.Cut(pollURL, `"`)
+	pollURL = html.UnescapeString(pollURL)
+	if !strings.Contains(pollURL, "pod="+url.QueryEscape(aSrv.URL)) {
+		t.Fatalf("full load of a gone pod polls %q, want its pod kept", pollURL)
+	}
+	_, body = fetch(t, srv, pollURL, true)
+	if !strings.Contains(body, banner) || strings.Contains(body, `<tr id="w-`) || strings.Contains(body, ">orders<") {
+		t.Errorf("poll of %s should show the banner and no rows:\n%s", pollURL, body)
 	}
 }
 
