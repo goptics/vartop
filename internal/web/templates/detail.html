@@ -1,0 +1,55 @@
+{{define "live_body"}}{{with .Detail}}
+<div class="detail-head">
+  <h2>{{.Name}}</h2>
+  <span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>
+</div>
+<section class="counters" aria-label="Counters">
+  <div class="card"><h3>Submitted</h3><p class="big">{{.Submitted}}</p></div>
+  <div class="card"><h3>Completed</h3><p class="big">{{.Completed}}</p></div>
+  <div class="card"><h3>Successful</h3><p class="big">{{.Successful}}</p></div>
+  <div class="card failed"><h3>Failed</h3><p class="big">{{.Failed}}</p></div>
+  <div class="card"><h3>Success rate</h3><p class="big">{{.SuccessRate}}</p></div>
+</section>
+<figure class="chart">
+  <figcaption>Completed /s <span class="peak">peak {{printf "%.1f" (peak .Completed1h)}}/s</span></figcaption>
+  {{template "spark" (sparkline .Completed1h 720 120)}}
+</figure>
+<figure class="chart failed">
+  <figcaption>Failed /s <span class="peak">peak {{printf "%.1f" (peak .Failed1h)}}/s</span></figcaption>
+  {{template "spark" (sparkline .Failed1h 720 120)}}
+</figure>
+<p class="pods">Pods reporting: {{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Endpoint}}">{{$p.Label}}</span>{{end}}</p>
+{{end}}{{end}}
+
+{{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
+{{define "live_oob"}}<div id="live" hx-swap-oob="outerHTML">{{template "live_body" .}}</div>{{end}}
+
+{{define "content"}}{{with .Detail}}<p class="back"><a href="{{pageURL "/" $.Server $.Pod}}">← Dashboard</a></p>{{end}}
+{{template "live" .}}
+{{with .Detail}}{{$name := pathEscape .Name}}
+<section class="controls" aria-label="Controls">
+  <h3>Concurrency <span class="sub">per pod, on {{$.Scope}}</span></h3>
+  <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+    {{template "server_field" $}}
+    <input type="hidden" name="pod" value="{{$.Pod}}">
+    <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per pod">
+    <span class="sub">1 – {{.ConcurrencyMax}}, applied on release</span>
+  </form>
+  <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+    {{template "server_field" $}}
+    <input type="hidden" name="pod" value="{{$.Pod}}">
+    <input type="number" name="n" min="1" value="{{.ConcurrencyStart}}" aria-label="Concurrency per pod, exact">
+    <button type="submit">Set</button>
+  </form>
+  <h3>Actions <span class="sub">on {{$.Scope}}</span></h3>
+  <form class="actions" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+    {{template "server_field" $}}
+    <input type="hidden" name="pod" value="{{$.Pod}}">
+    <button type="button" hx-post="/workers/{{$name}}/actions/pause">Pause</button>
+    <button type="button" hx-post="/workers/{{$name}}/actions/resume">Resume</button>
+    <button type="button" class="warn" hx-post="/workers/{{$name}}/actions/restart" hx-confirm="Restart {{.Name}} on {{$.Scope}} ({{$.Server}})?">Restart</button>
+    <button type="button" class="danger" hx-post="/workers/{{$name}}/actions/stop" hx-confirm="Stop {{.Name}} on {{$.Scope}} ({{$.Server}})?">Stop</button>
+  </form>
+</section>{{end}}
+<div id="results" aria-live="polite"></div>
+{{end}}

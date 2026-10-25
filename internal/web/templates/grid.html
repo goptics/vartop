@@ -1,0 +1,23 @@
+{{define "live_body"}}{{with .Grid}}{{$pods := .Pods}}
+{{if not $pods}}<p class="empty">No pods to show.</p>
+{{else if not .Rows}}<p class="empty">No workers reported yet.</p>
+{{else}}<p class="legend">Each cell: status · busy/concurrency · pending</p>
+<div class="table-wrap">
+<table class="grid">
+  <thead><tr>
+    <th>Worker</th>{{range $pods}}
+    <th{{if .Err}} class="down"{{end}} title="{{.Endpoint}}">{{.Label}}{{if .Err}}<small class="err">{{.Err}}</small>{{end}}</th>{{end}}
+  </tr></thead>
+  <tbody>{{range .Rows}}
+  <tr>
+    <th scope="row" class="name"><a href="{{workerURL .Name $.Server $.Pod}}">{{.Name}}</a></th>{{range $i, $c := .Cells}}
+    <td{{if (index $pods $i).Err}} class="down"{{end}}>{{if $c.Present}}<span class="status {{$c.Class}}">{{$c.Status}}</span> · {{$c.Busy}}/{{$c.Concurrency}} · {{$c.Pending}}{{else}}—{{end}}</td>{{end}}
+  </tr>{{end}}
+  </tbody>
+</table>
+</div>{{end}}
+{{end}}{{end}}
+
+{{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
+
+{{define "content"}}{{template "live" .}}{{end}}

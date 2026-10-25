@@ -1,0 +1,3 @@
+{{define "results"}}{{if .}}<ul class="results">{{range .}}
+  <li class="{{if eq .Outcome "ok"}}ok{{else if eq .Outcome "failed"}}failed{{else}}nochange{{end}}"><span class="pod" title="{{.Endpoint}}">{{.Pod}}</span> <span class="outcome">{{.Outcome}}{{if .Msg}} ({{.Msg}}){{end}}</span></li>{{end}}
+</ul>{{else}}<p class="empty">No pods were targeted.</p>{{end}}{{end}}
