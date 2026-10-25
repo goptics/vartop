@@ -30,7 +30,8 @@ var (
 const shutdownTimeout = 5 * time.Second
 
 // openBrowser asks the OS to open url in the default browser. It starts the
-// opener and does not wait for it.
+// opener and does not wait for it; the opener is reaped in the background,
+// so no zombie is left.
 func openBrowser(url string) error {
 	var c *exec.Cmd
 	switch runtime.GOOS {
@@ -44,7 +45,8 @@ func openBrowser(url string) error {
 	if err := c.Start(); err != nil {
 		return err
 	}
-	return c.Process.Release()
+	go func() { _ = c.Wait() }()
+	return nil
 }
 
 // serveWeb serves the dashboard of the server configured under key (a
@@ -99,6 +101,8 @@ func serveWeb(ctx context.Context, cfg *config.Config, key, addr string, out io.
 var webCmd = &cobra.Command{
 	Use:   "web",
 	Short: "Open the dashboard in your browser",
+	// A failure here (port in use, shutdown) is not a usage mistake.
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadOrOnboard()
 		if err != nil {
@@ -112,6 +116,9 @@ var webCmd = &cobra.Command{
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		// Once the first signal starts the shutdown, restore the default
+		// handling: a second Ctrl+C during the drain kills vartop.
+		context.AfterFunc(ctx, stop)
 
 		open := openBrowser
 		if webNoOpen {

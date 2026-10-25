@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +118,45 @@ func TestLoadOrOnboardReturnsExistingConfig(t *testing.T) {
 	}
 	if cfg.Servers["multi"] == nil || cfg.DefaultServer != "multi" {
 		t.Fatalf("loaded config = %+v, want the saved server \"multi\"", cfg)
+	}
+}
+
+// TestLoadOrOnboardRejectsCorruptConfig: an unreadable config is an error,
+// never a reason to onboard, which would overwrite the file.
+func TestLoadOrOnboardRejectsCorruptConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	path := filepath.Join(dir, "vartop", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{bad"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		cfg, err := loadOrOnboard()
+		if cfg != nil {
+			t.Errorf("loadOrOnboard() config = %+v, want nil", cfg)
+		}
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "parse") {
+		t.Errorf("loadOrOnboard() error = %v, want a parse error", err)
+	}
+	if out != "" {
+		t.Errorf("loadOrOnboard() printed %q: onboarding started", out)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "{bad" {
+		t.Errorf("config file now holds %q, want it untouched", data)
+	}
+}
+
+// TestWebCmdSilencesUsage: a runtime error (port in use, shutdown) is not a
+// usage mistake, so it must not print the usage text.
+func TestWebCmdSilencesUsage(t *testing.T) {
+	if !webCmd.SilenceUsage {
+		t.Error("webCmd.SilenceUsage = false, want true")
 	}
 }
 
