@@ -33,6 +33,7 @@
 ### Features
 
 - **Live Dashboard** — colour-coded table of all workers showing status, concurrency, queue depth, and idle count with auto-refresh
+- **Web UI** — `vartop web` serves the same dashboard in your browser on a loopback address: an auto-refreshing worker grid with trend sparklines, per-worker charts, and pause/resume/restart/stop and concurrency controls
 - **Worker Detail View** — drill into a single worker to see full configuration, runtime metrics (submitted, completed, successful, failed), and success rate
 - **Multi-Server & Multi-Pod Support** — configure multiple varmq servers, each with a static list of pod endpoints. View merged worker stats across all pods, or drill into a single pod via the Switch view
 - **Kubernetes Discovery** — point a server at a Service or label selector and vartop watches its EndpointSlices, following pods as they scale, restart, or roll out; pods are labelled by pod name
@@ -108,6 +109,7 @@ make build   # binary at bin/vartop
 | `vartop` | Launch the interactive TUI dashboard |
 | `vartop -s <name>` | Connect to a specific configured server |
 | `vartop --server <name>` | Same as `-s` |
+| `vartop web` | Open the dashboard in your browser, see [Web UI](#web-ui) |
 
 #### Server Management
 
@@ -137,6 +139,29 @@ vartop action orders pause                                        # all pods
 vartop action orders pause --origin http://10.0.0.5:8080/varmq    # one pod
 vartop -s staging concurrency orders 8
 ```
+
+### Web UI
+
+`vartop web` serves the dashboard in your browser and opens it. It uses the same configuration and the same discovery as the TUI, and shows the same data with trend charts; workers can be controlled from the page too.
+
+```bash
+vartop web                          # http://127.0.0.1:7070, default server
+vartop web -s staging               # a specific server
+vartop web --addr 127.0.0.1:9000    # another port
+vartop web --no-open                # print the URL, don't launch a browser
+```
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--addr` | Address to listen on (must be a loopback address) | `127.0.0.1:7070` |
+| `--no-open` | Don't open the browser | *(opens it)* |
+| `-s`, `--server` | Server to show first; the page can switch to any configured server | *(default server)* |
+
+- **Loopback only.** vartop refuses any other `--addr`, and the server only answers requests addressed to its own loopback host name.
+- **The token stays on the server.** vartop calls varmq on the page's behalf; the bearer token is never sent to the browser.
+- **History lives in memory.** Charts cover what vartop has seen since `vartop web` started (up to the last hour) and are gone when it stops.
+
+Press <kbd>Ctrl+C</kbd> to stop.
 
 ### Keyboard Shortcuts
 
@@ -320,6 +345,7 @@ vartop
 ├── cmd/                    # Cobra CLI commands
 │   ├── root.go             # Root command — launches the TUI
 │   ├── server.go           # Server management subcommands
+│   ├── web.go              # `vartop web` — serves the browser dashboard
 │   └── workers.go          # Worker action & concurrency subcommands (fan out to all pods)
 ├── internal/
 │   ├── api/
@@ -333,18 +359,28 @@ vartop
 │   │   ├── static.go       # Fixed endpoint list from config
 │   │   ├── kubernetes.go   # EndpointSlice informer (client-go) for a service or selector
 │   │   └── dns.go          # Re-resolves a hostname to every instance address
-│   └── tui/
-│       ├── model.go        # Root Bubble Tea model — shared state, update loop, screen stack
-│       ├── screen.go       # Screen interface + push/pop navigation
-│       ├── dashboard.go    # Worker table, status bar, offline/connecting states
-│       ├── detail.go       # Single worker detail: config, metrics, scrolling
-│       ├── switcher.go     # Server / pod switcher
-│       ├── keys.go         # Per-screen key bindings
-│       ├── help.go         # Help footer rendering
-│       ├── handlers.go     # Async message handlers (health, workers, server switch, resize)
-│       ├── commands.go     # Bubble Tea commands (tick, fetch, actions, pool build)
-│       ├── styles.go       # Tokyo Night colour theme & table styles
-│       └── types.go        # Message types, switcher items, helpers
+│   ├── tui/
+│   │   ├── model.go        # Root Bubble Tea model — shared state, update loop, screen stack
+│   │   ├── screen.go       # Screen interface + push/pop navigation
+│   │   ├── dashboard.go    # Worker table, status bar, offline/connecting states
+│   │   ├── detail.go       # Single worker detail: config, metrics, scrolling
+│   │   ├── switcher.go     # Server / pod switcher
+│   │   ├── keys.go         # Per-screen key bindings
+│   │   ├── help.go         # Help footer rendering
+│   │   ├── handlers.go     # Async message handlers (health, workers, server switch, resize)
+│   │   ├── commands.go     # Bubble Tea commands (tick, fetch, actions, pool build)
+│   │   ├── styles.go       # Tokyo Night colour theme & table styles
+│   │   └── types.go        # Message types, switcher items, helpers
+│   └── web/
+│       ├── server.go       # Loopback listener, Host/CSRF guards, page handlers
+│       ├── session.go      # Switches the active server in the background
+│       ├── poller.go       # Polls every pod each interval into the history
+│       ├── history.go      # In-memory ring of snapshots (last hour) and rates
+│       ├── view.go         # Snapshots → dashboard, grid and detail view models
+│       ├── actions.go      # Worker action, concurrency and bulk POST routes
+│       ├── render.go       # Template loading and page model
+│       ├── templates/      # HTML pages (htmx-driven, server-rendered)
+│       └── static/         # Embedded CSS and vendored htmx
 ├── main.go                 # Entry point
 ├── Makefile                # Build, run, clean, test targets
 ├── go.mod

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -21,17 +22,9 @@ var rootCmd = &cobra.Command{
 	Long: `vartop provides a rich Terminal User Interface to view worker statuses, 
 concurrencies, and metrics from varmq mux servers.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil || len(cfg.Servers) == 0 {
-			if err == nil || err == config.ErrConfigNotFound {
-				// Launch interactive onboarding
-				cfg, err = config.PromptOnboarding()
-				if err != nil {
-					return err
-				}
-			} else {
-				return err
-			}
+		cfg, err := loadOrOnboard()
+		if err != nil {
+			return err
 		}
 
 		server, err := cfg.GetActiveServer(serverFlag)
@@ -58,6 +51,21 @@ concurrencies, and metrics from varmq mux servers.`,
 		}
 		return err
 	},
+}
+
+// loadOrOnboard loads the configuration, starting the interactive onboarding
+// when there is none yet (or it lists no servers). Any other load error is
+// returned.
+func loadOrOnboard() (*config.Config, error) {
+	cfg, err := config.Load()
+	switch {
+	case err == nil && len(cfg.Servers) > 0:
+		return cfg, nil
+	case err == nil || errors.Is(err, config.ErrConfigNotFound):
+		return config.PromptOnboarding()
+	default:
+		return nil, err
+	}
 }
 
 func Execute() {
