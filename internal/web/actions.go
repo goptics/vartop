@@ -301,7 +301,8 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, key string, s 
 // htmx says the request came from (HX-Current-URL), "/" being the dashboard
 // and "/workers/{name}" that worker's detail; without the header, the page
 // that carries the route's controls (detail of worker, or the dashboard).
-// Other pages, and a worker no pod reports, get no refresh.
+// Other pages, a worker no pod reports, and a pod the newest snapshot lacks
+// get no refresh.
 func livePage(r *http.Request, key string, s *Session, pod, worker string) (string, Page, bool) {
 	set := "dashboard"
 	if worker != "" {
@@ -325,6 +326,9 @@ func livePage(r *http.Request, key string, s *Session, pod, worker string) (stri
 
 	p := Page{Server: key, Pod: pod}
 	snaps := fill(&p, s.History)
+	if podGone(&p, snaps) {
+		return "", Page{}, false // the next poll shows why
+	}
 	switch set {
 	case "dashboard":
 		d := BuildDashboard(snaps, p.Pod, s.History.Interval())

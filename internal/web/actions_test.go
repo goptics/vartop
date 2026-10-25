@@ -640,6 +640,24 @@ func TestActionRefreshesPageItCameFrom(t *testing.T) {
 	}
 }
 
+// TestNoRefreshForGonePod: an action response never fills #live with other
+// pods' data under a pod the newest snapshot lacks.
+func TestNoRefreshForGonePod(t *testing.T) {
+	h := NewHistory(time.Second)
+	h.Append(snap(atTick(0), okPod("http://b", map[string]*Sample{"orders": smp("Running", 1, 0, 0, 0)})))
+	s := &Session{History: h}
+	for _, from := range []string{"/", "/workers/orders"} {
+		req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
+		req.Header.Set("HX-Current-URL", "http://127.0.0.1"+from)
+		if set, _, ok := livePage(req, "multi", s, "http://a", "orders"); ok {
+			t.Errorf("from %s: livePage refreshes %s for a gone pod", from, set)
+		}
+		if _, _, ok := livePage(req, "multi", s, "http://b", "orders"); !ok {
+			t.Errorf("from %s: livePage refuses a reported pod", from)
+		}
+	}
+}
+
 func TestServerSwitchRedirects(t *testing.T) {
 	_, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 1}})
 	m := startManager(t, &config.Config{Servers: map[string]*config.Server{

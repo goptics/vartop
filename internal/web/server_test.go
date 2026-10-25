@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -297,9 +298,10 @@ func TestPagesRender(t *testing.T) {
 		if !strings.Contains(body, ">orders<") || strings.Contains(body, ">emails<") {
 			t.Error("dashboard filtered to b should show orders and not emails")
 		}
+		// A pod never seen (a bad bookmark) shows why, not the merged view.
 		_, body = fetch(t, srv, "/?pod="+url.QueryEscape("http://gone.invalid"), false)
-		if !strings.Contains(body, ">emails<") {
-			t.Error("an unknown pod should show the merged view")
+		if !strings.Contains(body, "Pod http://gone.invalid is no longer reported — reload") || strings.Contains(body, `<tr id="w-`) {
+			t.Error("an unknown pod should show the gone-pod banner and no rows")
 		}
 	})
 
@@ -322,6 +324,75 @@ func TestPagesRender(t *testing.T) {
 			t.Errorf("GET /nope = %d, want 404", status)
 		}
 	})
+}
+
+// mutableSource is a discovery.Source whose endpoints a test changes.
+type mutableSource struct {
+	mu  sync.Mutex
+	eps []string
+}
+
+func (s *mutableSource) Endpoints() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.eps)
+}
+
+func (s *mutableSource) set(eps ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eps = eps
+}
+
+func (*mutableSource) Close() error { return nil }
+
+// TestVanishedPodShowsBanner: a page filtered to a pod the newest snapshot
+// lacks says so and shows no data, never another pod's under its name.
+func TestVanishedPodShowsBanner(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	src := &mutableSource{eps: []string{aSrv.URL, bSrv.URL}}
+	cfg := &config.Config{Servers: map[string]*config.Server{
+		"multi": {Name: "multi", Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	}}
+	m := NewManager(cfg, func(*config.Server) (*api.Pool, error) { return api.NewPool(src, ""), nil })
+	t.Cleanup(func() { _ = m.Close() })
+	if err := m.Switch("multi"); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 3*time.Second, "first snapshot", func() bool {
+		s := m.Current()
+		return s != nil && s.History.Latest() != nil
+	})
+	srv := serve(t, m)
+
+	dash := "/?server=multi&pod=" + url.QueryEscape(aSrv.URL)
+	detail := "/workers/orders?server=multi&pod=" + url.QueryEscape(aSrv.URL)
+	if _, body := fetch(t, srv, dash, false); !strings.Contains(body, ">emails<") {
+		t.Fatal("dashboard filtered to a lacks emails before a leaves")
+	}
+
+	src.set(bSrv.URL) // a leaves discovery
+	waitUntil(t, 3*time.Second, "a snapshot without a", func() bool { return len(m.Current().History.Latest().Pods) == 1 })
+
+	// Labelled from the last snapshot that had it.
+	banner := `<p class="banner">Pod a is no longer reported — reload</p>`
+	for _, path := range []string{dash, detail} {
+		for _, hx := range []bool{true, false} { // a poll, a full load
+			status, body := fetch(t, srv, path, hx)
+			if status != http.StatusOK || !strings.Contains(body, banner) {
+				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
+			}
+			for _, data := range []string{">orders<", `<tr id="w-`, "Pods reporting", `id="bulk"`, `class="controls"`, "No workers"} {
+				if strings.Contains(body, data) {
+					t.Errorf("GET %s (hx %v) shows %q", path, hx, data)
+				}
+			}
+		}
+	}
+	// The full page polls without the pod.
+	if _, body := fetch(t, srv, dash, false); !strings.Contains(body, `hx-get="/?server=multi"`) {
+		t.Error("full load of a gone pod still polls it")
+	}
 }
 
 func TestDetailOfEscapedName(t *testing.T) {

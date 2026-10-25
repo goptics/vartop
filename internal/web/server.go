@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -150,9 +151,10 @@ func serverChanged(active string) string { return "Server changed to " + active 
 func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p, s := h.page(r)
 	if s != nil {
-		snaps := fill(&p, s.History) // first: it drops an unknown p.Pod
-		d := BuildDashboard(snaps, p.Pod, s.History.Interval())
-		p.Dashboard = &d
+		if snaps := fill(&p, s.History); !podGone(&p, snaps) {
+			d := BuildDashboard(snaps, p.Pod, s.History.Interval())
+			p.Dashboard = &d
+		}
 	}
 	h.render(w, "dashboard", http.StatusOK, p)
 }
@@ -175,7 +177,9 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	if s != nil {
 		snaps := fill(&p, s.History)
-		if d, ok := BuildDetail(snaps, p.Pod, name, s.History.Interval()); ok {
+		if podGone(&p, snaps) {
+			// p says why; no pod's data is shown under the gone one's name.
+		} else if d, ok := BuildDetail(snaps, p.Pod, name, s.History.Interval()); ok {
 			p.Detail = &d
 		} else {
 			where := "any pod"
@@ -256,8 +260,7 @@ func (h *handler) failure(p *Page, want string) {
 }
 
 // fill sets p's header from hist and returns hist's snapshots, oldest first.
-// A p.Pod that is not a pod of the newest snapshot is dropped, so an unknown
-// pod shows the merged view.
+// It keeps p.Pod even when the newest snapshot lacks it: see podGone.
 func fill(p *Page, hist *History) []*Snapshot {
 	snaps := hist.Snapshots()
 	latest := latestOf(snaps)
@@ -265,17 +268,41 @@ func fill(p *Page, hist *History) []*Snapshot {
 	p.Health = Health(latest)
 	p.LBWarning = LBWarning(latest)
 
-	pod := p.Pod
-	p.Pod, p.Pods = "", nil
+	p.Pods = nil
 	if latest != nil {
 		for _, ps := range latest.Pods {
-			if ps.Endpoint == pod {
-				p.Pod = pod
-			}
-			p.Pods = append(p.Pods, PodOption{Endpoint: ps.Endpoint, Label: ps.Label, Selected: ps.Endpoint == pod})
+			p.Pods = append(p.Pods, PodOption{Endpoint: ps.Endpoint, Label: ps.Label, Selected: ps.Endpoint == p.Pod})
 		}
 	}
 	return snaps
+}
+
+// podGone reports whether p.Pod names a pod the newest of snaps lacks: one
+// that left discovery, or one never seen (a stale bookmark). p then gets the
+// banner saying so, naming the pod by the label of the last snapshot that
+// had it, and a SelfURL without the pod. Callers must then show no data:
+// another pod's, under this pod's name, would mislead. With no snapshot yet
+// nothing is known, so nothing is gone.
+func podGone(p *Page, snaps []*Snapshot) bool {
+	latest := latestOf(snaps)
+	if p.Pod == "" || latest == nil || podsOf(latest, p.Pod) != nil {
+		return false
+	}
+	label := p.Pod
+	for _, s := range slices.Backward(snaps) {
+		if seen := podsOf(s, p.Pod); seen != nil {
+			label = seen[0].Label
+			break
+		}
+	}
+	p.Banner = "Pod " + label + " is no longer reported — reload"
+	if u, err := url.ParseRequestURI(p.SelfURL); err == nil {
+		q := u.Query()
+		q.Del("pod")
+		u.RawQuery = q.Encode()
+		p.SelfURL = u.RequestURI()
+	}
+	return true
 }
 
 // latestOf is the newest of snaps, nil if there are none.
