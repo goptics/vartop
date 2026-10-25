@@ -23,6 +23,11 @@ import (
 //   - load-balanced pod: LoadBalanced > 1. One endpoint answered by several
 //     instances, so its per-worker rates are meaningless and are excluded.
 //   - reporting pod (for a worker): healthy and has that worker.
+//   - expected pod (for a rate point, "k/N pods"): a non-load-balanced pod that
+//     should contribute a rate. Errored non-LB pods are expected too (their data
+//     is unknown, so they count in N and contribute 0), which makes the point
+//     partial instead of plotting a solid dip. Load-balanced pods are outside
+//     both k and N.
 
 const (
 	// trendWindow is how far back row and KPI sparklines reach.
@@ -38,7 +43,7 @@ const (
 type Point struct {
 	V       float64
 	Gap     bool   // no data for this snapshot: draw a break, not zero
-	Partial bool   // fewer pods contributed than reported the worker: draw hollow
+	Partial bool   // fewer pods contributed than were expected to: draw hollow
 	Title   string // hover text, e.g. "15:04:05 · 42.0/s · 2/3 pods"
 }
 
@@ -423,44 +428,53 @@ func newest(snaps []*Snapshot, span, interval time.Duration) []*Snapshot {
 	return snaps[len(snaps)-n:]
 }
 
-// workerRates charts one worker's rate (pick) per snapshot: the sum over
-// reporting pods that are neither load-balanced nor missing a valid rate.
+// workerRates charts one worker's rate (pick) per snapshot: the sum over the
+// non-load-balanced pods with a valid rate. Expected pods (see the file comment)
+// are the healthy ones reporting the worker plus every errored one; a healthy
+// pod lacking the worker is not expected.
 func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
-		var contributing, reporting int
+		var contributing, expected int
 		for _, p := range podsOf(s, pod) {
-			sm := p.Workers[name]
-			if p.Err != "" || sm == nil {
+			if p.LoadBalanced > 1 {
 				continue
 			}
-			reporting++
-			if p.LoadBalanced > 1 || !sm.RateOK {
+			if p.Err != "" {
+				expected++
+				continue
+			}
+			sm := p.Workers[name]
+			if sm == nil {
+				continue
+			}
+			expected++
+			if !sm.RateOK {
 				continue
 			}
 			contributing++
 			sum += pick(sm)
 		}
-		out[i] = ratePoint(s, sum, contributing, reporting, 1, "/s")
+		out[i] = ratePoint(s, sum, contributing, expected, 1, "/s")
 	}
 	return out
 }
 
 // fleetRates charts a rate summed over every worker per snapshot, scaled by
-// scale (60 for /min). A pod "reports" when it is healthy and has workers, and
-// "contributes" when it is not load-balanced and has a worker with a valid rate.
+// scale (60 for /min). Every non-load-balanced pod, healthy or errored, is
+// expected; one contributes when it has a worker with a valid rate.
 func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale float64, unit string) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
-		var contributing, reporting int
+		var contributing, expected int
 		for _, p := range podsOf(s, pod) {
-			if p.Err != "" || len(p.Workers) == 0 {
+			if p.LoadBalanced > 1 {
 				continue
 			}
-			reporting++
-			if p.LoadBalanced > 1 {
+			expected++
+			if p.Err != "" {
 				continue
 			}
 			var got bool
@@ -474,7 +488,7 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 				contributing++
 			}
 		}
-		out[i] = ratePoint(s, sum, contributing, reporting, scale, unit)
+		out[i] = ratePoint(s, sum, contributing, expected, scale, unit)
 	}
 	return out
 }
@@ -495,16 +509,16 @@ func pendingSeries(snaps []*Snapshot, pod string) []Point {
 }
 
 // ratePoint builds one rate point. With no contributing pod it is a gap; with
-// fewer contributing than reporting pods it is partial.
-func ratePoint(s *Snapshot, sum float64, contributing, reporting int, scale float64, unit string) Point {
+// fewer contributing than expected pods it is partial.
+func ratePoint(s *Snapshot, sum float64, contributing, expected int, scale float64, unit string) Point {
 	if contributing == 0 {
 		return Point{Gap: true, Title: pointTime(s) + " · no data"}
 	}
 	v := sum * scale
 	return Point{
 		V:       v,
-		Partial: contributing < reporting,
-		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d pods", pointTime(s), v, unit, contributing, reporting),
+		Partial: contributing < expected,
+		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d pods", pointTime(s), v, unit, contributing, expected),
 	}
 }
 

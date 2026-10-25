@@ -236,15 +236,16 @@ func TestSeriesExcludesLoadBalancedPods(t *testing.T) {
 		return p
 	}
 
-	// p1 is behind a load balancer: its 6/s must not be summed in.
+	// p1 is behind a load balancer: its 6/s must not be summed in, and it is
+	// outside k/N, so the point stays solid.
 	mixed := snap(atTick(0),
 		okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 4, 0)}),
 		lb("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 6, 0)}),
 	)
 	d := BuildDashboard([]*Snapshot{mixed}, "", iv)
 	row := rowByName(t, d.Rows, "orders")
-	if p := row.Spark[0]; p.V != 4 || !p.Partial || p.Gap || p.Title != stamp(mixed)+" · 4.0/s · 1/2 pods" {
-		t.Errorf("point = %+v, want V 4 partial 1/2", p)
+	if p := row.Spark[0]; p.V != 4 || p.Partial || p.Gap || p.Title != stamp(mixed)+" · 4.0/s · 1/1 pods" {
+		t.Errorf("point = %+v, want V 4 solid 1/1", p)
 	}
 	if row.RateNA {
 		t.Error("RateNA set although p0 is not load-balanced")
@@ -270,6 +271,72 @@ func TestSeriesExcludesLoadBalancedPods(t *testing.T) {
 	if r := rowByName(t, BuildDashboard([]*Snapshot{only}, "p1", iv).Rows, "orders"); !r.RateNA {
 		t.Error("RateNA not set for the pod-filtered load-balanced pod")
 	}
+}
+
+// An errored pod is expected to contribute (its data is unknown), so the
+// point is hollow k/N instead of a solid dip; a load-balanced pod is outside
+// k and N, so it never makes a point hollow.
+func TestSeriesPartialCountsErroredPodsNotLoadBalanced(t *testing.T) {
+	iv := 5 * time.Second
+	lb := func(p PodSnapshot) PodSnapshot { p.LoadBalanced = 2; return p }
+	ws := func(completed float64) map[string]*Sample {
+		return map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), completed, 0.5)}
+	}
+	errored := func(endpoint string) PodSnapshot {
+		// Carries a rated sample to prove an errored pod adds nothing to the sum.
+		return PodSnapshot{Endpoint: endpoint, Label: endpoint, Err: "timeout", LoadBalanced: 1, Workers: ws(99)}
+	}
+
+	// (a) p2 errored: 2 of 3 expected pods contribute, in the worker series,
+	// the detail series and the KPI series alike.
+	down := snap(atTick(0), okPod("p0", ws(4)), okPod("p1", ws(6)), errored("p2"))
+	d := BuildDashboard([]*Snapshot{down}, "", iv)
+	check := func(what string, p Point, v float64, title string) {
+		t.Helper()
+		if p.V != v || !p.Partial || p.Gap || p.Title != title {
+			t.Errorf("%s = %+v, want V %v partial %q", what, p, v, title)
+		}
+	}
+	check("row", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(down)+" · 10.0/s · 2/3 pods")
+	check("kpi completed", d.KPIs.Completed[0], 10, stamp(down)+" · 10.0/s · 2/3 pods")
+	check("kpi failed", d.KPIs.Failed[0], 60, stamp(down)+" · 60.0/min · 2/3 pods")
+	det, _ := BuildDetail([]*Snapshot{down}, "", "orders", iv)
+	check("detail", det.Completed1h[0], 10, stamp(down)+" · 10.0/s · 2/3 pods")
+
+	// Errored pods count in N even when no healthy pod reports the worker, but
+	// with nobody contributing the point is a gap.
+	allDown := snap(atTick(0), errored("p0"), okPod("p1", map[string]*Sample{"billing": smp("Running", 1, 0, 1, 0)}))
+	if p := rowByName(t, BuildDashboard([]*Snapshot{allDown}, "", iv).Rows, "billing").Spark[0]; !p.Gap {
+		t.Errorf("billing point = %+v, want a gap (nobody contributed)", p)
+	}
+
+	// (b) one load-balanced pod plus two healthy contributing pods: solid 2/2.
+	withLB := snap(atTick(0), okPod("p0", ws(4)), lb(okPod("p1", ws(50))), okPod("p2", ws(6)))
+	d = BuildDashboard([]*Snapshot{withLB}, "", iv)
+	solid := func(what string, p Point, v float64, title string) {
+		t.Helper()
+		if p.V != v || p.Partial || p.Gap || p.Title != title {
+			t.Errorf("%s = %+v, want V %v solid %q", what, p, v, title)
+		}
+	}
+	solid("row", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(withLB)+" · 10.0/s · 2/2 pods")
+	solid("kpi completed", d.KPIs.Completed[0], 10, stamp(withLB)+" · 10.0/s · 2/2 pods")
+	// An errored load-balanced pod is excluded from N as well.
+	lbDown := snap(atTick(0), okPod("p0", ws(4)), lb(errored("p1")), okPod("p2", ws(6)))
+	d = BuildDashboard([]*Snapshot{lbDown}, "", iv)
+	solid("row with errored LB pod", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(lbDown)+" · 10.0/s · 2/2 pods")
+	solid("kpi with errored LB pod", d.KPIs.Completed[0], 10, stamp(lbDown)+" · 10.0/s · 2/2 pods")
+
+	// (c) a healthy pod lacking the worker is not expected to report it...
+	other := map[string]*Sample{"billing": rated(smp("Running", 2, 0, 2, 0), 1, 0)}
+	lacking := snap(atTick(0), okPod("p0", ws(4)), okPod("p1", ws(6)), okPod("p2", other))
+	d = BuildDashboard([]*Snapshot{lacking}, "", iv)
+	solid("row for orders", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(lacking)+" · 10.0/s · 2/2 pods")
+	solid("row for billing", rowByName(t, d.Rows, "billing").Spark[0], 1, stamp(lacking)+" · 1.0/s · 1/1 pods")
+	// ...while the fleet series expects every healthy pod, and p2 does contribute.
+	solid("kpi", d.KPIs.Completed[0], 11, stamp(lacking)+" · 11.0/s · 3/3 pods")
+	det, _ = BuildDetail([]*Snapshot{lacking}, "", "orders", iv)
+	solid("detail", det.Completed1h[0], 10, stamp(lacking)+" · 10.0/s · 2/2 pods")
 }
 
 func TestKPIsPendingIsMaxPerPodSummedOverWorkers(t *testing.T) {
