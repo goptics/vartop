@@ -2,6 +2,10 @@ package fleet
 
 import (
 	"context"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -347,5 +351,128 @@ func TestAppendKeysRatesByUnitKey(t *testing.T) {
 		if !sm.RateOK || sm.CompletedRate != want {
 			t.Errorf("%s: RateOK = %v, CompletedRate = %v, want %v", second.Pods[i].Key, sm.RateOK, sm.CompletedRate, want)
 		}
+	}
+}
+
+// rateRun is a run of polls that exercises every rating rule: two units with
+// two workers each, a regular tick, an early poll, a counter reset, another
+// instance answering, a unit that shows up late and a tick after a gap.
+// Each call builds fresh samples, so runs never share any.
+func rateRun() []*Snapshot {
+	iv := 5 * time.Second
+	t0 := time.Unix(1000, 0)
+	sample := func(at time.Duration, inst string, completed, failed uint64) *Sample {
+		s := &Sample{At: t0.Add(at)}
+		s.Instance = inst
+		s.Metrics.Completed, s.Metrics.Failed = completed, failed
+		return s
+	}
+	type w = map[string]*Sample
+	snap := func(at time.Duration, pods ...PodSnapshot) *Snapshot {
+		return &Snapshot{At: t0.Add(at), Pods: pods}
+	}
+	return []*Snapshot{
+		snap(0,
+			PodSnapshot{Key: "p", Workers: w{"a": sample(0, "i", 100, 0), "b": sample(0, "i", 10, 1)}}),
+		snap(iv,
+			PodSnapshot{Key: "p", Workers: w{"a": sample(iv, "i", 150, 5), "b": sample(iv, "i", 20, 1)}}),
+		snap(iv+8*time.Millisecond, // early: PollNow after an action
+			PodSnapshot{Key: "p", Workers: w{"a": sample(iv+8*time.Millisecond, "i", 151, 5), "b": sample(iv+8*time.Millisecond, "i", 3, 0)}}),
+		snap(2*iv,
+			PodSnapshot{Key: "p", Workers: w{"a": sample(2*iv, "j", 160, 5), "b": sample(2*iv, "i", 13, 0)}},
+			PodSnapshot{Key: "q", Workers: w{"a": sample(2*iv, "k", 7, 0)}}),
+		snap(3*iv,
+			PodSnapshot{Key: "p", Workers: w{"a": sample(3*iv, "j", 210, 6), "b": sample(3*iv, "i", 33, 0)}},
+			PodSnapshot{Key: "q", Workers: w{"a": sample(3*iv, "k", 17, 0)}}),
+		snap(7*iv, // after a gap of more than three intervals
+			PodSnapshot{Key: "p", Workers: w{"a": sample(7*iv, "j", 400, 6), "b": sample(7*iv, "i", 40, 0)}}),
+		snap(8*iv,
+			PodSnapshot{Key: "p", Workers: w{"a": sample(8*iv, "j", 450, 7), "b": sample(8*iv, "i", 45, 0)}}),
+	}
+}
+
+// rates lists the rate fields of every sample of snaps, in a stable order.
+func rates(snaps []*Snapshot) []string {
+	var out []string
+	for i, s := range snaps {
+		for _, p := range s.Pods {
+			for _, name := range slices.Sorted(maps.Keys(p.Workers)) {
+				sm := p.Workers[name]
+				out = append(out, fmt.Sprintf("%d %s/%s: %v %v %v", i, p.Key, name, sm.RateOK, sm.CompletedRate, sm.FailedRate))
+			}
+		}
+	}
+	return out
+}
+
+// TestRaterMatchesHistory: rating with a Rater gives every sample the rates
+// History.Append gives it.
+func TestRaterMatchesHistory(t *testing.T) {
+	iv := 5 * time.Second
+	viaHistory, viaRater := rateRun(), rateRun()
+	h, r := NewHistory(iv), NewRater(iv)
+	for i := range viaHistory {
+		h.Append(viaHistory[i])
+		r.Rate(viaRater[i])
+	}
+
+	want, got := rates(viaHistory), rates(viaRater)
+	if !slices.Equal(got, want) {
+		t.Errorf("Rater rates:\n%s\nwant History's:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if !slices.ContainsFunc(want, func(s string) bool { return strings.Contains(s, "true") }) {
+		t.Error("no sample of the run got a rate: the run tests nothing")
+	}
+}
+
+// TestRaterSeed: a rater seeded with a snapshot rated before (as a restart
+// seeds it with the latest stored one) rates the next snapshot as a rater
+// that saw every snapshot does, early polls included.
+func TestRaterSeed(t *testing.T) {
+	iv := 5 * time.Second
+	for _, seedAt := range []int{0, 1, 3, 4} {
+		unbroken := rateRun()
+		r := NewRater(iv)
+		for _, s := range unbroken {
+			r.Rate(s)
+		}
+
+		resumed := rateRun()
+		seeded := NewRater(iv)
+		seeded.Seed(unbroken[seedAt]) // as stored: rated, never rated again
+		for _, s := range resumed[seedAt+1:] {
+			seeded.Rate(s)
+		}
+
+		want, got := rates(unbroken[seedAt+1:]), rates(resumed[seedAt+1:])
+		if !slices.Equal(got, want) {
+			t.Errorf("seeded with snapshot %d, rates:\n%s\nwant an unbroken run's:\n%s", seedAt, strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	}
+	// Seeding rates nothing.
+	s := rateRun()[1]
+	NewRater(iv).Seed(s)
+	for _, line := range rates([]*Snapshot{s}) {
+		if strings.Contains(line, "true") {
+			t.Errorf("Seed rated a sample: %s", line)
+		}
+	}
+}
+
+// TestRingStoresWithoutRating: a Ring keeps the rates a snapshot comes with.
+func TestRingStoresWithoutRating(t *testing.T) {
+	iv := 5 * time.Second
+	run := rateRun()
+	ring := NewRing(iv)
+	for _, s := range run {
+		ring.Append(s)
+	}
+	for _, line := range rates(ring.Snapshots()) {
+		if strings.Contains(line, "true") {
+			t.Errorf("Ring.Append rated a sample: %s", line)
+		}
+	}
+	if ring.Latest() != run[len(run)-1] || ring.Interval() != iv {
+		t.Errorf("Latest = %p, Interval = %v; want the last appended and %v", ring.Latest(), ring.Interval(), iv)
 	}
 }

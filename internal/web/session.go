@@ -39,6 +39,8 @@ func NewSession(srv *config.Server, pool *api.Pool) *Session {
 		History:  hist,
 		pool:     pool,
 		collector: fleet.NewCollector(srv, pool, func(t fleet.Tick) error {
+			// The collector rated it; Append rates it again against the
+			// same samples, which leaves every rate as it is.
 			hist.Append(t.Snap)
 			return nil
 		}),

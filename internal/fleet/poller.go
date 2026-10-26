@@ -16,18 +16,19 @@ import (
 
 // Tick is what a collector hands its sink after each poll.
 type Tick struct {
-	Snap *Snapshot
+	Snap *Snapshot // rated; immutable once handed over
 }
 
 // Collector polls one server: a single background goroutine fans out to
-// every unit in the pool each interval and hands the Snapshot to the sink.
-// That goroutine is the sink's only caller, so a collector's late tick can
-// never reach another collector's sink.
+// every unit in the pool each interval, rates the Snapshot and hands it to
+// the sink. That goroutine is the sink's only caller, so a collector's late
+// tick can never reach another collector's sink.
 type Collector struct {
 	interval time.Duration
 	pool     *api.Pool
 	sink     func(Tick) error
 	tracker  *tracker        // the poller goroutine's
+	rater    *Rater          // the poller goroutine's
 	ctx      context.Context // cancelled by Close
 	cancel   context.CancelFunc
 	pollNow  chan chan struct{} // the poller closes each received channel once its snapshot is sunk
@@ -47,6 +48,7 @@ func NewCollector(srv *config.Server, pool *api.Pool, sink func(Tick) error) *Co
 		pool:     pool,
 		sink:     sink,
 		tracker:  newTracker(interval, srv.Kubernetes != nil),
+		rater:    NewRater(interval),
 		ctx:      ctx,
 		cancel:   cancel,
 		pollNow:  make(chan chan struct{}),
@@ -115,9 +117,9 @@ func (c *Collector) run() {
 	}
 }
 
-// tick polls every unit with a deadline of 0.8 × the interval and hands the
-// snapshot to the sink. It reports false, handing over nothing, once the
-// collector is closed, and false when the sink fails.
+// tick polls every unit with a deadline of 0.8 × the interval, rates the
+// snapshot and hands it to the sink. It reports false, handing over
+// nothing, once the collector is closed, and false when the sink fails.
 func (c *Collector) tick() bool {
 	ctx, cancel := context.WithTimeout(c.ctx, c.interval*8/10)
 	defer cancel()
@@ -125,12 +127,13 @@ func (c *Collector) tick() bool {
 	if c.ctx.Err() != nil {
 		return false
 	}
+	c.rater.Rate(snap)
 	return c.sink(Tick{Snap: snap}) == nil
 }
 
 // pollOnce polls every unit of the pool within ctx, tracking instances
 // across ticks in t, and returns the snapshot with At set to when the poll
-// started. Every Sample in it is freshly allocated, as History.Append
+// started. Every Sample in it is freshly allocated, as Rater.Rate
 // requires.
 func pollOnce(ctx context.Context, pool *api.Pool, t *tracker) *Snapshot {
 	return pollAt(ctx, pool, t, time.Now())

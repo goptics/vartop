@@ -344,6 +344,42 @@ func TestCollectorStopsOnSinkError(t *testing.T) {
 	}
 }
 
+// TestCollectorRatesSnapshots: the snapshots a collector hands its sink are
+// rated, the second tick's against the first.
+func TestCollectorRatesSnapshots(t *testing.T) {
+	f, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running", Completed: 10}})
+	ticks := make(chan Tick, 4)
+	c := NewCollector(&config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}},
+		fleettest.StaticPool(t, srv.URL), func(tick Tick) error {
+			select {
+			case ticks <- tick:
+			default:
+			}
+			return nil
+		})
+	t.Cleanup(func() { _ = c.Close() })
+
+	next := func() *Sample {
+		t.Helper()
+		select {
+		case tick := <-ticks:
+			return podByEndpoint(t, tick.Snap, srv.URL).Workers["orders"]
+		case <-time.After(3 * time.Second):
+			t.Fatal("no tick within 3s")
+			return nil
+		}
+	}
+	if first := next(); first.RateOK {
+		t.Errorf("first sample rated: %+v", first)
+	}
+	f.Mu.Lock()
+	f.Workers["orders"].Completed = 1000
+	f.Mu.Unlock()
+	if second := next(); !second.RateOK || second.CompletedRate <= 0 {
+		t.Errorf("second sample: RateOK = %v, CompletedRate = %v; want a positive rate", second.RateOK, second.CompletedRate)
+	}
+}
+
 func TestTicksDoNotOverlap(t *testing.T) {
 	f, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running"}})
 	f.Delay = 1500 * time.Millisecond // 1.5 × the 1s interval

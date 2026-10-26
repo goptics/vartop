@@ -46,8 +46,8 @@ func (p PodSnapshot) Tip() string {
 	return p.Key
 }
 
-// Snapshot is one full poll across all units. It is immutable once passed to
-// History.Append.
+// Snapshot is one full poll across all units. It is immutable once
+// published (see Ring.Append).
 type Snapshot struct {
 	At time.Time
 	// Pods are in the order the pages list them: by label number
@@ -63,87 +63,132 @@ type Snapshot struct {
 	Err string
 }
 
-// History keeps the last hour of snapshots in a ring and derives per-worker
-// rates as snapshots arrive. It is safe for one writer and many readers.
-type History struct {
+// Rater derives per-worker rates as snapshots arrive. It belongs to the one
+// goroutine that rates, and keeps the samples it rates against.
+type Rater struct {
 	interval time.Duration
-
-	mu    sync.RWMutex
-	ring  []*Snapshot
-	next  int                // ring index the next snapshot is written to
-	count int                // snapshots currently held
-	last  map[string]*Sample // latest sample per unit key+"\x00"+worker
+	last     map[string]*Sample // latest sample per unit key+"\x00"+worker
 }
 
-// NewHistory sizes the ring to hold an hour of polls: ceil(time.Hour/interval)
-// slots. interval must be positive (config.Server.PollInterval always is).
-func NewHistory(interval time.Duration) *History {
-	return &History{
-		interval: interval,
-		ring:     make([]*Snapshot, int((time.Hour+interval-1)/interval)),
-		last:     make(map[string]*Sample),
-	}
+// NewRater returns a rater for a server polled every interval.
+func NewRater(interval time.Duration) *Rater {
+	return &Rater{interval: interval, last: make(map[string]*Sample)}
 }
 
-// Interval is the poll interval the history was sized for.
-func (h *History) Interval() time.Duration { return h.interval }
-
-// Append fills the rate fields of every sample in s from the previous sample of
-// the same worker on the same pod, then publishes s, evicting the oldest
-// snapshot when the ring is full. s must not be modified afterwards.
+// Rate fills the rate fields of every sample in s from the previous sample
+// of the same worker on the same unit. s must not be published yet: its
+// samples are written.
 //
 // A sample that comes early (see early), as PollNow's after an action does,
 // repeats the previous sample's rate instead of being a gap, and does not
 // replace it as the base: the next regular tick is rated against it.
-func (h *History) Append(s *Snapshot) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
+func (r *Rater) Rate(s *Snapshot) {
 	for _, pod := range s.Pods {
 		for name, sm := range pod.Workers {
 			key := pod.Key + "\x00" + name
-			prev := h.last[key]
-			if early(prev, sm, h.interval) {
+			prev := r.last[key]
+			if early(prev, sm, r.interval) {
 				sm.CompletedRate, sm.FailedRate, sm.RateOK = prev.CompletedRate, prev.FailedRate, true
 				continue
 			}
-			sm.CompletedRate, sm.FailedRate, sm.RateOK = rate(prev, sm, h.interval)
+			sm.CompletedRate, sm.FailedRate, sm.RateOK = rate(prev, sm, r.interval)
 			// ponytail: never pruned; entries for vanished pods are tiny and
 			// fall out of rate()'s 3x window anyway.
-			h.last[key] = sm
+			r.last[key] = sm
 		}
 	}
+}
 
-	h.ring[h.next] = s
-	h.next = (h.next + 1) % len(h.ring)
-	if h.count < len(h.ring) {
-		h.count++
+// Seed makes the samples of s, a snapshot rated before (the latest one
+// stored, after a restart), the ones the next Rate rates against, without
+// rating them. Its samples are only read.
+func (r *Rater) Seed(s *Snapshot) {
+	for _, pod := range s.Pods {
+		for name, sm := range pod.Workers {
+			r.last[pod.Key+"\x00"+name] = sm
+		}
+	}
+}
+
+// Ring keeps the last hour of snapshots, as they come: it rates nothing. It
+// is safe for one writer and many readers.
+type Ring struct {
+	interval time.Duration
+
+	mu    sync.RWMutex
+	ring  []*Snapshot
+	next  int // ring index the next snapshot is written to
+	count int // snapshots currently held
+}
+
+// NewRing sizes the ring to hold an hour of polls: ceil(time.Hour/interval)
+// slots. interval must be positive (config.Server.PollInterval always is).
+func NewRing(interval time.Duration) *Ring {
+	return &Ring{
+		interval: interval,
+		ring:     make([]*Snapshot, int((time.Hour+interval-1)/interval)),
+	}
+}
+
+// Interval is the poll interval the ring was sized for.
+func (r *Ring) Interval() time.Duration { return r.interval }
+
+// Append publishes s, evicting the oldest snapshot when the ring is full. s
+// must not be modified afterwards.
+func (r *Ring) Append(s *Snapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.ring[r.next] = s
+	r.next = (r.next + 1) % len(r.ring)
+	if r.count < len(r.ring) {
+		r.count++
 	}
 }
 
 // Snapshots returns the held snapshots, oldest first. The slice is a copy;
 // the snapshots themselves are shared and must be treated as read-only.
-func (h *History) Snapshots() []*Snapshot {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+func (r *Ring) Snapshots() []*Snapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	out := make([]*Snapshot, h.count)
-	start := (h.next - h.count + len(h.ring)) % len(h.ring)
+	out := make([]*Snapshot, r.count)
+	start := (r.next - r.count + len(r.ring)) % len(r.ring)
 	for i := range out {
-		out[i] = h.ring[(start+i)%len(h.ring)]
+		out[i] = r.ring[(start+i)%len(r.ring)]
 	}
 	return out
 }
 
-// Latest returns the newest snapshot, or nil when the history is empty.
-func (h *History) Latest() *Snapshot {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+// Latest returns the newest snapshot, or nil when the ring is empty.
+func (r *Ring) Latest() *Snapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	if h.count == 0 {
+	if r.count == 0 {
 		return nil
 	}
-	return h.ring[(h.next-1+len(h.ring))%len(h.ring)]
+	return r.ring[(r.next-1+len(r.ring))%len(r.ring)]
+}
+
+// History is a Ring that rates what it stores, the web's in-memory history.
+// It is safe for one writer and many readers.
+type History struct {
+	*Ring
+	rater *Rater // the writer's
+}
+
+// NewHistory returns an empty history for a server polled every interval;
+// see NewRing.
+func NewHistory(interval time.Duration) *History {
+	return &History{Ring: NewRing(interval), rater: NewRater(interval)}
+}
+
+// Append rates s (see Rater.Rate), then publishes it (see Ring.Append). s
+// must not be modified afterwards.
+func (h *History) Append(s *Snapshot) {
+	h.rater.Rate(s)
+	h.Ring.Append(s)
 }
 
 // early reports whether cur came under half an interval after prev, which
