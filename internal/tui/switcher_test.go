@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -183,6 +184,44 @@ func TestSwitcherHealthFromStore(t *testing.T) {
 	}
 	if got, want := rowsOf(m), []string{"orders|instance-1|Running|4|1|0|3"}; !slices.Equal(got, want) {
 		t.Fatalf("local's rows at once = %v, want %v", got, want)
+	}
+}
+
+// TestSwitcherStaleHealth: a server whose newest snapshot is stale shows no
+// health in the switcher — with the daemon down every unit would look as
+// healthy as it last was — and its units' dots are unknown, not healthy.
+func TestSwitcherStaleHealth(t *testing.T) {
+	f := switcherFixture(t)
+	f.write("multi", snapAt(time.Now().Add(-time.Minute),
+		unit("instance-1", "http://10.0.0.1:8080", map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}),
+		unit("instance-2", "http://10.0.0.2:8080", map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}),
+	))
+	m := f.model("local")
+	openSwitcher(t, m)
+	selectSwitcherItem(t, m, serverItem("multi"))
+	press(m, tea.KeyMsg{Type: tea.KeyEnter}) // expand
+	for _, it := range m.switcher.switcher.Items() {
+		switch it := it.(type) {
+		case switchServerItem:
+			title := it.Title()
+			switch it.name {
+			case "multi":
+				if !strings.Contains(title, "multi (— instances)") || strings.Contains(title, "healthy") {
+					t.Errorf("stale server row = %q, want no health", title)
+				}
+			case "solo", "local":
+				if strings.Contains(title, "—") {
+					t.Errorf("fresh server row = %q", title)
+				}
+			}
+		case switchPodItem:
+			if !it.stale || strings.Contains(it.Title(), "●") {
+				t.Errorf("unit row of a stale server = %+v %q, want an unknown dot", it, it.Title())
+			}
+		}
+	}
+	if n := len(podItems(m)); n != 2 {
+		t.Errorf("stale server lists %d units, want 2: they can still be selected", n)
 	}
 }
 

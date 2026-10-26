@@ -45,12 +45,6 @@ func (m *Model) isDetailActive() bool {
 	return ok
 }
 
-// detailScreen returns the active detail screen, if one is active.
-func (m *Model) detailScreen() (*detailScreen, bool) {
-	d, ok := m.activeScreen().(*detailScreen)
-	return d, ok
-}
-
 // dashboardScreen returns the dashboard at the base of the stack. The dashboard
 // is always installed at index 0 (NewModel) and the base is never popped, so the
 // assertion always succeeds.

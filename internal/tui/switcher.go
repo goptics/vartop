@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
@@ -96,23 +97,26 @@ func (s *switcherScreen) rebuild(m *Model) {
 	var items []list.Item
 	// Sorted: map order is random and rebuild runs on every tick, so an
 	// unsorted list would reshuffle under the cursor.
+	now := time.Now()
 	for _, name := range slices.Sorted(maps.Keys(m.cfg.Servers)) {
-		latest := m.switchLatest[name]
+		srv, latest := m.cfg.Servers[name], m.switchLatest[name]
 		h := fleet.Health(latest)
+		stale := fleet.Stale(latest, srv.PollInterval(), now) // its health is not current
 		expanded := s.expanded == name
 
 		items = append(items, switchServerItem{
 			name:     name,
-			noun:     fleet.NounFor(m.cfg.Servers[name]),
+			noun:     fleet.NounFor(srv),
 			units:    h.Total,
 			healthy:  h.Healthy,
+			stale:    stale,
 			expanded: expanded,
 		})
 
 		// Add unit rows only for the expanded server
 		if expanded && h.Total > 1 {
 			for _, p := range latest.Pods {
-				items = append(items, switchPodItem{label: p.Label, server: name, healthy: p.Err == ""})
+				items = append(items, switchPodItem{label: p.Label, server: name, healthy: p.Err == "", stale: stale})
 			}
 		}
 	}

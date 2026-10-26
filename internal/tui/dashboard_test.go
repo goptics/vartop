@@ -12,6 +12,7 @@ import (
 
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
 // multiConfig is one server, "multi", over the given endpoints, polled every
@@ -138,6 +139,13 @@ func TestStaleHeader(t *testing.T) {
 	if view := m.View(); strings.Contains(view, "4 workers") || !strings.Contains(view, "—") {
 		t.Errorf("the detail screen shows stale values:\n%s", view)
 	}
+	for _, width := range []int{120, 60} { // wide and compact header
+		deliver(m, tea.WindowSizeMsg{Width: width, Height: 40})
+		if view := m.View(); !regexp.MustCompile(`No new data for \d+s`).MatchString(view) {
+			t.Errorf("the %d-column detail screen does not say it is stale:\n%s", width, view)
+		}
+	}
+	deliver(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	press(m, tea.KeyMsg{Type: tea.KeyEsc})
 
 	f.claim()
@@ -352,6 +360,15 @@ func TestWaitingForFirstSnapshot(t *testing.T) {
 		}
 	}
 
+	m.pushScreen(newDetailScreen("orders", "instance-1")) // left open from before
+	view = m.View()
+	for _, want := range []string{"Waiting for the first snapshot of multi…", "the vartop daemon is not running"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("detail view lacks %q:\n%s", want, view)
+		}
+	}
+	m.popScreen()
+
 	f.claim()
 	if err := f.ctl.SetServerErr("multi", "connecting…"); err != nil {
 		t.Fatal(err)
@@ -360,5 +377,136 @@ func TestWaitingForFirstSnapshot(t *testing.T) {
 	view = m.View()
 	if !strings.Contains(view, "multi: connecting…") || strings.Contains(view, "not running") {
 		t.Errorf("view with a daemon connecting:\n%s", view)
+	}
+}
+
+// TestStaleActionSettles: an action on a server whose newest snapshot is
+// stale pokes it and waits for a newer snapshot — unless no daemon runs to
+// take one — and is refused, nothing sent, when none comes in time; a
+// label the newest snapshot lacks is refused too.
+func TestStaleActionSettles(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		daemon bool // a daemon holds the lease
+		fresh  bool // the test writes a fresh snapshot once poked
+		label  string
+		want   string // the refusal; "" = sent
+		pokes  int64
+	}{
+		{name: "no daemon", want: `No new data for \d+m\d+s — the vartop daemon is not running\.`},
+		{name: "nothing new", daemon: true, want: `No new data for \d+m\d+s\.`, pokes: 1},
+		{name: "fresh in time", daemon: true, fresh: true, pokes: 2},
+		{name: "gone label", daemon: true, label: "instance-9", want: `Instance instance-9 is no longer reported`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pod := newFakePod(t)
+			f := newFixture(t, multiConfig(pod.url()))
+			f.claim()
+			orders := func() map[string]*fleet.Sample { return map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)} }
+			at := time.Now().Add(-time.Minute)
+			if c.label != "" {
+				at = time.Now() // fresh: only the label is wrong
+			}
+			f.write("multi", snapAt(at, unit("instance-1", pod.url(), orders())))
+			if !c.daemon {
+				f.release()
+			}
+			m := f.model("multi")
+			m.settleWait = 300 * time.Millisecond
+			if c.fresh {
+				m.settleWait = 10 * time.Second
+			}
+
+			label := "instance-1"
+			if c.label != "" {
+				label = c.label
+			}
+			cmd := m.actCmd("orders", label, "pause")
+			if cmd == nil {
+				t.Fatal("no action command")
+			}
+			done := make(chan tea.Msg, 1)
+			go func() { done <- cmd() }()
+			if c.fresh {
+				fleettest.WaitUntil(t, 5*time.Second, "the settle poke", func() bool { return f.pokes("multi") == 1 })
+				f.write("multi", fresh(unit("instance-1", pod.url(), orders())))
+			}
+			var msg tea.Msg
+			select {
+			case msg = <-done:
+			case <-time.After(15 * time.Second):
+				t.Fatal("the action never ended")
+			}
+			deliver(m, msg)
+
+			sent := pod.count("PATCH /workers/orders/actions/pause")
+			switch {
+			case c.want == "" && (m.err != nil || sent != 1):
+				t.Errorf("error %v, %d PATCH sent; want it sent once", m.err, sent)
+			case c.want != "" && (m.err == nil || !regexp.MustCompile("^"+c.want+"$").MatchString(m.err.Error())):
+				t.Errorf("error = %v, want %s", m.err, c.want)
+			case c.want != "" && pod.total() != 0:
+				t.Errorf("refused, yet varmq got %v", pod.seen())
+			}
+			if n := f.pokes("multi"); n != c.pokes {
+				t.Errorf("pokes = %d, want %d", n, c.pokes)
+			}
+		})
+	}
+}
+
+// TestSelectionFollowsRow: the highlighted row stays on its unit and worker
+// when rows before it come and go between syncs; when that row is gone the
+// action menu closes, so the next key sends nothing to another unit.
+func TestSelectionFollowsRow(t *testing.T) {
+	pod1, pod2 := newFakePod(t), newFakePod(t)
+	f := newFixture(t, multiConfig(pod1.url(), pod2.url()))
+	f.claim()
+	one := unit("instance-1", pod1.url(), map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)})
+	two := unit("instance-2", pod2.url(), map[string]*fleet.Sample{
+		"emails": smp("Running", 2, 0, 2, 0),
+		"orders": smp("Running", 4, 1, 3, 0),
+	})
+	f.write("multi", fresh(one, two))
+	m := f.model("multi")
+	d := m.dashboardScreen()
+	d.table.SetCursor(1)
+	if d.selectedLabel() != "instance-2" || d.selectedWorkerName() != "emails" {
+		t.Fatalf("precondition: selected %s/%s", d.selectedLabel(), d.selectedWorkerName())
+	}
+
+	// instance-1 goes down: its row leaves, the selection stays on emails.
+	f.write("multi", fresh(downUnit("instance-1", pod1.url(), "connection refused"), two))
+	syncNow(t, m)
+	if d.selectedLabel() != "instance-2" || d.selectedWorkerName() != "emails" {
+		t.Fatalf("after instance-1 left: selected %s/%s, want instance-2/emails", d.selectedLabel(), d.selectedWorkerName())
+	}
+	// It comes back: the selection still follows.
+	f.write("multi", fresh(one, two))
+	syncNow(t, m)
+	if d.selectedLabel() != "instance-2" || d.selectedWorkerName() != "emails" {
+		t.Fatalf("after instance-1 came back: selected %s/%s, want instance-2/emails", d.selectedLabel(), d.selectedWorkerName())
+	}
+
+	// The selected row goes while the action menu is open: it closes.
+	press(m, runeKey('a'))
+	if !d.inActionSelection {
+		t.Fatal("a did not open the action menu")
+	}
+	f.write("multi", fresh(one))
+	syncNow(t, m)
+	if d.inActionSelection {
+		t.Fatal("the action menu stayed open on a row that is gone")
+	}
+	if cmd := press(m, runeKey('p')); cmd != nil {
+		if msg := cmd(); msg != nil {
+			deliver(m, msg)
+		}
+	}
+	if pod1.total() != 0 || pod2.total() != 0 {
+		t.Fatalf("a key after the row left sent: pod1=%v pod2=%v", pod1.seen(), pod2.seen())
+	}
+	if got := rowsOf(m); len(got) != 1 || d.table.Cursor() != 0 {
+		t.Fatalf("rows %v, cursor %d; want the one row, selected", got, d.table.Cursor())
 	}
 }

@@ -256,11 +256,29 @@ func syncNow(t *testing.T, m *Model) {
 	deliver(m, msg)
 }
 
-// reloadConfig reads the config again, as a tick does, and delivers it.
+// reloadConfig reads the config again, as a tick does, delivers it, and
+// runs what that returns (none of it waits for a timer).
 func reloadConfig(t *testing.T, m *Model) {
 	t.Helper()
 	if msg := m.configCmd()(); msg != nil {
-		deliver(m, msg)
+		runAll(m, deliver(m, msg))
+	}
+}
+
+// runAll runs cmd, a batch's commands each, and delivers what they return,
+// recursively. It is only for commands that wait for no timer.
+func runAll(m *Model, cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case nil:
+	case tea.BatchMsg:
+		for _, c := range msg {
+			runAll(m, c)
+		}
+	default:
+		runAll(m, deliver(m, msg))
 	}
 }
 

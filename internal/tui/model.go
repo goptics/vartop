@@ -33,8 +33,7 @@ type Model struct {
 	feed  *store.Feed // the shown server's; nil when it is not configured
 	// gen numbers what the model showed: every switch, even back to the
 	// same server, starts a new one, and a sync of an older one is dropped.
-	gen    int
-	synced bool // a sync of this generation came back
+	gen int
 
 	// What the last sync of this generation said.
 	syncErr error  // reading the feed failed
@@ -44,6 +43,9 @@ type Model struct {
 	err error // the error line: what the last refresh or action said
 
 	switchLatest map[string]*fleet.Snapshot // the switcher's read of the store, by server key
+
+	settleWait time.Duration           // how long an action on a stale server waits for a newer snapshot
+	closeFeed  func(*store.Feed) error // closes a feed no longer wanted; (*store.Feed).Close but in tests
 
 	width  int
 	height int
@@ -80,6 +82,8 @@ func NewModel(cfg *config.Config, serverKey string, dataDir string, ctl *store.C
 		start:          start,
 		load:           loadConfig,
 		feeds:          make(map[feedKey]*store.Feed),
+		settleWait:     fleet.SettleWait,
+		closeFeed:      (*store.Feed).Close,
 		showNodeColumn: true,
 		width:          80, // Default width, will be updated by WindowSizeMsg
 		height:         24, // Default height, will be updated by WindowSizeMsg
@@ -154,7 +158,6 @@ func (m Model) View() string {
 func (m *Model) show(key string) tea.Cmd {
 	m.key = key
 	m.gen++
-	m.synced = false
 	m.syncErr, m.down, m.srvErr = nil, false, ""
 	m.feed = nil
 	if srv := m.server(); srv != nil {

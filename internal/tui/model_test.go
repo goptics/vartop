@@ -2,15 +2,18 @@ package tui
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/store"
 )
 
 // TestDropsOtherGenSync: a sync that ends after the model moved on — to
@@ -131,5 +134,82 @@ func TestTUIRemovedServer(t *testing.T) {
 	}
 	if !slices.Equal(names, []string{"other"}) {
 		t.Errorf("switcher lists %v, want [other]", names)
+	}
+}
+
+// TestActedAppliesAcrossGenerations: the end of an action is shown for the
+// server on screen even when the model moved to a new generation of it
+// meanwhile (the action may well have been sent); one for another server is
+// dropped.
+func TestActedAppliesAcrossGenerations(t *testing.T) {
+	pod := newFakePod(t)
+	pod.rejectActions()
+	f := newFixture(t, &config.Config{DefaultServer: "a", Servers: map[string]*config.Server{
+		"a": {Endpoints: []string{pod.url()}, Interval: 5},
+		"b": {Endpoints: []string{"http://b.invalid"}, Interval: 5},
+	}})
+	f.claim()
+	f.write("a", fresh(unit("instance-1", pod.url(), map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)})))
+	m := f.model("a")
+	cmd := m.actCmd("orders", "instance-1", "pause")
+	runAll(m, m.show("a")) // shown again while the action runs: a new generation
+	if deliver(m, cmd()) == nil {
+		t.Error("no sync scheduled after the action")
+	}
+	if m.err == nil || !strings.Contains(m.err.Error(), "action rejected") {
+		t.Fatalf("error = %v, want the action's, begun a generation earlier", m.err)
+	}
+	if pod.count("PATCH /workers/orders/actions/pause") != 1 {
+		t.Fatalf("varmq got %v", pod.seen())
+	}
+
+	shown := m.err
+	deliver(m, actedMsg{server: "b", err: errors.New("b's")})
+	if m.err != shown {
+		t.Fatalf("error = %v: another server's action was applied", m.err)
+	}
+}
+
+// TestRemovedServerFeedClosed: the feed of a server removed from the config,
+// or of an interval it no longer has, is closed and forgotten: an open file
+// would keep the daemon from removing it.
+func TestRemovedServerFeedClosed(t *testing.T) {
+	f := newFixture(t, &config.Config{DefaultServer: "a", Servers: map[string]*config.Server{
+		"a": {Endpoints: []string{"http://a.invalid"}, Interval: 5},
+		"b": {Endpoints: []string{"http://b.invalid"}, Interval: 5},
+		"c": {Endpoints: []string{"http://c.invalid"}, Interval: 5},
+	}})
+	m := f.model("a")
+	var closed []feedKey
+	var before map[feedKey]*store.Feed // the model's feeds before the config changed
+	m.closeFeed = func(fd *store.Feed) error {
+		for k, v := range m.feeds {
+			if v == fd {
+				t.Errorf("feed %v closed while the model still holds it", k)
+			}
+		}
+		for _, k := range []feedKey{{"a", 5 * time.Second}, {"b", 5 * time.Second}, {"c", 5 * time.Second}} {
+			if before[k] == fd {
+				closed = append(closed, k)
+			}
+		}
+		return fd.Close()
+	}
+	runAll(m, m.show("b"))
+	runAll(m, m.show("c"))
+	runAll(m, m.show("a"))
+	before = maps.Clone(m.feeds)
+
+	f.setConfig(&config.Config{DefaultServer: "a", Servers: map[string]*config.Server{
+		"a": {Endpoints: []string{"http://a.invalid"}, Interval: 5},
+		"c": {Endpoints: []string{"http://c.invalid"}, Interval: 2},
+	}})
+	reloadConfig(t, m)
+	slices.SortFunc(closed, func(x, y feedKey) int { return strings.Compare(x.server, y.server) })
+	if want := []feedKey{{"b", 5 * time.Second}, {"c", 5 * time.Second}}; !slices.Equal(closed, want) {
+		t.Fatalf("closed %v, want %v", closed, want)
+	}
+	if _, ok := m.feeds[feedKey{"a", 5 * time.Second}]; !ok || len(m.feeds) != 1 {
+		t.Fatalf("feeds kept: %v, want a's only", slices.Collect(maps.Keys(m.feeds)))
 	}
 }

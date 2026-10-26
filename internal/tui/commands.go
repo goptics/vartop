@@ -111,13 +111,13 @@ func (m *Model) refreshCmd() tea.Cmd {
 	if m.server() == nil {
 		return nil
 	}
-	key, gen, ctl, start := m.key, m.gen, m.ctl, m.start
+	key, ctl, start := m.key, m.ctl, m.start
 	return func() tea.Msg {
 		_, err := ctl.Poke(key)
 		if _, fresh, lerr := ctl.Lease(); lerr == nil && !fresh && start != nil {
 			err = errors.Join(err, start())
 		}
-		return actedMsg{server: key, gen: gen, err: err}
+		return actedMsg{server: key, err: err}
 	}
 }
 
@@ -132,10 +132,9 @@ func (m *Model) actCmd(worker, label, action string) tea.Cmd {
 		return nil
 	}
 	m.err = nil
-	a := actor{feed: m.feed, ctl: m.ctl, key: m.key, interval: srv.PollInterval(), token: srv.Token, noun: m.noun()}
-	gen := m.gen
+	a := actor{feed: m.feed, ctl: m.ctl, key: m.key, interval: srv.PollInterval(), token: srv.Token, noun: m.noun(), wait: m.settleWait}
 	return func() tea.Msg {
-		return actedMsg{server: a.key, gen: gen, err: a.act(worker, label, action)}
+		return actedMsg{server: a.key, err: a.act(worker, label, action)}
 	}
 }
 
@@ -147,6 +146,7 @@ type actor struct {
 	interval time.Duration
 	token    string
 	noun     fleet.Noun
+	wait     time.Duration // how long a stale server is given to take a newer snapshot (fleet.SettleWait)
 }
 
 func (a actor) act(worker, label, action string) error {
@@ -178,8 +178,8 @@ func (a actor) act(worker, label, action string) error {
 }
 
 // settle pokes the server and syncs its feed until it holds a snapshot
-// taken after the poke, for up to fleet.SettleWait. With no daemon
-// running, which would answer the poke, it returns at once.
+// taken after the poke, for up to a.wait. With no daemon running, which
+// would answer the poke, it returns at once.
 func (a actor) settle() {
 	if down, _ := controlState(a.ctl, a.key); down {
 		return
@@ -188,7 +188,7 @@ func (a actor) settle() {
 	if err != nil {
 		return
 	}
-	for deadline := time.Now().Add(fleet.SettleWait); time.Now().Before(deadline); time.Sleep(settlePoll) {
+	for deadline := time.Now().Add(a.wait); time.Now().Before(deadline); time.Sleep(settlePoll) {
 		if a.feed.Sync() == nil {
 			if l := a.feed.Latest(); l != nil && !l.At.Before(at) {
 				return

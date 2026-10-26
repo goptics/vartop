@@ -189,23 +189,24 @@ func (d *detailScreen) View(m *Model) string {
 }
 
 // notice is what the screen shows instead of the worker's values, if
-// anything: the server is not configured (bad), has no snapshot yet, or the
-// unit has no sample of the worker ("{label}: {why}", bad), with the error
-// lines above.
+// anything: what the dashboard would (the server is not configured, or has
+// no snapshot yet, and why), or that the unit has no sample of the worker
+// ("{label}: {why}", bad), with the error lines above.
 func (d *detailScreen) notice(m *Model, latest *fleet.Snapshot, missing string) (text string, bad bool) {
 	switch {
 	case m.server() == nil:
-		return fleet.NotConfiguredMsg(m.key), true
+		return m.notice()
 	case latest == nil:
-		return fleet.WaitingMsg(m.key), false
+		text, bad = m.notice()
 	case missing != "":
-		text = d.label + ": " + missing
-		if errs := m.errorLines(); len(errs) > 0 {
-			text = strings.Join(errs, "\n") + "\n\n" + text
-		}
-		return text, true
+		text, bad = d.label+": "+missing, true
+	default:
+		return "", false
 	}
-	return "", false
+	if errs := m.errorLines(); len(errs) > 0 {
+		text = strings.Join(errs, "\n") + "\n\n" + text
+	}
+	return text, bad
 }
 
 // renderHeader renders the worker detail view header: the worker, its
@@ -217,6 +218,12 @@ func (d *detailScreen) renderHeader(m *Model, latest *fleet.Snapshot, u fleet.Po
 		updatedStyle = lipgloss.NewStyle().Foreground(ColorWarning)
 	}
 	updatedInfo := updatedStyle.Render("updated " + fleet.PointTime(latest))
+	var staleLine string
+	if stale {
+		// Wrapped to the screen: the compact header is narrow.
+		staleLine = lipgloss.NewStyle().Foreground(ColorWarning).Width(max(1, m.width-8)).
+			Render(fleet.StaleMsg(m.key, latest, time.Now(), m.down, m.srvErr))
+	}
 	unitInfo := u.Label
 	if tip := u.Tip(); tip != "" && tip != u.Label {
 		unitInfo += " (" + tip + ")"
@@ -239,13 +246,17 @@ func (d *detailScreen) renderHeader(m *Model, latest *fleet.Snapshot, u fleet.Po
 		serverInfo := fmt.Sprintf("Server: %s", m.key)
 		endpointInfo := fmt.Sprintf("→ %s", unitInfo)
 
-		headerContent := lipgloss.JoinVertical(lipgloss.Left,
+		rows := []string{
 			title,
 			workerInfo,
 			lipgloss.NewStyle().Foreground(ColorSubtle).Render(serverInfo),
 			lipgloss.NewStyle().Foreground(ColorSubtle).Render(endpointInfo),
 			updatedInfo,
-		)
+		}
+		if stale {
+			rows = append(rows, staleLine)
+		}
+		headerContent := lipgloss.JoinVertical(lipgloss.Left, rows...)
 
 		return lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -282,7 +293,7 @@ func (d *detailScreen) renderHeader(m *Model, latest *fleet.Snapshot, u fleet.Po
 
 	rows := []string{row1, row2}
 	if stale {
-		rows = append(rows, lipgloss.NewStyle().Foreground(ColorWarning).Render(fleet.StaleMsg(m.key, latest, time.Now(), m.down, m.srvErr)))
+		rows = append(rows, staleLine)
 	}
 	headerContent := lipgloss.JoinVertical(lipgloss.Left, rows...)
 

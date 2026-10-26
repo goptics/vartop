@@ -407,6 +407,17 @@ func TestResizeAllScreensDoesNotPanic(t *testing.T) {
 			m.pushScreen(newDetailScreen(detailTestWorker, detailTestLabel))
 			return m
 		}},
+		{"detail-stale", func(t *testing.T) *Model {
+			m := stale.modelFor(t, "local")
+			m.pushScreen(newDetailScreen(detailTestWorker, detailTestLabel))
+			return m
+		}},
+		{"detail-not-configured", func(t *testing.T) *Model {
+			m := detail.modelFor(t, "local")
+			m.pushScreen(newDetailScreen(detailTestWorker, detailTestLabel))
+			deliver(m, configMsg{cfg: &config.Config{Servers: map[string]*config.Server{}}})
+			return m
+		}},
 		{"detail-action", func(t *testing.T) *Model {
 			m := detail.modelFor(t, "local")
 			m.pushScreen(newDetailScreen(detailTestWorker, detailTestLabel))

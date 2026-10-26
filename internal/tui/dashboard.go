@@ -151,15 +151,27 @@ func (d *dashboardScreen) selectedLabel() string {
 	return d.labels[i]
 }
 
-// setRows replaces the table rows (and their units' labels) while retaining
-// the current selection.
+// setRows replaces the table rows (and their units' labels), keeping the
+// selection on the same unit and worker wherever its row moved: units
+// coming and going before it must not slide another under the cursor. When
+// that row is gone, the action menu closes — its next key would act on
+// another unit — and the cursor stays where it was, as near as the rows
+// allow.
 func (d *dashboardScreen) setRows(rows []table.Row, labels []string) {
 	selected := d.table.Cursor()
+	label, name := d.selectedLabel(), d.selectedWorkerName()
 	d.labels = labels
 	d.table.SetRows(rows)
-	if selected < len(rows) {
-		d.table.SetCursor(selected)
+	if name != "" {
+		for i, row := range rows {
+			if labels[i] == label && row[0] == name {
+				d.table.SetCursor(i)
+				return
+			}
+		}
+		d.inActionSelection = false
 	}
+	d.table.SetCursor(min(max(selected, 0), len(rows)-1))
 }
 
 // refresh builds the rows again from the newest snapshot of the server

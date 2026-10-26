@@ -35,11 +35,11 @@ type configMsg struct{ cfg *config.Config }
 // server, by key (nil: none yet), for the switcher.
 type switcherMsg struct{ latest map[string]*fleet.Snapshot }
 
-// actedMsg is an action or a refresh (r) on the server keyed server ended,
-// for generation gen; err says why it failed or was refused.
+// actedMsg is an action or a refresh (r) on the server keyed server ended;
+// err says why it failed or was refused. It applies to whatever generation
+// of that server is shown (see Model.handleActed).
 type actedMsg struct {
 	server string
-	gen    int
 	err    error
 }
 
@@ -58,6 +58,7 @@ type switchServerItem struct {
 	name           string
 	noun           fleet.Noun
 	units, healthy int
+	stale          bool // its newest snapshot is: its health is not known
 	expanded       bool
 }
 
@@ -67,6 +68,9 @@ func (i switchServerItem) Title() string {
 		indicator = "▼"
 	}
 
+	if i.stale {
+		return fmt.Sprintf("%s %s %s (— %s)", indicator, unknownDot(), i.name, i.noun.Many)
+	}
 	if i.units <= 1 {
 		return fmt.Sprintf("%s %s", indicator, i.name)
 	}
@@ -88,17 +92,24 @@ type switchPodItem struct {
 	label   string
 	server  string
 	healthy bool
+	stale   bool // its server's newest snapshot is: its health is not known
 }
 
 func (i switchPodItem) Title() string {
 	var dot string
-	if i.healthy {
+	switch {
+	case i.stale:
+		dot = unknownDot()
+	case i.healthy:
 		dot = StatusStyleRunning.Render("●")
-	} else {
+	default:
 		dot = StatusStyleStopped.Render("○")
 	}
 	return fmt.Sprintf("  └─ %s %s", dot, i.label)
 }
+
+// unknownDot marks health that is not known: a stale snapshot's.
+func unknownDot() string                    { return lipgloss.NewStyle().Foreground(ColorSubtle).Render("○") }
 func (i switchPodItem) Description() string { return "" }
 func (i switchPodItem) FilterValue() string { return i.label }
 
