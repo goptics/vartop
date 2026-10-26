@@ -1,0 +1,453 @@
+package daemon
+
+import (
+	"bytes"
+	"database/sql"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/store"
+
+	_ "modernc.org/sqlite"
+)
+
+// labels returns the snapshot's unit labels by unit key.
+func labels(s *fleet.Snapshot) map[string]string {
+	out := make(map[string]string, len(s.Pods))
+	for _, p := range s.Pods {
+		out[p.Key] = p.Label
+	}
+	return out
+}
+
+func labelList(s *fleet.Snapshot) []string {
+	var out []string
+	for _, p := range s.Pods {
+		out = append(out, p.Label)
+	}
+	return out
+}
+
+// TestCollectsEveryServer: every configured server gets a file of its own,
+// filled every interval, its units numbered instance-N.
+func TestCollectsEveryServer(t *testing.T) {
+	_, a := fleettest.NewVarmq(t, "a", nil)
+	_, b := fleettest.NewVarmq(t, "b", nil)
+	_, behind := fleettest.NewInstances(t, "c1", "c2")
+	lb := fleettest.NewRoundRobinLB(t, behind...)
+	h := newHarness(t)
+	h.writeConfig(map[string]*config.Server{
+		"a":  {Interval: 1, Endpoints: []string{a.URL}},
+		"b":  {Interval: 1, Endpoints: []string{b.URL}},
+		"lb": {Interval: 1, Endpoints: []string{lb.URL}},
+	})
+	h.start("d")
+
+	want := map[string][]string{"a": {"instance-1"}, "b": {"instance-1"}, "lb": {"instance-1", "instance-2"}}
+	for name, labels := range want {
+		fleettest.WaitUntil(t, 5*time.Second, name+" labelled "+labels[0]+"…", func() bool {
+			s := h.latest(name)
+			return s != nil && slices.Equal(labelList(s), labels)
+		})
+	}
+	for name := range want {
+		h.waitSnaps(name, 3, 3*time.Second) // one a second
+	}
+	if errs, err := h.control().ServerErrs(); err != nil || len(errs) != 0 {
+		t.Errorf("ServerErrs = %v, %v; want none", errs, err)
+	}
+}
+
+// TestHungDiscoveryIsolated (Review Focus 2): a server whose pool never
+// gets built shows "connecting…" every interval while the others are
+// polled every interval, and holds up no stop.
+func TestHungDiscoveryIsolated(t *testing.T) {
+	_, a := fleettest.NewVarmq(t, "a", nil)
+	_, b := fleettest.NewVarmq(t, "b", nil)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // after the daemon stops
+	h := newHarness(t)
+	h.build = func(s *config.Server) (*api.Pool, error) {
+		if s.Name == "hung" {
+			<-release
+			return nil, errors.New("released")
+		}
+		return api.PoolFor(s)
+	}
+	h.writeConfig(map[string]*config.Server{
+		"a":    {Interval: 1, Endpoints: []string{a.URL}},
+		"b":    {Interval: 1, Endpoints: []string{b.URL}},
+		"hung": {Interval: 1, Endpoints: []string{"http://127.0.0.1:1"}},
+	})
+	r := h.start("d")
+
+	time.Sleep(4 * time.Second)
+	for _, name := range []string{"a", "b"} {
+		snaps := h.snaps(name)
+		if len(snaps) < 3 {
+			t.Errorf("%s: %d snapshots in 4s, want one a second", name, len(snaps))
+		}
+		for i := 1; i < len(snaps); i++ {
+			if gap := snaps[i].At.Sub(snaps[i-1].At); gap > 1500*time.Millisecond {
+				t.Errorf("%s: snapshot %d came %v after the one before, want about 1s", name, i, gap)
+			}
+		}
+	}
+	hung := h.snaps("hung")
+	if len(hung) < 2 {
+		t.Errorf("hung: %d snapshots in 4s, want an error snapshot a second", len(hung))
+	}
+	for _, s := range hung {
+		if s.Err != "connecting…" {
+			t.Errorf("hung: snapshot Err = %q, want connecting…", s.Err)
+		}
+	}
+	if errs, _ := h.control().ServerErrs(); errs["hung"] != "connecting…" {
+		t.Errorf("ServerErrs = %v, want hung connecting…", errs)
+	}
+
+	if err := h.control().RequestStop(); err != nil {
+		t.Fatal(err)
+	}
+	if code, err := r.wait(t, time.Second); code != 0 || err != nil {
+		t.Errorf("Run = %d, %v; want 0, nil", code, err)
+	}
+}
+
+// TestDiscoveryFailureRetries: a pool build that fails is shown with when
+// it is tried again, and reported as the server's error.
+func TestDiscoveryFailureRetries(t *testing.T) {
+	h := newHarness(t)
+	h.build = func(*config.Server) (*api.Pool, error) { return nil, errors.New("no such context") }
+	h.writeConfig(oneServer("http://127.0.0.1:1"))
+	h.start("d")
+
+	const want = "discovery failed: no such context — retrying in 5s"
+	fleettest.WaitUntil(t, 2*time.Second, "the failure stored", func() bool {
+		s := h.latest("a")
+		return s != nil && s.Err == want
+	})
+	if errs, _ := h.control().ServerErrs(); errs["a"] != want {
+		t.Errorf("ServerErrs = %v, want a: %q", errs, want)
+	}
+}
+
+// TestPokeTriggersPoll: a poke polls the server at once; pokes close
+// together poll it at most once a MinPokeGap.
+func TestPokeTriggersPoll(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", nil)
+	h := newHarness(t)
+	h.writeConfig(map[string]*config.Server{"a": {Interval: 10, Endpoints: []string{srv.URL}}})
+	h.start("d")
+	h.waitSnaps("a", 1, 3*time.Second)
+
+	ctl := h.control()
+	if _, err := ctl.Poke("a"); err != nil {
+		t.Fatal(err)
+	}
+	n := len(h.waitSnaps("a", 2, time.Second))
+
+	for range 5 {
+		if _, err := ctl.Poke("a"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if extra := len(h.snaps("a")) - n; extra < 1 || extra > 2 {
+		t.Errorf("5 pokes in 200ms polled %d times, want 1 or 2", extra)
+	}
+
+	// Poked every 100ms for a second: polled every MinPokeGap, not every
+	// time the daemon looks.
+	n = len(h.snaps("a"))
+	for range 10 {
+		if _, err := ctl.Poke("a"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if extra := len(h.snaps("a")) - n; extra > 2 {
+		t.Errorf("10 pokes in 1s polled %d times by their end, want 2 at most", extra)
+	}
+}
+
+// panicSource is a discovery source of endpoints that panics while
+// panicking is set.
+type panicSource struct {
+	endpoints []string
+	panicking atomic.Bool
+}
+
+func (s *panicSource) Endpoints() []string {
+	if s.panicking.Load() {
+		panic("source broke")
+	}
+	return s.endpoints
+}
+
+func (*panicSource) Close() error { return nil }
+
+// TestPanicBecomesErrorSnapshot: a tick that panics stores an error
+// snapshot and reports the server's error, logged once with its stack,
+// while other servers are collected; it clears once ticks are clean again.
+func TestPanicBecomesErrorSnapshot(t *testing.T) {
+	_, boom := fleettest.NewVarmq(t, "boom", nil)
+	_, ok := fleettest.NewVarmq(t, "ok", nil)
+	src := &panicSource{endpoints: []string{boom.URL}}
+	src.panicking.Store(true)
+	h := newHarness(t)
+	h.build = func(s *config.Server) (*api.Pool, error) {
+		if s.Name == "boom" {
+			return api.NewPool(src, ""), nil
+		}
+		return api.PoolFor(s)
+	}
+	h.writeConfig(map[string]*config.Server{
+		"boom": {Interval: 1, Endpoints: []string{boom.URL}},
+		"ok":   {Interval: 1, Endpoints: []string{ok.URL}},
+	})
+	h.start("d")
+
+	const internal = "internal error (see daemon log)"
+	snaps := h.waitSnaps("boom", 2, 3*time.Second)
+	for _, s := range snaps {
+		if s.Err != internal || len(s.Pods) != 0 {
+			t.Errorf("boom: snapshot Err = %q with %d units, want %q and none", s.Err, len(s.Pods), internal)
+		}
+	}
+	if errs, _ := h.control().ServerErrs(); errs["boom"] != internal {
+		t.Errorf("ServerErrs = %v, want boom: %q", errs, internal)
+	}
+	if n := h.logs.count(`msg="tick panicked" server=boom panic="source broke" stack=`); n != 1 {
+		t.Errorf("panic logged %d times, want once with its stack; log:\n%s", n, &h.logs)
+	}
+	h.waitSnaps("ok", 2, 3*time.Second)
+
+	src.panicking.Store(false)
+	fleettest.WaitUntil(t, 3*time.Second, "a clean boom snapshot", func() bool {
+		s := h.latest("boom")
+		return s != nil && s.Err == "" && len(s.Pods) == 1
+	})
+	fleettest.WaitUntil(t, time.Second, "boom's error cleared", func() bool {
+		errs, _ := h.control().ServerErrs()
+		_, failing := errs["boom"]
+		return !failing
+	})
+}
+
+// TestLabelsSurviveRestart: a restarted daemon numbers the units as the
+// last one did, and a newcomer takes the lowest number free.
+func TestLabelsSurviveRestart(t *testing.T) {
+	_, srvs := fleettest.NewInstances(t, "x", "y", "z")
+	urls := []string{srvs[0].URL, srvs[1].URL, srvs[2].URL}
+	slices.Sort(urls)
+	h := newHarness(t)
+
+	h.writeConfig(map[string]*config.Server{"s": {Interval: 1, Endpoints: urls[1:]}})
+	first := h.start("first")
+	want := map[string]string{urls[1]: "instance-1", urls[2]: "instance-2"}
+	fleettest.WaitUntil(t, 3*time.Second, "the first daemon's labels", func() bool {
+		s := h.latest("s")
+		return s != nil && equalMaps(labels(s), want)
+	})
+	if code, err := first.stop(t); code != 0 || err != nil {
+		t.Fatalf("first daemon: Run = %d, %v; want 0, nil", code, err)
+	}
+
+	// urls[0] sorts first: numbered afresh, it would be instance-1.
+	h.writeConfig(map[string]*config.Server{"s": {Interval: 1, Endpoints: urls}})
+	n := len(h.snaps("s"))
+	h.start("second")
+	snaps := h.waitSnaps("s", n+1, 3*time.Second)
+	want[urls[0]] = "instance-3"
+	if got := labels(snaps[n]); !equalMaps(got, want) {
+		t.Errorf("after the restart, labels %v, want %v", got, want)
+	}
+}
+
+func equalMaps(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// TestRatesContinueAfterRestart: the first snapshot a restarted daemon
+// takes is rated against the last one stored.
+func TestRatesContinueAfterRestart(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"w": {Status: "Running", Completed: 10}})
+	h := newHarness(t)
+	h.writeConfig(oneServer(srv.URL))
+	rated := func(s *fleet.Snapshot) bool {
+		return s != nil && len(s.Pods) == 1 && s.Pods[0].Workers["w"] != nil && s.Pods[0].Workers["w"].RateOK
+	}
+
+	first := h.start("first")
+	fleettest.WaitUntil(t, 5*time.Second, "a rated snapshot", func() bool { return rated(h.latest("a")) })
+	if code, err := first.stop(t); code != 0 || err != nil {
+		t.Fatalf("first daemon: Run = %d, %v; want 0, nil", code, err)
+	}
+
+	n := len(h.snaps("a"))
+	h.start("second")
+	snaps := h.waitSnaps("a", n+1, 3*time.Second)
+	if gap := snaps[n].At.Sub(snaps[n-1].At); gap > 3*time.Second {
+		t.Fatalf("restart took %v, want the first snapshot within 3 intervals", gap)
+	}
+	if !rated(snaps[n]) {
+		t.Errorf("first snapshot after the restart: %+v, want it rated", snaps[n].Pods)
+	}
+}
+
+// corruptTable overwrites the root page of table in the SQLite file at
+// path with garbage, leaving the rest of the file (its header, its schema)
+// as it was: the file opens, and reading table fails.
+func corruptTable(t *testing.T, path, table string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root, size int64
+	err = db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name = ?`, table).Scan(&root)
+	if err == nil {
+		err = db.QueryRow(`PRAGMA page_size`).Scan(&size)
+	}
+	if err == nil {
+		_, err = db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	}
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xa5}, int(size)), (root-1)*size); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCorruptFileSetAside: a server file that opens but whose snapshots
+// cannot be read is set aside and started afresh; other servers' files are
+// left alone.
+func TestCorruptFileSetAside(t *testing.T) {
+	_, a := fleettest.NewVarmq(t, "a", nil)
+	_, b := fleettest.NewVarmq(t, "b", nil)
+	h := newHarness(t)
+	h.writeConfig(map[string]*config.Server{
+		"a": {Interval: 1, Endpoints: []string{a.URL}},
+		"b": {Interval: 1, Endpoints: []string{b.URL}},
+	})
+	first := h.start("first")
+	h.waitSnaps("a", 2, 3*time.Second)
+	h.waitSnaps("b", 2, 3*time.Second)
+	if code, err := first.stop(t); code != 0 || err != nil {
+		t.Fatalf("Run = %d, %v; want 0, nil", code, err)
+	}
+	nb := len(h.snaps("b"))
+	corruptTable(t, store.PathFor(h.dir, "a"), "snapshots")
+
+	h.start("second")
+	fleettest.WaitUntil(t, 3*time.Second, "a collected afresh", func() bool {
+		s := h.latest("a")
+		return s != nil && s.Err == "" && len(s.Pods) == 1
+	})
+	if aside, _ := filepath.Glob(store.PathFor(h.dir, "a") + ".corrupt-*"); len(aside) == 0 {
+		t.Error("a's corrupt file not set aside")
+	}
+	if aside, _ := filepath.Glob(store.PathFor(h.dir, "b") + ".corrupt-*"); len(aside) != 0 {
+		t.Errorf("b's file set aside: %v", aside)
+	}
+	h.waitSnaps("b", nb+1, 3*time.Second) // its history kept, and added to
+}
+
+// TestDroppedTickKeepsLabels: the label state of a tick dropped with the
+// writer behind is saved with the next tick written, unless a tick queued
+// after it brings a newer one.
+func TestDroppedTickKeepsLabels(t *testing.T) {
+	dir := t.TempDir()
+	ctl, err := store.OpenControl(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctl.Close() })
+	token, _, err := ctl.Claim(store.Lease{Build: "test"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.OpenServer(dir, "a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	d := &daemon{o: Options{DataDir: dir, Log: slog.New(slog.DiscardHandler)}, ctl: ctl, token: token, exit: make(chan exit, 1)}
+	c := &collector{d: d, name: "a", queue: make(chan fleet.Tick, queueLen)}
+	w := &writer{c: c, db: db}
+
+	tick := func(n int) fleet.Tick {
+		t := fleet.Tick{Snap: &fleet.Snapshot{At: time.Now().Round(0)}}
+		if n > 0 {
+			t.Labels = &fleet.LabelState{Numbers: map[string]fleet.LabelNumber{"#i": {N: n, Seen: time.UnixMilli(60000)}}}
+		}
+		return t
+	}
+	saved := func() int {
+		t.Helper()
+		l, ok, err := db.Labels()
+		if err != nil || !ok {
+			t.Fatalf("Labels = %v, %v", ok, err)
+		}
+		return l.Numbers["#i"].N
+	}
+	drain := func(n int) {
+		for range n {
+			w.write(<-c.queue)
+		}
+	}
+
+	_ = c.sink(tick(1))
+	for range queueLen - 1 {
+		_ = c.sink(tick(0))
+	}
+	_ = c.sink(tick(2)) // dropped: the queue is full
+	drain(1)
+	if n := saved(); n != 2 {
+		t.Errorf("after a tick with state 2 was dropped, state %d saved, want 2", n)
+	}
+	drain(queueLen - 1)
+	if n := saved(); n != 2 {
+		t.Errorf("state %d saved, want 2 kept", n)
+	}
+
+	for range queueLen {
+		_ = c.sink(tick(0))
+	}
+	_ = c.sink(tick(3)) // dropped
+	for range queueLen {
+		<-c.queue // taken, not written
+	}
+	_ = c.sink(tick(4)) // queued: newer than the state kept
+	drain(1)
+	if n := saved(); n != 4 {
+		t.Errorf("state %d saved, want the newest, 4", n)
+	}
+}
