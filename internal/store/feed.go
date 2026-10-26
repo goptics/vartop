@@ -47,8 +47,8 @@ func (f *Feed) Snapshots() []*fleet.Snapshot { return f.ring.Load().Snapshots() 
 func (f *Feed) Latest() *fleet.Snapshot { return f.ring.Load().Latest() }
 
 // Sync takes in what the daemon stored since the last Sync. The first one
-// opens the file (none yet is no error: nothing to show) and loads the last
-// hour. After an error the file is closed, and the next Sync starts over.
+// opens the file (none yet, or an empty one, is no error: nothing to show)
+// and loads the last hour. After an error the file is closed, and the next Sync starts over.
 // A file reset under the feed — its snapshots dropped for a new version or
 // pruned away, or the file set aside as corrupt and recreated, or removed —
 // is noticed and its contents loaded anew, never added to what was held.
@@ -64,7 +64,8 @@ func (f *Feed) Sync() error {
 
 func (f *Feed) sync() error {
 	fi, err := os.Stat(f.path)
-	if errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, fs.ErrNotExist) || err == nil && fi.Size() == 0 {
+		// None, or one the daemon has only just created: nothing to show yet.
 		f.close()
 		if f.Latest() != nil {
 			f.ring.Store(fleet.NewRing(f.interval))

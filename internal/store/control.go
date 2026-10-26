@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS servers (
 // needed.
 func OpenControl(dataDir string) (*Control, error) {
 	path := controlPath(dataDir)
-	if err := prepareFile(path); err != nil {
+	if _, err := prepareFile(path); err != nil {
 		return nil, err
 	}
 	db := openDB(path, true, "")

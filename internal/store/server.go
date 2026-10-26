@@ -6,7 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/goptics/vartop/internal/fleet"
@@ -62,7 +66,7 @@ func OpenServer(dataDir, key string, writer bool) (*ServerDB, error) {
 		return s, nil
 	}
 	s, err := openWriter(dataDir, path, key)
-	if isCorrupt(err) {
+	if IsCorrupt(err) {
 		if err := setAside(path); err != nil {
 			return nil, err
 		}
@@ -71,14 +75,20 @@ func OpenServer(dataDir, key string, writer bool) (*ServerDB, error) {
 	return s, err
 }
 
+// openWriter opens the file at path as its writer. A file it created and
+// could not set up is removed: no reader is to find it empty.
 func openWriter(dataDir, path, key string) (*ServerDB, error) {
-	if err := prepareFile(path); err != nil {
+	created, err := prepareFile(path)
+	if err != nil {
 		return nil, err
 	}
 	s := &ServerDB{db: openDB(path, true, controlPath(dataDir)), key: key, writer: true,
 		capBytes: ServerCapBytes, batch: 1000}
 	if err := s.init(); err != nil {
 		_ = s.db.Close()
+		if created {
+			_ = removeFile(path)
+		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	return s, nil
@@ -165,6 +175,13 @@ func (s *ServerDB) meta() (meta, error) {
 	}
 	return m, nil
 }
+
+// SetAside renames the file of the server configured under key, with its
+// -wal and -shm, as OpenServer does a corrupt one: for a file found corrupt
+// once open (its header and schema read, a table not), which OpenServer
+// would open again as it is. The file must be closed. The next writer
+// starts afresh.
+func SetAside(dataDir, key string) error { return setAside(PathFor(dataDir, key)) }
 
 // setAside renames the corrupt file at path, with its -wal and -shm, to
 // <path>.corrupt-<unix seconds>: a new file at path must not pick up the
@@ -349,12 +366,69 @@ func (s *ServerDB) used() (int64, error) {
 // RemoveServerFile deletes the file of the server configured under key,
 // with its -wal and -shm. A file already gone is no error; one still open
 // by a reader may fail to go on Windows, to be retried later.
-func RemoveServerFile(dataDir, key string) error {
-	path := PathFor(dataDir, key)
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+func RemoveServerFile(dataDir, key string) error { return removeFile(PathFor(dataDir, key)) }
+
+// fileSuffixes are the files SQLite keeps beside a database file.
+var fileSuffixes = []string{"-wal", "-shm", "-journal"}
+
+// removeFile deletes the file at path and the files SQLite keeps beside it.
+// A file already gone is no error.
+func removeFile(path string) error {
+	var errs []error
+	for _, suffix := range append([]string{""}, fileSuffixes...) {
 		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// RemoveStale deletes the files under servers/ that are not the file of one
+// of keys and were last written before cutoff, with their -wal and -shm:
+// the files of servers no longer configured, and corrupt ones set aside. A
+// file's last write is its own or its -wal's, not its -shm's, which
+// readers write. It returns the files removed. One a reader holds open may
+// fail to go on Windows, to be retried later.
+func RemoveStale(dataDir string, keys []string, cutoff time.Time) (removed []string, err error) {
+	dir := filepath.Join(dataDir, "servers")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	keep := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		keep[filepath.Base(PathFor(dataDir, key))] = true
+	}
+	written := make(map[string]time.Time) // file name → its last write
+	for _, e := range entries {
+		name, base := e.Name(), e.Name()
+		for _, suffix := range fileSuffixes {
+			base = strings.TrimSuffix(base, suffix)
+		}
+		info, err := e.Info()
+		if e.IsDir() || keep[base] || err != nil { // err: gone since ReadDir
+			continue
+		}
+		at := written[base]
+		if !strings.HasSuffix(name, "-shm") && info.ModTime().After(at) {
+			at = info.ModTime()
+		}
+		written[base] = at
+	}
+	var errs []error
+	for _, base := range slices.Sorted(maps.Keys(written)) {
+		if !written[base].Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(dir, base)
+		if err := removeFile(path); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		removed = append(removed, path)
+	}
+	return removed, errors.Join(errs...)
 }

@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -144,20 +145,23 @@ func openDB(path string, writer bool, attach string) *sql.DB {
 
 // prepareFile creates dir (0700) and an empty file at path (0600) if there
 // is none, so that SQLite, which gives -wal and -shm the main file's mode,
-// creates nothing readable by others.
-func prepareFile(path string) error {
+// creates nothing readable by others. created says whether it made the file.
+func prepareFile(path string) (created bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+		return false, err
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return false, nil
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	return f.Close()
+	return true, f.Close()
 }
 
-// isCorrupt reports whether err says a file is damaged or not a database.
-func isCorrupt(err error) bool {
+// IsCorrupt reports whether err says a file is damaged or not a database.
+func IsCorrupt(err error) bool {
 	var se *sqlite.Error
 	if !errors.As(err, &se) {
 		return false

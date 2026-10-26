@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -459,6 +461,28 @@ func TestCorruptFileRecovered(t *testing.T) {
 	}
 }
 
+// TestSetAside: a file set aside on demand is kept beside, and the next
+// writer starts afresh.
+func TestSetAside(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db, err := OpenServer(dir, "prod", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendAll(t, db, token, tick(base, 1))
+	_ = db.Close()
+	if err := SetAside(dir, "prod"); err != nil {
+		t.Fatal(err)
+	}
+	if aside, _ := filepath.Glob(PathFor(dir, "prod") + ".corrupt-*"); len(aside) != 1 {
+		t.Errorf("set aside as %v, want one file", aside)
+	}
+	if s, err := newWriter(t, dir, "prod").Latest(); s != nil || err != nil {
+		t.Errorf("after SetAside: Latest = %v, %v; want a fresh, empty file", s, err)
+	}
+}
+
 func TestRemoveServerFile(t *testing.T) {
 	dir := t.TempDir()
 	_, token := claimed(t, dir)
@@ -478,6 +502,120 @@ func TestRemoveServerFile(t *testing.T) {
 	}
 	if err := RemoveServerFile(dir, "gone"); err != nil {
 		t.Errorf("RemoveServerFile of a removed file = %v, want nil", err)
+	}
+}
+
+// TestOpenWriterLeavesNoFileOnFailure: a writer that cannot open (here: no
+// control.db to check the lease in) removes the file it created, so no
+// reader finds an empty one; a file that was there stays as it was.
+func TestOpenWriterLeavesNoFileOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	if db, err := OpenServer(dir, "prod", true); err == nil {
+		_ = db.Close()
+		t.Fatal("OpenServer(writer) with no control.db succeeded")
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if _, err := os.Stat(PathFor(dir, "prod") + suffix); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s left behind: %v", suffix, err)
+		}
+	}
+
+	ctl, err := OpenControl(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, _ := ctl.Claim(Lease{Build: "test"}, time.Now())
+	db, err := OpenServer(dir, "prod", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendAll(t, db, token, tick(base, 1))
+	_ = db.Close()
+	_ = ctl.Close()
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(dir, "control.db") + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Skipf("control.db held open (Windows): %v", err)
+		}
+	}
+	if db, err := OpenServer(dir, "prod", true); err == nil {
+		_ = db.Close()
+		t.Fatal("OpenServer(writer) with control.db removed succeeded")
+	}
+	r, err := OpenServer(dir, "prod", false)
+	if err != nil {
+		t.Fatalf("the file that was there: %v", err)
+	}
+	defer r.Close()
+	if s, err := r.Latest(); err != nil || s == nil {
+		t.Errorf("the file that was there: Latest = %v, %v; want its row", s, err)
+	}
+}
+
+func TestIsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	path := PathFor(dir, "bad")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	corrupt(t, path)
+	_, err := OpenServer(dir, "bad", false)
+	if !IsCorrupt(err) {
+		t.Errorf("IsCorrupt(%v) = false, want true", err)
+	}
+	for _, err := range []error{nil, errors.New("file is not a database"), ErrLeaseLost} {
+		if IsCorrupt(err) {
+			t.Errorf("IsCorrupt(%v) = true, want false", err)
+		}
+	}
+}
+
+// TestRemoveStale: the files under servers/ of no key given, last written
+// before the cutoff, go with their -wal and -shm (a reader's -shm write is
+// no write); the files of keys given and recent ones stay.
+func TestRemoveStale(t *testing.T) {
+	dir := t.TempDir()
+	if removed, err := RemoveStale(dir, nil, time.Now()); err != nil || len(removed) != 0 {
+		t.Errorf("RemoveStale with no servers/ = %v, %v; want nothing, nil", removed, err)
+	}
+	_, token := claimed(t, dir)
+	for _, key := range []string{"kept", "gone", "recent"} {
+		db, err := OpenServer(dir, key, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		appendAll(t, db, token, tick(base, 1))
+		_ = db.Close()
+	}
+	gone, aside := PathFor(dir, "gone"), PathFor(dir, "gone")+".corrupt-1"
+	for _, p := range []string{gone + "-wal", gone + "-shm", aside} {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	for _, p := range []string{PathFor(dir, "kept"), gone, gone + "-wal", aside} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := RemoveStale(dir, []string{"kept"}, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(removed)
+	if want := []string{gone, aside}; !slices.Equal(removed, want) {
+		t.Errorf("removed %v, want %v", removed, want)
+	}
+	for _, p := range []string{gone, gone + "-wal", gone + "-shm", aside} {
+		if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s still there: %v", p, err)
+		}
+	}
+	for _, key := range []string{"kept", "recent"} {
+		if _, err := os.Stat(PathFor(dir, key)); err != nil {
+			t.Errorf("%s's file: %v, want it kept", key, err)
+		}
 	}
 }
 

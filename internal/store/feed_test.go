@@ -1,6 +1,8 @@
 package store
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -161,6 +163,33 @@ func TestFeedSurvivesReset(t *testing.T) {
 		t.Errorf("fresh reader: %v, %v; feed: %v", completed(snaps), err, completed(f.Snapshots()))
 	}
 	_ = db.Close()
+}
+
+// TestFeedWaitsForEmptyFile: a file the daemon has created but not yet
+// initialised (0 bytes) is waited for like a missing one, not an error.
+func TestFeedWaitsForEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := PathFor(dir, "prod")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFeed(t, dir, "prod")
+	for range 2 {
+		sync1(t, f)
+	}
+	if len(f.Snapshots()) != 0 {
+		t.Errorf("feed of an empty file: %d snapshots, want none", len(f.Snapshots()))
+	}
+
+	_, token := claimed(t, dir)
+	appendAll(t, newWriter(t, dir, "prod"), token, tick(base, 1))
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{1}) {
+		t.Errorf("feed once the file is written: %v, want 1", got)
+	}
 }
 
 // TestFeedFileRemoved: a server file deleted under a feed empties it.
