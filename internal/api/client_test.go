@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -419,5 +421,152 @@ func TestMutatingCtxMethodsKeepEscapedPath(t *testing.T) {
 				t.Fatalf("requests = %+v, want one PATCH %s", reqs, tt.wantPath)
 			}
 		})
+	}
+}
+
+// countingServer answers like a varmq mux and counts the TCP connections it
+// accepts.
+func countingServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/workers":
+			_, _ = w.Write([]byte("[{\"name\":\"w\"}]\n"))
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte("{\"name\":\"w\"}\n"))
+		}
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv, &conns
+}
+
+func TestFreshMethodsUseNewConnections(t *testing.T) {
+	srv, conns := countingServer(t)
+	c := NewClient(srv.URL, "")
+	ctx := context.Background()
+
+	for range 3 {
+		if _, err := c.ListWorkersCtx(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := conns.Load(); got != 1 {
+		t.Fatalf("3 pooled calls opened %d connections, want 1", got)
+	}
+
+	for range 3 {
+		if _, _, err := c.ListWorkersFresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := conns.Load(); got != 4 {
+		t.Fatalf("after 3 ListWorkersFresh: %d connections, want 4", got)
+	}
+
+	if _, _, err := c.GetWorkerFresh(ctx, "w"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ActionFresh(ctx, "w", "pause"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.TuneConcurrencyFresh(ctx, "w", 3); err != nil {
+		t.Fatal(err)
+	}
+	if got := conns.Load(); got != 7 {
+		t.Fatalf("after Get/Action/Tune Fresh: %d connections, want 7", got)
+	}
+}
+
+func TestFreshMethodsReportInstance(t *testing.T) {
+	var mu sync.Mutex
+	var patched []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(InstanceHeader, "a")
+		switch {
+		case r.URL.Path == "/workers":
+			_, _ = w.Write([]byte(`[{"name":"w"}]`))
+		case r.URL.Path == "/workers/gone":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"worker not found"}`))
+		case strings.HasSuffix(r.URL.Path, "/actions/pause"):
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"already paused"}`))
+		default:
+			mu.Lock()
+			patched = append(patched, r.Method+" "+r.URL.Path)
+			mu.Unlock()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "")
+	ctx := context.Background()
+
+	workers, inst, err := c.ListWorkersFresh(ctx)
+	if err != nil || inst != "a" {
+		t.Fatalf("ListWorkersFresh = %v, %q, %v; want instance a, no error", workers, inst, err)
+	}
+	if len(workers) != 1 || workers[0].Origin != srv.URL || workers[0].Instance != "a" {
+		t.Fatalf("workers = %+v, want one tagged with origin %s and instance a", workers, srv.URL)
+	}
+
+	var apiErr *APIError
+	_, inst, err = c.GetWorkerFresh(ctx, "gone")
+	if inst != "a" || !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("GetWorkerFresh(gone) = %q, %v; want instance a with a 404 APIError", inst, err)
+	}
+
+	apiErr = nil
+	inst, err = c.ActionFresh(ctx, "w", "pause")
+	if inst != "a" || !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("ActionFresh(pause) = %q, %v; want instance a with a 409 APIError", inst, err)
+	}
+
+	inst, err = c.TuneConcurrencyFresh(ctx, "w", 3)
+	if inst != "a" || err != nil {
+		t.Fatalf("TuneConcurrencyFresh = %q, %v; want instance a, no error", inst, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"PATCH /workers/w/config/concurrency/3"}; !reflect.DeepEqual(patched, want) {
+		t.Errorf("patched = %v, want %v", patched, want)
+	}
+
+	if c.SeenInstances() != 1 || c.LastInstance() != "a" {
+		t.Errorf("SeenInstances = %d, LastInstance = %q; want 1 and a", c.SeenInstances(), c.LastInstance())
+	}
+}
+
+func TestFreshMethodsNoReply(t *testing.T) {
+	c := NewClient("http://127.0.0.1:1", "")
+	_, inst, err := c.ListWorkersFresh(context.Background())
+	if err == nil || inst != "" {
+		t.Fatalf("ListWorkersFresh = %q, %v; want no instance and an error", inst, err)
+	}
+}
+
+func TestFreshMethodsEscapeNothing(t *testing.T) {
+	srv, got := recordingServer(t, http.StatusOK, nil, `{"name":"a/b"}`)
+	c := NewClient(srv.URL, "")
+	ctx := context.Background()
+
+	if _, _, err := c.GetWorkerFresh(ctx, url.PathEscape("a/b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ActionFresh(ctx, url.PathEscape("x y"), "stop"); err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, r := range got() {
+		paths = append(paths, r.EscapedPath)
+	}
+	if want := []string{"/workers/a%2Fb", "/workers/x%20y/actions/stop"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
 	}
 }
