@@ -1,0 +1,264 @@
+package store
+
+import (
+	"reflect"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/goptics/vartop/internal/fleet"
+)
+
+func newFeed(t *testing.T, dataDir, key string) *Feed {
+	t.Helper()
+	f := NewFeed(dataDir, key, time.Second)
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+func sync1(t *testing.T, f *Feed) {
+	t.Helper()
+	if err := f.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+}
+
+func TestFeedWaitsForFile(t *testing.T) {
+	dir := t.TempDir()
+	f := newFeed(t, dir, "prod")
+	sync1(t, f)
+	if f.Latest() != nil || len(f.Snapshots()) != 0 {
+		t.Errorf("feed with no file yet: %d snapshots; want none", len(f.Snapshots()))
+	}
+	if got := f.Interval(); got != time.Second {
+		t.Errorf("Interval = %v, want 1s", got)
+	}
+
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	appendAll(t, db, token, tick(base, 1))
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{1}) {
+		t.Errorf("feed once the file exists: %v, want 1", got)
+	}
+}
+
+func TestFeedWindowThenTail(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	now := time.Now().Round(0)
+	appendAll(t, db, token,
+		tick(at(now.Add(-2*time.Hour).UnixMilli()), 1), // outside the window
+		tick(at(now.Add(-30*time.Minute).UnixMilli()), 2),
+		tick(at(now.Add(-time.Minute).UnixMilli()), 3),
+	)
+	f := newFeed(t, dir, "prod")
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{2, 3}) {
+		t.Fatalf("first Sync: %v, want the last hour: 2 3", got)
+	}
+	appendAll(t, db, token, tick(at(now.UnixMilli()), 4))
+	sync1(t, f)
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{2, 3, 4}) {
+		t.Errorf("after a Tail: %v, want 2 3 4", got)
+	}
+	if l := f.Latest(); l == nil || l.Pods[0].Workers["w"].Metrics.Completed != 4 {
+		t.Errorf("Latest = %v, want the newest", l)
+	}
+}
+
+// TestFeedSurvivesReset is Review Focus 4: a reader holds a server file
+// while the daemon resets it: a version change drops the snapshots (and ids
+// start over, so the new rows may reach the feed's cursor before it looks
+// again), a corrupt file is renamed aside and recreated, a prune empties
+// it, a removed server's file is created anew. The next Sync reloads from
+// the new contents: no error, no snapshot twice, no loop.
+func TestFeedSurvivesReset(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	path := PathFor(dir, "prod")
+	now := time.Now().Round(0)
+	n := uint64(0)
+	next := func() fleet.Tick {
+		n++
+		return tick(at(now.Add(time.Duration(n)*time.Second).UnixMilli()), n)
+	}
+
+	db, err := OpenServer(dir, "prod", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopen := func() {
+		_ = db.Close()
+		if db, err = OpenServer(dir, "prod", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendAll(t, db, token, next(), next(), next())
+	f := newFeed(t, dir, "prod")
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{1, 2, 3}) {
+		t.Fatalf("before any reset: %v", got)
+	}
+
+	for _, step := range []struct {
+		name   string
+		reset  func()
+		before int // rows appended after the reset, before the feed syncs
+	}{
+		{"version change", func() { _ = db.Close(); setVersion(t, path, StoreVersion+1); reopen() }, 5},
+		{"corrupt file", func() {
+			// Empty the WAL, so that the garbage is what the next open reads.
+			if _, err := db.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+				t.Fatal(err)
+			}
+			_ = db.Close()
+			corrupt(t, path)
+			reopen()
+		}, 1},
+		{"pruned empty", func() {
+			if err := db.Prune(now.Add(48 * time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+		}, 0},
+		{"removed and re-added", func() {
+			_ = db.Close()
+			if err := RemoveServerFile(dir, "prod"); err != nil {
+				t.Skipf("file held open (Windows): %v", err)
+			}
+			reopen()
+		}, 1},
+	} {
+		step.reset()
+		var want []uint64
+		for range step.before {
+			appendAll(t, db, token, next())
+			want = append(want, n)
+		}
+		for i := range 3 {
+			if err := f.Sync(); err != nil {
+				t.Fatalf("%s: Sync %d: %v", step.name, i, err)
+			}
+		}
+		appendAll(t, db, token, next())
+		sync1(t, f)
+		if got, want := completed(f.Snapshots()), append(want, n); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: feed holds %v, want %v", step.name, got, want)
+		}
+	}
+
+	// A fresh reader sees what the feed sees: the stale reader's handles,
+	// closed on the way, took nothing of the recreated file with them.
+	r, err := OpenServer(dir, "prod", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	snaps, _, err := r.Window(time.Time{})
+	if err != nil || !reflect.DeepEqual(completed(snaps), completed(f.Snapshots())) {
+		t.Errorf("fresh reader: %v, %v; feed: %v", completed(snaps), err, completed(f.Snapshots()))
+	}
+	_ = db.Close()
+}
+
+// TestFeedFileRemoved: a server file deleted under a feed empties it.
+func TestFeedFileRemoved(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db, err := OpenServer(dir, "prod", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendAll(t, db, token, tick(base, 1))
+	f := newFeed(t, dir, "prod")
+	sync1(t, f)
+	_ = db.Close()
+	if err := RemoveServerFile(dir, "prod"); err != nil {
+		t.Skipf("file held open (Windows): %v", err)
+	}
+	sync1(t, f)
+	if len(f.Snapshots()) != 0 || f.Latest() != nil {
+		t.Errorf("feed after its file was removed: %d snapshots, want none", len(f.Snapshots()))
+	}
+}
+
+func TestConcurrentReadersWriter(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	now := time.Now().Round(0)
+	const ticks = 60
+
+	feeds := make([]*Feed, 4)
+	for i := range feeds {
+		feeds[i] = newFeed(t, dir, "prod")
+	}
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	for _, f := range feeds {
+		wg.Go(func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if err := f.Sync(); err != nil {
+					t.Errorf("Sync: %v", err)
+					return
+				}
+				_ = f.Snapshots()
+				_ = f.Latest()
+			}
+		})
+	}
+	// A web handler and a TUI tick may sync one feed at once.
+	wg.Go(func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if err := feeds[0].Sync(); err != nil {
+				t.Errorf("Sync: %v", err)
+				return
+			}
+		}
+	})
+	for i := range ticks {
+		if _, err := db.Append(token, tick(at(now.Add(time.Duration(i)*time.Millisecond).UnixMilli()), uint64(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(done)
+	wg.Wait()
+
+	want := make([]uint64, ticks)
+	for i := range want {
+		want[i] = uint64(i + 1)
+	}
+	for i, f := range feeds {
+		sync1(t, f)
+		if got := completed(f.Snapshots()); !reflect.DeepEqual(got, want) {
+			t.Errorf("feed %d holds %v, want 1..%d once each", i, got, ticks)
+		}
+	}
+}
+
+// TestReaderIsReadOnly: a reader never writes the file, even by mistake.
+func TestReaderIsReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	claimed(t, dir)
+	newWriter(t, dir, "prod")
+	r, err := OpenServer(dir, "prod", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := r.db.Exec(`DELETE FROM meta`); err == nil {
+		t.Error("a reader deleted rows")
+	}
+}
