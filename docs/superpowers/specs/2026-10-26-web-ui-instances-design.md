@@ -164,7 +164,8 @@ merged dip).
 - Nothing is "load-balanced" any more for the views: the LB exclusion from rates
   and KPIs, "n/a: load-balanced", and the yellow warning are removed. In their
   place `#status` shows a quiet note per balancer endpoint: "{n} instances behind
-  {host:port}", n = the distinct instances that answered through it this tick.
+  {host:port}", n = the distinct instances that answered through it within the
+  lifecycle window (amended, R14 below).
 - Merged view aggregates every unit with today's rules (sum of rates, max pending
   per unit, concurrency per unit never summed, k/N partial points, mixed status,
   absent badges), plus the "not reached" rule above.
@@ -226,7 +227,8 @@ changes (the TUI keeps using the existing methods). Everything else is in
   PATCHes; an action on one balanced unit → 400 and zero PATCHes; wording
   "instance" for static/DNS servers and "pod" for Kubernetes.
 - Manual, in the demo: `lb-cluster` (round-robin) and a per-connection balancer
-  in front of three instances: picker lists lb-1…lb-3, labels stable, charts
+  in front of three instances: picker lists instance-1…instance-3 (lb-1…lb-3
+  on hover), labels stable, charts
   move, merged pause reports three lines and all three backends are paused,
   restart absent, one-instance view shows the note instead of controls.
 - Label tests: static list of three → instance-1…3 in endpoint order; a unit
@@ -248,3 +250,66 @@ direct address wins over a balancer · quiet "{n} instances behind
 {host:port}" note replaces the warning · KPI subtitle becomes "{noun} × worker"
 for Kubernetes too · concurrency is sent to every balanced unit (no skip, 409 =
 no change).
+
+## Amendments made during the build
+
+Rulings taken while building and reviewing this work changed the behaviour
+below. Where this section and the text above disagree, this section wins.
+
+- **R5, note wording.** One instance behind an endpoint reads "1 instance
+  behind {host:port}"; more read "{n} instances behind {host:port}".
+- **R6, worker unreached everywhere.** A worker that no unit in scope answered
+  for keeps its dashboard row: status "not reached" (class unknown), and "—"
+  for concurrency, busy, idle and pending.
+- **R7, connecting label.** A static server with several endpoints connects as
+  "Connecting to {n} instances…".
+- **R8, R11, R15, R16, reaching instances behind a balancer.** Polls and merged
+  actions use one event-driven reacher instead of rounds. Each request (the
+  worker list, each worker's details, an action on each worker) is a job with
+  its own budget of C(K) attempts. Every finished attempt is recorded at once,
+  and its slot goes to a job drawn at random, so jobs side by side never fall
+  into step behind a round-robin balancer. A job keeps max(instances it still
+  misses, endpoints) attempts in flight and sends at least one attempt per
+  endpoint. Attempts with no reply after max(10 ms, 2 × the slowest reply so
+  far) are presumed stuck, and others are sent within the budget; a job that
+  has every instance it wants counts a stuck attempt as back, and a job out of
+  budget waits for its stuck attempts until the deadline. An instance counts as
+  answered only on a definitive answer: a 2xx, a 404 for a worker fetch, a 409
+  or 404 for an action. Other error answers are kept until a definitive one
+  replaces them, so "only a unit's first answer counts" no longer holds.
+- **R12, phases.** Endpoints that are balancers when a tick starts are polled
+  alongside the direct ones, skipping the instances the previous tick showed
+  as direct units. A direct endpoint found to be a balancer during the tick
+  gets a balancer pass of its own after the direct phase, time permitting.
+- **R13, direct unit without a reply.** A direct unit whose list got no reply
+  keeps the instance last seen through its endpoint, so that instance does not
+  also show up through a balancer.
+- **R14, Behind.** The note's n counts the distinct instances that answered
+  through the endpoint within the lifecycle window, not only this tick.
+- **R17, a balancer as pod.** A POST whose pod names a balancer endpoint is
+  refused like one naming a balanced unit.
+- **R18, before the first refresh.** Every POST that would reach varmq (action,
+  concurrency, bulk confirm and bulk) answers 409 "Waiting for the first
+  refresh — try again" until the session has a snapshot. After it, only the
+  keys of direct units are sent directly; an endpoint the latest snapshot lacks
+  reads "failed (not refreshed yet — try again)" and is sent nothing.
+- **R19, budget.** K in C(K) is max(units wanted, instances counted behind the
+  balancer endpoints used, those endpoints), for polls and actions: a balancer
+  picks among every instance behind it, direct units included.
+- **R21, connection volume.** The ponytail estimate above is low: the coverage
+  factor is about 1 + ln K for round-robin balancers too, since jobs interleave
+  on the balancer's turn. The README states the volume.
+- **R22, labels and order.** A unit's number follows its instance ID when no
+  other unit of the snapshot has that ID, else its key, so it survives an
+  endpoint turning out to be a balancer; numbers are still given in first-seen
+  order and never reused. Off Kubernetes the picker, grid, "Instances
+  reporting", confirm columns and results list units by number.
+- **R23, no 0s age.** A unit missed in the tick in which a direct pass saw it
+  reads "not reached this refresh", without "last seen 0s ago".
+- **R24, action deadline.** An action's sends through balancers share a 15 s
+  deadline; instances without an answer by then read "failed (not reached
+  through the load balancer after {n} tries)". Direct sends are unchanged.
+- **R25, pages.** A page filtered to a unit that is gone shows it chosen in the
+  picker and links the merged view from its banner; one filtered to a unit
+  that is down shows the unit's label and error in the banner instead of "No
+  workers reported yet." or "Worker not found".
