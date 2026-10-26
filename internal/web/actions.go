@@ -30,11 +30,25 @@ var (
 // shows its effect.
 const settleWait = 2 * time.Second
 
+// balancerActionDeadline bounds the sends of an action through a server's
+// balancers, all its attempts together; sends to direct units are bounded
+// by the client's timeout only.
+const balancerActionDeadline = 15 * time.Second
+
 // The refusals of what a load balancer cannot carry. oneBalancedMsg is also
 // the note shown in place of one balanced unit's controls.
 const (
 	restartRefused = "restart isn't available through a load balancer"
 	oneBalancedMsg = "A load balancer picks which instance answers, so actions here would reach a random one. Use All instances (merged), or list the instances' own addresses in the server config."
+)
+
+// Until a snapshot shows what an endpoint is, it may be a balancer, so
+// nothing is sent to it: waitingMsg refuses a POST before the session's
+// first snapshot, and notRefreshedMsg is the failure of an endpoint found
+// since the latest one.
+const (
+	waitingMsg      = "Waiting for the first refresh — try again"
+	notRefreshedMsg = "not refreshed yet — try again"
 )
 
 // noChange is what a fanOut fn returns for a unit it skipped, sending
@@ -45,13 +59,15 @@ func (e noChange) Error() string { return string(e) }
 
 // actScope is what an action reaches: the direct units, whose clients are
 // each sent the action, sorted by endpoint; the balanced units, reached
-// through the balancers' clients; and the dead ones, balancer endpoints no
-// instance answered, which are sent nothing. Units are sorted by key.
+// through the balancers' clients, which latest counts behind instances
+// behind; the dead ones, balancer endpoints no instance answered; and the
+// unrefreshed ones, clients latest has no unit for. Dead and unrefreshed
+// units are sent nothing. Units are sorted by key.
 type actScope struct {
-	direct    []*api.Client
-	balanced  []PodSnapshot
-	dead      []PodSnapshot
-	balancers []*api.Client
+	direct, unrefreshed []*api.Client
+	balanced, dead      []PodSnapshot
+	balancers           []*api.Client
+	behind              int
 }
 
 // viaBalancer reports whether sc holds a unit behind a load balancer.
@@ -61,12 +77,15 @@ func (sc actScope) viaBalancer() bool { return len(sc.balanced) > 0 || len(sc.de
 // every unit when pod is "", else the direct unit whose endpoint is pod. An
 // endpoint is a balancer, never a direct unit, when it is a key of
 // latest.Behind or the endpoint a balanced unit was reached through, dead
-// ones included. A pod naming a balanced unit or a balancer is refused with
-// oneBalancedMsg: the balancer would pick the instance. n words the error
-// for a pod that is no unit of the server.
+// ones included; it is a direct unit only when it is the key of an
+// unbalanced unit of latest. A client that is neither, found since latest,
+// may be a balancer too, so it is unrefreshed. A pod naming a balanced unit
+// or a balancer is refused with oneBalancedMsg: the balancer would pick the
+// instance. n words the error for a pod that is no unit of the server.
 func scopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (actScope, error) {
 	var sc actScope
 	balancer := make(map[string]bool) // endpoint → it is a balancer
+	direct := make(map[string]bool)   // endpoint → it is a direct unit
 	one := false                      // pod is a balanced unit
 	if latest != nil {
 		for ep := range latest.Behind {
@@ -74,6 +93,7 @@ func scopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (actSc
 		}
 		for _, u := range latest.Pods {
 			if !u.Balanced {
+				direct[u.Key] = true
 				continue
 			}
 			balancer[u.Via] = true
@@ -90,8 +110,12 @@ func scopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (actSc
 			return actScope{}, errors.New(oneBalancedMsg)
 		}
 		for _, c := range clients {
-			if c.PrimaryEndpoint() == pod {
+			switch {
+			case c.PrimaryEndpoint() != pod:
+			case direct[pod]:
 				return actScope{direct: []*api.Client{c}}, nil
+			default:
+				return actScope{unrefreshed: []*api.Client{c}}, nil
 			}
 		}
 		return actScope{}, fmt.Errorf("the selected %s is not %s %s of this server; reload", n.One, n.Article, n.One)
@@ -99,10 +123,14 @@ func scopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (actSc
 	for _, c := range slices.SortedFunc(slices.Values(clients), func(a, b *api.Client) int {
 		return strings.Compare(a.PrimaryEndpoint(), b.PrimaryEndpoint())
 	}) {
-		if balancer[c.PrimaryEndpoint()] {
+		switch ep := c.PrimaryEndpoint(); {
+		case balancer[ep]:
 			sc.balancers = append(sc.balancers, c)
-		} else {
+			sc.behind += latest.Behind[ep]
+		case direct[ep]:
 			sc.direct = append(sc.direct, c)
+		default:
+			sc.unrefreshed = append(sc.unrefreshed, c)
 		}
 	}
 	return sc, nil
@@ -129,8 +157,8 @@ func actionSender(action string) sender {
 // act sends send's request about each worker of names to every unit of sc
 // and returns, per name, one result per unit: the direct units' first, then the
 // balanced units' (see reachUnits), then the dead units', failed with their
-// error. Results are labelled from units (see unitsOf); n words their
-// messages.
+// error, then the unrefreshed ones', failed with notRefreshedMsg. Results
+// are labelled from units (see unitsOf); n words their messages.
 func act(ctx context.Context, sc actScope, units map[string]PodSnapshot, n Noun, names []string, send sender) [][]ActionResult {
 	results := make([][]ActionResult, len(names))
 	var reached [][]ActionResult
@@ -154,6 +182,9 @@ func act(ctx context.Context, sc actScope, units map[string]PodSnapshot, n Noun,
 		for _, u := range sc.dead {
 			results[i] = append(results[i], outcome(u.Key, units, n, errors.New(u.Err)))
 		}
+		for _, c := range sc.unrefreshed {
+			results[i] = append(results[i], outcome(c.PrimaryEndpoint(), units, n, errors.New(notRefreshedMsg)))
+		}
 	}
 	return results
 }
@@ -174,8 +205,10 @@ func fanOut(ctx context.Context, targets []*api.Client, units map[string]PodSnap
 
 // reachUnits sends fresh about each of names through sc's balancers, a
 // reacher job per name, until the job has a definitive answer (a 2xx, a 409
-// or a 404) from the instance of every balanced unit of sc or has spent its
-// budget of attemptCap(max(units, balancers)) attempts. It returns, per
+// or a 404) from the instance of every balanced unit of sc, has spent its
+// budget of attemptCap(max(units, instances behind, balancers)) attempts
+// (the balancers pick among every instance behind them, not only the units
+// wanted there), or balancerActionDeadline has passed. It returns, per
 // name, one result per balanced unit: the outcome of its instance's
 // definitive answer, else of its latest other answer, else a failure saying
 // it was not reached. Answers from other instances are not results; an
@@ -184,11 +217,13 @@ func fanOut(ctx context.Context, targets []*api.Client, units map[string]PodSnap
 // round-robin balancer.
 func reachUnits(ctx context.Context, sc actScope, units map[string]PodSnapshot, n Noun, names []string,
 	fresh func(context.Context, *api.Client, string) (string, error)) [][]ActionResult {
+	ctx, cancel := context.WithTimeout(ctx, balancerActionDeadline)
+	defer cancel()
 	ids := make([]string, len(sc.balanced))
 	for i, u := range sc.balanced {
 		ids[i] = u.Instance
 	}
-	r := newReacher(sc.balancers, attemptCap(max(len(ids), len(sc.balancers))))
+	r := newReacher(sc.balancers, attemptCap(max(len(ids), sc.behind, len(sc.balancers))))
 	jobs := make([]*job[struct{}], len(names))
 	for i, name := range names {
 		escaped := url.PathEscape(name)
@@ -257,20 +292,31 @@ func unitsOf(snap *Snapshot) map[string]PodSnapshot {
 	return units
 }
 
-// bind returns the session r acts on: the active one, read once, when r's
-// form names its server. Otherwise it answers 409 with the stale-tab notice
-// and returns nil; nothing may reach varmq then. The caller must use only
-// this session for the whole request, never Current() again: a switch may
-// replace the active one meanwhile.
-func (h *handler) bind(w http.ResponseWriter, r *http.Request) (string, *Session) {
+// bind returns the session r acts on, the active one, read once, and its
+// latest snapshot, when r's form names its server and the session has
+// polled. Otherwise it answers 409 with the stale-tab notice, or waitingMsg
+// before the first snapshot, and returns a nil session; nothing may reach
+// varmq then. The caller must use only this session and snapshot for the
+// whole request, never Current() again: a switch may replace the active one
+// meanwhile.
+func (h *handler) bind(w http.ResponseWriter, r *http.Request) (string, *Session, *Snapshot) {
 	key, s := h.m.Active()
-	if s != nil && r.PostFormValue("server") == key {
-		return key, s
+	switch {
+	case s == nil:
+		conflict(w, "Not connected — reload")
+	case r.PostFormValue("server") != key:
+		conflict(w, serverChanged(key))
+	default:
+		if latest := s.History.Latest(); latest != nil {
+			return key, s, latest
+		}
+		conflict(w, waitingMsg)
 	}
-	msg := "Not connected — reload"
-	if s != nil {
-		msg = serverChanged(key)
-	}
+	return "", nil, nil
+}
+
+// conflict answers 409 with msg as the notice in the page's banner.
+func conflict(w http.ResponseWriter, msg string) {
 	// htmx swaps error responses into #errors; the notice belongs in #banner.
 	w.Header().Set("HX-Retarget", "#banner")
 	w.Header().Set("HX-Reswap", "innerHTML")
@@ -278,7 +324,6 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (string, *Session
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusConflict)
 	_, _ = fmt.Fprintf(w, `<p class="banner">%s</p>`, template.HTMLEscapeString(msg))
-	return "", nil
 }
 
 // mutationCtx is the context varmq calls run under: r's values without its
@@ -303,13 +348,12 @@ func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "unknown action: want pause, resume, restart or stop")
 		return
 	}
-	key, s := h.bind(w, r)
+	key, s, latest := h.bind(w, r)
 	if s == nil {
 		return
 	}
 	noun := NounFor(s.Server)
 	pod := r.PostFormValue("pod")
-	latest := s.History.Latest()
 	sc, err := scopeOf(s.Clients(), latest, pod, noun)
 	if err != nil {
 		badRequest(w, err.Error())
@@ -334,24 +378,21 @@ func (h *handler) concurrency(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "concurrency must be a whole number of at least 1")
 		return
 	}
-	key, s := h.bind(w, r)
+	key, s, latest := h.bind(w, r)
 	if s == nil {
 		return
 	}
 	noun := NounFor(s.Server)
 	pod := r.PostFormValue("pod")
-	latest := s.History.Latest()
 	sc, err := scopeOf(s.Clients(), latest, pod, noun)
 	if err != nil {
 		badRequest(w, err.Error())
 		return
 	}
 	current := make(map[string]int) // direct unit's endpoint (its key) → the worker's concurrency there
-	if latest != nil {
-		for _, p := range latest.Pods {
-			if smp := p.Workers[name]; smp != nil && !p.Balanced {
-				current[p.Key] = smp.Concurrency
-			}
+	for _, p := range latest.Pods {
+		if smp := p.Workers[name]; smp != nil && !p.Balanced {
+			current[p.Key] = smp.Concurrency
 		}
 	}
 	results := act(mutationCtx(r), sc, unitsOf(latest), noun, []string{name}, sender{
@@ -386,13 +427,12 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "select at least one worker")
 		return
 	}
-	key, s := h.bind(w, r)
+	key, s, latest := h.bind(w, r)
 	if s == nil {
 		return
 	}
 	noun := NounFor(s.Server)
 	pod := r.PostFormValue("pod")
-	latest := s.History.Latest()
 	units := unitsOf(latest)
 	sc, err := scopeOf(s.Clients(), latest, pod, noun)
 	if err != nil {
@@ -414,13 +454,13 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, c := range sc.direct {
-			ep := c.PrimaryEndpoint()
-			u, seen := units[ep] // not seen when latest lacks the pod
-			u.Key = ep
-			column(u, seen)
+			column(units[c.PrimaryEndpoint()], true)
 		}
 		for _, u := range slices.Concat(sc.balanced, sc.dead) {
 			column(u, true)
+		}
+		for _, c := range sc.unrefreshed {
+			column(PodSnapshot{Key: c.PrimaryEndpoint(), Err: notRefreshedMsg}, false)
 		}
 		h.fragments(w, fragment{"confirm", "confirm", cv})
 		return

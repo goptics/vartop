@@ -142,11 +142,12 @@ func (j *job[T]) load(eps, budget int) (owed, target, active, left int) {
 }
 
 // settled reports whether j is done: every wanted instance replied
-// definitively and its one attempt per endpoint came back, or its whole
-// budget came back.
+// definitively and its one attempt per endpoint came back or is presumed
+// stuck (a hung endpoint must not hold a job that has what it wants), or
+// its whole budget came back.
 func (j *job[T]) settled(eps, budget int) bool {
 	if j.missing() == 0 {
-		return j.sent-j.flying >= min(eps, budget)
+		return j.sent-(j.flying-j.stuck) >= min(eps, budget)
 	}
 	return j.sent >= budget && j.flying == 0
 }
@@ -302,16 +303,19 @@ func isNotFound(err error) bool {
 // pollBalanced polls every instance behind the balancer endpoints eps as a
 // unit of its own, keyed "#"+instance ID, except the instances in skip. One
 // reacher runs the list job and a fetch job per listed worker: an instance's
-// list adds it to the fetch jobs of its workers as soon as it arrives. Every
-// reply is recorded in t, dated now; pollBalanced writes t, so nothing else
-// may use t while it runs.
+// list adds it to the fetch jobs of its workers as soon as it arrives. Each
+// job's budget counts every instance the balancers pick among, those in
+// skip too. Every reply is recorded in t, dated now; pollBalanced writes t,
+// so nothing else may use t while it runs.
 func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[string]bool, now time.Time) []PodSnapshot {
 	endpoints := make([]string, len(eps))
+	behind := 0
 	for i, c := range eps {
 		endpoints[i] = c.PrimaryEndpoint()
+		behind += t.behind(endpoints[i], now)
 	}
 	known := t.known(endpoints, skip, now)
-	r := newReacher(eps, attemptCap(max(len(known), len(eps))))
+	r := newReacher(eps, attemptCap(max(len(known), behind, len(eps))))
 
 	lists := addJob(r, listFresh, nil)
 	lists.want(slices.Collect(maps.Keys(known))...)

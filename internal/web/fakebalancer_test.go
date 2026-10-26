@@ -1,6 +1,7 @@
 package web
 
 import (
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -43,6 +44,37 @@ func newPerConnLB(t *testing.T, backends ...*httptest.Server) *httptest.Server {
 		}
 		return n
 	})
+}
+
+// newRandomLB starts a load balancer that sends each request to a backend
+// picked at random, like kube-proxy's iptables mode or a flow hash on new
+// connections. It is closed when the test ends.
+func newRandomLB(t *testing.T, backends ...*httptest.Server) *httptest.Server {
+	t.Helper()
+	return newFakeLB(t, backends, func(*http.Request) uint64 { return rand.Uint64() })
+}
+
+// newHangingLB starts a balancer in front of lb that passes every request on
+// until hang is set, then holds each one unanswered until the client gives
+// up, like a balancer whose backends blackhole. It is closed when the test
+// ends.
+func newHangingLB(t *testing.T, lb *httptest.Server) (srv *httptest.Server, hang *atomic.Bool) {
+	t.Helper()
+	target, err := url.Parse(lb.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	hang = new(atomic.Bool)
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hang.Load() {
+			<-r.Context().Done()
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, hang
 }
 
 // newFakeLB proxies every request to backends[pick(r) % len(backends)],

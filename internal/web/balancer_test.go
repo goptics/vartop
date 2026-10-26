@@ -526,6 +526,67 @@ func TestPollBalancerDeadline(t *testing.T) {
 	}
 }
 
+// A balancer endpoint that holds every request does not hold the tick once
+// every instance has answered through the others: the attempt it holds is
+// presumed stuck, which counts as back for the one attempt per endpoint.
+func TestPollBalancerHungEndpointDoesNotHoldTheTick(t *testing.T) {
+	_, srvs := newFakes(t, "a")
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(hung.Close)
+	// Three balancer endpoints in front of a, as DNS might list them; the
+	// third has started to blackhole.
+	endpoints := []string{srvs[0].URL, newRoundRobinLB(t, srvs[0]).URL, hung.URL}
+	pool, tr := lbPoll(t, endpoints...)
+
+	const deadline = 800 * time.Millisecond
+	for tick := range 3 {
+		now := time.Now()
+		for _, ep := range endpoints {
+			tr.saw(ep, "a", now)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		units := pollBalanced(ctx, pool.Clients(), tr, nil, now)
+		cancel()
+
+		if elapsed := time.Since(now); elapsed > deadline/2 {
+			t.Errorf("tick %d took %v, want well under the %v deadline", tick, elapsed, deadline)
+		}
+		if len(units) != 1 || units[0].Key != "#a" || units[0].Err != "" || units[0].Workers["w"] == nil {
+			t.Errorf("tick %d: units = %+v, want #a healthy with its w sample", tick, units)
+		}
+	}
+}
+
+// TestPollBalancerBudgetCountsEveryInstanceBehind: behind a balancer that
+// picks at random among a, b and c, where b and c are direct units, polling
+// reaches a's list and workers: the budget counts all three instances,
+// which makes a miss about 1 in 700 ticks (it was 1 in 6 when only the
+// wanted unit counted), so 100 ticks allow 2.
+func TestPollBalancerBudgetCountsEveryInstanceBehind(t *testing.T) {
+	_, srvs := newFakes(t, "a", "b", "c")
+	lb := newRandomLB(t, srvs...)
+	pool, tr := lbPoll(t, lb.URL)
+	direct := map[string]bool{"b": true, "c": true}
+
+	misses := 0
+	for range 100 {
+		now := time.Now()
+		for _, id := range []string{"a", "b", "c"} {
+			tr.saw(lb.URL, id, now)
+		}
+		units := pollBalanced(context.Background(), pool.Clients(), tr, direct, now)
+		if len(units) != 1 || units[0].Key != "#a" {
+			t.Fatalf("units = %+v, want #a alone", units)
+		}
+		if units[0].Err != "" || units[0].Workers["w"] == nil {
+			misses++
+		}
+	}
+	if misses > 2 {
+		t.Errorf("a or its worker was not reached on %d of 100 ticks, want at most 2", misses)
+	}
+}
+
 // A slow direct endpoint does not hold up the balancer next to it.
 func TestPollSlowDirectDoesNotStarveBalancer(t *testing.T) {
 	_, srvs := newFakes(t, "a", "b")

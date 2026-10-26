@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
 )
 
@@ -476,6 +477,89 @@ func TestStaleServerPOSTWithoutSession(t *testing.T) {
 	}
 }
 
+// TestPOSTBeforeFirstRefresh: before a session's first snapshot nothing is
+// known, not even which endpoints are balancers, so every POST that would
+// reach varmq is refused in the banner and sends nothing.
+func TestPOSTBeforeFirstRefresh(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b")
+	for _, f := range fakes {
+		f.mu.Lock()
+		f.Delay = 1500 * time.Millisecond // the first poll takes at least this long
+		f.mu.Unlock()
+	}
+	lb := newRoundRobinLB(t, srvs...)
+	m := NewManager(&config.Config{Servers: map[string]*config.Server{
+		"multi": {Name: "multi", Interval: 10, Endpoints: []string{lb.URL, srvs[0].URL}},
+	}}, api.PoolFor)
+	t.Cleanup(func() { _ = m.Close() })
+	if err := m.Switch("multi"); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 3*time.Second, "the session", func() bool { return m.Current() != nil })
+	srv := serve(t, m)
+
+	for _, c := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/workers/w/actions/pause", multi()},
+		{"/workers/w/actions/restart", multi()},
+		{"/workers/w/actions/pause", multi("pod", srvs[0].URL)},
+		{"/workers/w/concurrency", multi("n", "3")},
+		{"/bulk/pause", multi("names", "w")},
+		{"/bulk/pause", multi("names", "w", "confirm", "1")},
+	} {
+		resp, body := post(t, srv, c.path, c.form, true)
+		if resp.StatusCode != http.StatusConflict || resp.Header.Get("HX-Retarget") != "#banner" ||
+			body != `<p class="banner">Waiting for the first refresh — try again</p>` {
+			t.Errorf("POST %s %v = %d (HX-Retarget %q) %q, want 409 with the waiting banner",
+				c.path, c.form, resp.StatusCode, resp.Header.Get("HX-Retarget"), body)
+		}
+	}
+	if m.Current().History.Latest() != nil {
+		t.Fatal("the first snapshot came in before the POSTs were done")
+	}
+	noPatches(t, fakes...)
+}
+
+// TestActionSkipsEndpointNotRefreshedYet: an endpoint found after the latest
+// snapshot may be a balancer; nothing is sent to it until a refresh shows
+// what it is.
+func TestActionSkipsEndpointNotRefreshedYet(t *testing.T) {
+	for _, pod := range []string{"", "new"} {
+		t.Run("pod="+pod, func(t *testing.T) {
+			fa, fb, aSrv, bSrv := twoFakes(t)
+			src := &mutableSource{eps: []string{aSrv.URL}}
+			m := startManagerBuilding(t, &config.Config{Servers: map[string]*config.Server{
+				"multi": {Name: "multi", Interval: 3600, Endpoints: []string{aSrv.URL}},
+			}}, "multi", func(*config.Server) (*api.Pool, error) { return api.NewPool(src, ""), nil })
+			srv := serve(t, m)
+			units := unitsOf(m.Current().History.Latest())
+			// The first poll ran and the next is an hour away: b, found
+			// since, is in no snapshot.
+			src.set(aSrv.URL, bSrv.URL)
+			units[bSrv.URL] = PodSnapshot{Key: bSrv.URL, Label: config.ShortOrigin(bSrv.URL)}
+
+			form := multi()
+			if pod != "" {
+				form.Set("pod", bSrv.URL)
+			}
+			resp, body := post(t, srv, "/workers/orders/actions/restart", form, true)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200:\n%s", resp.StatusCode, body)
+			}
+			if pod == "" {
+				wantResults(t, body, units, [2]string{aSrv.URL, "ok"}, [2]string{bSrv.URL, "failed (not refreshed yet — try again)"})
+				wantPatches(t, fa, "PATCH /workers/orders/actions/restart")
+			} else {
+				wantResults(t, body, units, [2]string{bSrv.URL, "failed (not refreshed yet — try again)"})
+				noPatches(t, fa)
+			}
+			noPatches(t, fb)
+		})
+	}
+}
+
 func TestActionEscapesName(t *testing.T) {
 	f, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"a/b c": {Status: "Running", Concurrency: 1}})
 	srv, _ := newTestServer(t, fSrv)
@@ -817,14 +901,15 @@ func TestServerSwitchRedirects(t *testing.T) {
 
 // serveBalanced serves the web UI over a Manager whose only server, "multi",
 // polls endpoints every second, once its latest snapshot has exactly the
-// unit keys want.
+// unit keys want, in any order.
 func serveBalanced(t *testing.T, endpoints []string, want ...string) (*httptest.Server, *Manager) {
 	t.Helper()
 	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
 		"multi": {Name: "multi", Interval: 1, Endpoints: endpoints},
 	}}, "multi")
+	want = slices.Sorted(slices.Values(want))
 	waitUntil(t, 5*time.Second, "units "+strings.Join(want, " "), func() bool {
-		return slices.Equal(unitKeys(m.Current().History.Latest()), want)
+		return slices.Equal(slices.Sorted(slices.Values(unitKeys(m.Current().History.Latest()))), want)
 	})
 	return serve(t, m), m
 }
@@ -941,6 +1026,80 @@ func TestActionBalancedUnreachableInstance(t *testing.T) {
 	if n := totalPatches(fakes...); n > attemptCap(3) {
 		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
 	}
+}
+
+// TestActionBudgetCountsEveryInstanceBehind: a balancer picks among every
+// instance behind it, those that are direct units too, so the attempts an
+// action gets through it are sized by all of them, not by the units it
+// wants there.
+func TestActionBudgetCountsEveryInstanceBehind(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs...)
+	srv, m := serveBalanced(t, []string{lb.URL, srvs[1].URL, srvs[2].URL}, "#a", srvs[1].URL, srvs[2].URL)
+	waitUntil(t, 5*time.Second, "3 instances behind the balancer", func() bool {
+		return m.Current().History.Latest().Behind[lb.URL] == 3
+	})
+	units := unitsOf(m.Current().History.Latest())
+	srvs[0].Close() // a leaves: the balancer answers its turns with a bare 502
+
+	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
+	results := html.UnescapeString(resultsOf(body))
+	if line := html.UnescapeString(resultLine(units["#a"], "failed (not reached through the load balancer after 18 tries)")); !strings.Contains(results, line) {
+		t.Errorf("results lack %q:\n%s", line, results)
+	}
+	wantWorker(t, "paused", paused, fakes[1], fakes[2])
+}
+
+// TestActionThroughRandomBalancerReachesItsInstance: behind a balancer that
+// picks at random among a, b and c, where b and c are also listed by their
+// own addresses, a merged action reaches a. Its budget counts all three
+// instances, which makes a miss about 1 in 1500 (it was 1 in 11 when only
+// the wanted unit counted), so 100 actions allow 2.
+func TestActionThroughRandomBalancerReachesItsInstance(t *testing.T) {
+	_, srvs := newFakes(t, "a", "b", "c")
+	lb := newRandomLB(t, srvs...)
+	pool, tr := lbPoll(t, lb.URL, srvs[1].URL, srvs[2].URL)
+	latest := pollUntil(t, pool, tr, 30, "#a and 3 instances behind the balancer", func(s *Snapshot) bool {
+		return slices.Contains(unitKeys(s), "#a") && s.Behind[lb.URL] == 3
+	})
+	sc, err := scopeOf(pool.Clients(), latest, "", instanceNoun)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	misses := 0
+	for range 100 {
+		for _, res := range act(context.Background(), sc, unitsOf(latest), instanceNoun, []string{"w"}, actionSender("pause"))[0] {
+			if res.Key == "#a" && res.Outcome != "ok" {
+				misses++
+			}
+		}
+	}
+	if misses > 2 {
+		t.Errorf("a was not reached by %d of 100 actions, want at most 2", misses)
+	}
+}
+
+// TestActionThroughHangingBalancerHasADeadline: a balancer that holds every
+// request costs an action at most balancerActionDeadline, not the attempt
+// budget times the client timeout, and the instances read not reached.
+func TestActionThroughHangingBalancerHasADeadline(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb, hang := newHangingLB(t, newRoundRobinLB(t, srvs...))
+	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	hang.Store(true)
+
+	start := time.Now()
+	resp, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
+	// The deadline, then at most settleWait for the refresh.
+	if elapsed := time.Since(start); elapsed > balancerActionDeadline+settleWait+time.Second {
+		t.Errorf("the action took %v, want it cut at %v", elapsed, balancerActionDeadline)
+	}
+	results := resultsOf(body)
+	if resp.StatusCode != http.StatusOK || strings.Count(results, "failed (not reached through the load balancer after ") != 3 {
+		t.Errorf("status %d, want 200 with every instance not reached:\n%s", resp.StatusCode, results)
+	}
+	noPatches(t, fakes...)
 }
 
 // TestRestartRefusedWithBalancedScope: restart never goes through a balancer.
