@@ -8,48 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 // The nouns of a Kubernetes server and of every other. Fixtures that name
 // no server pick one.
 var (
-	podNoun      = Noun{One: "pod", Many: "pods", Article: "a"}
-	instanceNoun = Noun{One: "instance", Many: "instances", Article: "an"}
+	podNoun      = fleet.Noun{One: "pod", Many: "pods", Article: "a", Param: "pod"}
+	instanceNoun = fleet.Noun{One: "instance", Many: "instances", Article: "an", Param: "instance"}
 )
-
-func TestNounFor(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		srv  *config.Server
-		want Noun
-	}{
-		{"kubernetes", &config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}, podNoun},
-		{"static endpoints", &config.Server{Endpoints: []string{"http://a:1", "http://b:1"}}, instanceNoun},
-		{"dns", &config.Server{DNS: &config.DNSRef{Host: "varmq-headless", Port: 8080}}, instanceNoun},
-		{"nil", nil, instanceNoun},
-	} {
-		if got := NounFor(tc.srv); got != tc.want {
-			t.Errorf("%s: NounFor = %+v, want %+v", tc.name, got, tc.want)
-		}
-	}
-
-	for _, tc := range []struct {
-		n         Noun
-		cap, many string
-	}{
-		{podNoun, "Pod", "Pods"},
-		{instanceNoun, "Instance", "Instances"},
-		{Noun{}, "", ""}, // the zero Noun a bare Page carries must not panic
-	} {
-		if got := tc.n.Cap(); got != tc.cap {
-			t.Errorf("%+v.Cap() = %q, want %q", tc.n, got, tc.cap)
-		}
-		if got := tc.n.CapMany(); got != tc.many {
-			t.Errorf("%+v.CapMany() = %q, want %q", tc.n, got, tc.many)
-		}
-	}
-}
 
 func TestPageScope(t *testing.T) {
 	opts := []PodOption{{Key: "#a", Label: "instance-1"}, {Key: "#b", Label: "instance-2"}}
@@ -101,13 +68,13 @@ func coords(t *testing.T, s string) [][2]float64 {
 	return out
 }
 
-func pt(v float64) Point { return Point{V: v, Title: "t"} }
+func pt(v float64) fleet.Point { return fleet.Point{V: v, Title: "t"} }
 
-var gap = Point{Gap: true, Title: "no data"}
+var gap = fleet.Point{Gap: true, Title: "no data"}
 
 func TestPolylines(t *testing.T) {
 	t.Run("a gap splits runs", func(t *testing.T) {
-		runs := polylines([]Point{pt(1), pt(2), gap, pt(4)}, 30, 10)
+		runs := polylines([]fleet.Point{pt(1), pt(2), gap, pt(4)}, 30, 10)
 		if len(runs) != 2 {
 			t.Fatalf("runs = %q, want 2", runs)
 		}
@@ -128,18 +95,18 @@ func TestPolylines(t *testing.T) {
 		if runs := polylines(nil, 30, 10); len(runs) != 0 {
 			t.Errorf("runs = %q, want none", runs)
 		}
-		if runs := polylines([]Point{gap, gap}, 30, 10); len(runs) != 0 {
+		if runs := polylines([]fleet.Point{gap, gap}, 30, 10); len(runs) != 0 {
 			t.Errorf("all-gap runs = %q, want none", runs)
 		}
 	})
 	t.Run("one point is one coordinate", func(t *testing.T) {
-		runs := polylines([]Point{pt(3)}, 30, 10)
+		runs := polylines([]fleet.Point{pt(3)}, 30, 10)
 		if len(runs) != 1 || len(coords(t, runs[0])) != 1 {
 			t.Errorf("runs = %q, want one run of one coordinate", runs)
 		}
 	})
 	t.Run("all zero is a flat line at the bottom", func(t *testing.T) {
-		runs := polylines([]Point{pt(0), pt(0), pt(0)}, 30, 10)
+		runs := polylines([]fleet.Point{pt(0), pt(0), pt(0)}, 30, 10)
 		if len(runs) != 1 {
 			t.Fatalf("runs = %q, want 1", runs)
 		}
@@ -163,13 +130,13 @@ func TestTemplatesParse(t *testing.T) {
 	}
 }
 
-func sampleRows() []RowView {
-	return []RowView{
+func sampleRows() []fleet.RowView {
+	return []fleet.RowView{
 		{
 			Name: "orders", ID: "w-6f7264657273", Status: "Running", Class: "active",
 			StatusTip: "a: Running\nb: Running", Concurrency: "4 ×2 pods", Busy: 3, Idle: 5,
 			PendingMax: 7, PendingTip: "a: 7\nb: 2",
-			Spark: []Point{pt(1), pt(2), {V: 3, Partial: true, Title: "half"}},
+			Spark: []fleet.Point{pt(1), pt(2), {V: 3, Partial: true, Title: "half"}},
 		},
 		{
 			Name: "<script>x</script>", ID: "w-3c7363", Status: "mixed", Class: "mixed",
@@ -184,12 +151,12 @@ func dashboardPage() Page {
 		Noun:    podNoun,
 		Servers: []string{"dev", "prod"},
 		Pods:    []PodOption{{Key: "http://a:3000", Label: "a"}, {Key: "http://b:3000", Label: "b"}},
-		Health:  HealthView{Healthy: 2, Total: 2, Dot: "●"},
-		Dashboard: &DashboardView{
-			KPIs: KPIView{
+		Health:  fleet.HealthView{Healthy: 2, Total: 2, Dot: "●"},
+		Dashboard: &fleet.DashboardView{
+			KPIs: fleet.KPIView{
 				CompletedPerSec: 12.5, FailedPerMin: 3, PendingMax: 9,
 				StatusCounts: map[string]int{"active": 3, "paused": 1},
-				Completed:    []Point{pt(1), pt(12.5)}, Failed: []Point{pt(0), pt(3)}, Pending: []Point{pt(9)},
+				Completed:    []fleet.Point{pt(1), pt(12.5)}, Failed: []fleet.Point{pt(0), pt(3)}, Pending: []fleet.Point{pt(9)},
 			},
 			Rows: sampleRows(),
 		},
@@ -269,7 +236,7 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 // A row no unit answered for shows no numbers: unknown is not zero.
 func TestUnknownRowShowsNoValues(t *testing.T) {
 	p := dashboardPage()
-	p.Dashboard.Rows = []RowView{{Name: "w", ID: "w-77", Status: "not reached", Class: "unknown", Concurrency: "—", Unknown: true}}
+	p.Dashboard.Rows = []fleet.RowView{{Name: "w", ID: "w-77", Status: "not reached", Class: "unknown", Concurrency: "—", Unknown: true}}
 
 	body := run(t, "dashboard", "layout", p)
 
@@ -284,7 +251,7 @@ func TestUnknownRowShowsNoValues(t *testing.T) {
 func TestKPIShowsDashWhenLastPointIsGap(t *testing.T) {
 	p := dashboardPage()
 	p.Dashboard.KPIs.CompletedPerSec = 99.9
-	p.Dashboard.KPIs.Completed = []Point{pt(1), gap}
+	p.Dashboard.KPIs.Completed = []fleet.Point{pt(1), gap}
 	p.Dashboard.KPIs.Failed = nil
 	body := run(t, "dashboard", "layout", p)
 	if strings.Contains(body, "99.9") {
@@ -324,7 +291,7 @@ func TestEveryFormCarriesServer(t *testing.T) {
 func TestEmptyPagesRender(t *testing.T) {
 	t.Run("dashboard without workers", func(t *testing.T) {
 		p := dashboardPage()
-		p.Dashboard = &DashboardView{KPIs: KPIView{StatusCounts: map[string]int{}}}
+		p.Dashboard = &fleet.DashboardView{KPIs: fleet.KPIView{StatusCounts: map[string]int{}}}
 		body := run(t, "dashboard", "layout", p)
 		if !strings.Contains(body, "No workers") {
 			t.Error("empty dashboard has no empty-state copy")
@@ -335,7 +302,7 @@ func TestEmptyPagesRender(t *testing.T) {
 	})
 	t.Run("grid without pods", func(t *testing.T) {
 		p := dashboardPage()
-		p.Dashboard, p.Grid = nil, &GridView{}
+		p.Dashboard, p.Grid = nil, &fleet.GridView{}
 		body := run(t, "grid", "layout", p)
 		if !strings.Contains(body, "No pods") {
 			t.Error("empty grid has no empty-state copy")
@@ -395,9 +362,9 @@ func TestEmptyPagesRender(t *testing.T) {
 func gridPage() Page {
 	p := dashboardPage()
 	p.Dashboard = nil
-	p.Grid = &GridView{
-		Pods: []PodColumn{{Key: "http://a:3000", Label: "a"}, {Key: "http://b:3000", Label: "b", Err: "connection refused"}},
-		Rows: []GridRow{{Name: "orders", Cells: []GridCell{
+	p.Grid = &fleet.GridView{
+		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}, {Key: "http://b:3000", Label: "b", Err: "connection refused"}},
+		Rows: []fleet.GridRow{{Name: "orders", Cells: []fleet.GridCell{
 			{Present: true, Status: "Running", Class: "active", Busy: 2, Concurrency: 4, Pending: 1},
 			{},
 		}}},
@@ -421,7 +388,7 @@ func TestGridRenders(t *testing.T) {
 	}
 
 	p := gridPage()
-	p.Grid.Rows[0].Cells[1] = GridCell{Unreached: true}
+	p.Grid.Rows[0].Cells[1] = fleet.GridCell{Unreached: true}
 	body = run(t, "grid", "layout", p)
 	if !strings.Contains(body, `<span class="na">not reached</span>`) {
 		t.Errorf("unreached cell not rendered:\n%s", body)
@@ -433,13 +400,13 @@ func TestTipsAreTitles(t *testing.T) {
 	const tip = "inst-a via http://a:3000"
 	for name, body := range map[string]string{
 		"select option": run(t, "dashboard", "layout", Page{Server: "dev", SelfURL: "/", Pods: []PodOption{{Key: "#a", Label: "instance-1", Tip: tip}}}),
-		"grid column": run(t, "grid", "layout", Page{Server: "dev", Grid: &GridView{
-			Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}},
-			Rows: []GridRow{{Name: "w", Cells: []GridCell{{}}}},
+		"grid column": run(t, "grid", "layout", Page{Server: "dev", Grid: &fleet.GridView{
+			Pods: []fleet.PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}},
+			Rows: []fleet.GridRow{{Name: "w", Cells: []fleet.GridCell{{}}}},
 		}}),
-		"detail pods": run(t, "detail", "layout", Page{Server: "dev", Detail: &DetailView{Name: "w", Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}}),
-		"confirm":     run(t, "confirm", "confirm", ConfirmView{Action: "pause", Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}),
-		"result":      run(t, "results", "results", ResultsView{Results: []ActionResult{{Pod: "instance-1", Key: "#a", Tip: tip, Outcome: "ok"}}, Noun: podNoun}),
+		"detail pods": run(t, "detail", "layout", Page{Server: "dev", Detail: &fleet.DetailView{Name: "w", Pods: []fleet.PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}}),
+		"confirm":     run(t, "confirm", "confirm", ConfirmView{Action: "pause", Pods: []fleet.PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}),
+		"result":      run(t, "results", "results", ResultsView{Results: []fleet.ActionResult{{Pod: "instance-1", Key: "#a", Tip: tip, Outcome: "ok"}}, Noun: podNoun}),
 	} {
 		if !strings.Contains(body, `title="`+tip+`">instance-1<`) {
 			t.Errorf("%s: label lacks the tip as title:\n%s", name, body)
@@ -450,12 +417,12 @@ func TestTipsAreTitles(t *testing.T) {
 func detailPage() Page {
 	p := dashboardPage()
 	p.Dashboard = nil
-	p.Detail = &DetailView{
+	p.Detail = &fleet.DetailView{
 		Name: "a/b c", Status: "Running", Class: "active", StatusTip: "a: Running",
 		Submitted: 10, Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
 		ConcurrencyStart: 4, ConcurrencyMax: 64,
-		Completed1h: []Point{pt(1), pt(2)}, Failed1h: []Point{pt(0), pt(0)},
-		Pods: []PodColumn{{Key: "http://a:3000", Label: "a"}},
+		Completed1h: []fleet.Point{pt(1), pt(2)}, Failed1h: []fleet.Point{pt(0), pt(0)},
+		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}},
 	}
 	return p
 }
@@ -513,7 +480,7 @@ func TestLiveRegionHoldsNoControls(t *testing.T) {
 }
 
 func TestResultsRender(t *testing.T) {
-	body := run(t, "results", "results", ResultsView{Noun: podNoun, Results: []ActionResult{
+	body := run(t, "results", "results", ResultsView{Noun: podNoun, Results: []fleet.ActionResult{
 		{Pod: "a", Key: "http://a:3000", Outcome: "ok"},
 		{Pod: "b", Key: "http://b:3000", Outcome: "no change", Msg: "worker is not running"},
 		{Pod: "c", Key: "http://c:3000", Outcome: "failed", Msg: "<b>boom</b>"},
@@ -534,7 +501,7 @@ func TestResultsRender(t *testing.T) {
 func TestConfirmRenders(t *testing.T) {
 	body := run(t, "confirm", "confirm", ConfirmView{
 		Action: "pause", Server: "dev", Pod: "", Noun: podNoun,
-		Pods: []PodColumn{{Key: "http://a:3000", Label: "pod-a"}, {Key: "http://b:3000", Label: "pod-b", Err: "<i>down</i>"}},
+		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "pod-a"}, {Key: "http://b:3000", Label: "pod-b", Err: "<i>down</i>"}},
 		Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true, false}}, {Name: "a&b", Absent: []bool{false, false}}},
 	})
 	for _, want := range []string{
@@ -559,7 +526,7 @@ func TestConfirmRenders(t *testing.T) {
 // units follow the Noun the Page, ConfirmView or ResultsView carries, and no
 // other noun's.
 func TestCopyFollowsNoun(t *testing.T) {
-	for _, n := range []Noun{podNoun, instanceNoun} {
+	for _, n := range []fleet.Noun{podNoun, instanceNoun} {
 		other := podNoun
 		if n == podNoun {
 			other = instanceNoun
@@ -611,12 +578,12 @@ func TestCopyFollowsNoun(t *testing.T) {
 			p = gridPage()
 			p.Noun = n
 			check(t, "grid", run(t, "grid", "layout", p), ">"+n.Cap()+" grid</a>")
-			p.Grid = &GridView{}
+			p.Grid = &fleet.GridView{}
 			check(t, "empty grid", run(t, "grid", "layout", p), "No "+many+" to show.")
 
 			check(t, "confirm", run(t, "confirm", "confirm", ConfirmView{
 				Action: "pause", Server: "dev", Noun: n,
-				Pods: []PodColumn{{Key: "#a", Label: "a"}},
+				Pods: []fleet.PodColumn{{Key: "#a", Label: "a"}},
 				Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true}}},
 			}), "pause each worker on each "+one+" below:", `<span class="na">not on this `+one+`</span>`)
 
@@ -647,7 +614,7 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 
 func TestSparklineHitTargetsAreBounded(t *testing.T) {
 	// 3600 one-second points in a 120-wide box must not emit 3600 hover targets.
-	pts := make([]Point, 3600)
+	pts := make([]fleet.Point, 3600)
 	for i := range pts {
 		pts[i] = pt(float64(i % 7))
 	}

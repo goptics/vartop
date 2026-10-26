@@ -1,16 +1,61 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
+
+// Session is the active server's fleet.Collector and the History the pages
+// read: its sink appends every snapshot to History, so a session's late
+// tick can never land in another session's history.
+type Session struct {
+	Server   *config.Server
+	Interval time.Duration
+	History  *fleet.History
+
+	pool      *api.Pool // the collector's, for Clients
+	collector *fleet.Collector
+}
+
+// NewSession starts polling srv through pool, which the session now owns.
+// The first poll starts immediately; each next one starts Interval after the
+// previous one ended.
+func NewSession(srv *config.Server, pool *api.Pool) *Session {
+	interval := srv.PollInterval()
+	hist := fleet.NewHistory(interval)
+	return &Session{
+		Server:   srv,
+		Interval: interval,
+		History:  hist,
+		pool:     pool,
+		collector: fleet.NewCollector(srv, pool, func(t fleet.Tick) error {
+			hist.Append(t.Snap)
+			return nil
+		}),
+	}
+}
+
+// Clients returns the pool's current clients, one per pod endpoint.
+func (s *Session) Clients() []*api.Client { return s.pool.Clients() }
+
+// PollNow asks for an immediate poll and waits for it: see
+// fleet.Collector.PollNow. True means History holds a snapshot started after
+// the call.
+func (s *Session) PollNow(ctx context.Context) bool { return s.collector.PollNow(ctx) }
+
+// Close stops polling and closes the pool. It does not wait for the poller:
+// a tick in flight has its requests cancelled.
+func (s *Session) Close() error { return s.collector.Close() }
 
 // errManagerClosed is returned by Switch once the Manager is closed.
 var errManagerClosed = errors.New("session manager closed")
@@ -172,7 +217,7 @@ func ConnectionLabel(srv *config.Server) string {
 	case srv.DNS != nil:
 		return fmt.Sprintf("dns:%s:%d", srv.DNS.Host, srv.DNS.Port)
 	case len(srv.Endpoints) > 1:
-		return fmt.Sprintf("%d %s", len(srv.Endpoints), NounFor(srv).Many)
+		return fmt.Sprintf("%d %s", len(srv.Endpoints), fleet.NounFor(srv).Many)
 	default:
 		return srv.DisplayEndpoint()
 	}

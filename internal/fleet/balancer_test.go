@@ -1,4 +1,4 @@
-package web
+package fleet
 
 import (
 	"context"
@@ -17,27 +17,14 @@ import (
 	"time"
 
 	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
-// newFakes starts one fake varmq per instance ID, each with a running worker
-// "w" whose Completed counter is 10 × its position (10, 20, 30, …).
-func newFakes(t *testing.T, ids ...string) ([]*fakeVarmq, []*httptest.Server) {
-	t.Helper()
-	fakes := make([]*fakeVarmq, len(ids))
-	srvs := make([]*httptest.Server, len(ids))
-	for i, id := range ids {
-		fakes[i], srvs[i] = newFakeVarmq(t, id, map[string]*fakeWorker{
-			"w": {Status: "Running", Concurrency: 1, Completed: uint64(10 * (i + 1))},
-		})
-	}
-	return fakes, srvs
-}
-
-// lbPoll returns a pool over lbServer(urls...) and a tracker for it, as
-// NewSession would make them. The pool is closed when the test ends.
+// lbPoll returns a pool over fleettest.LBServer(urls...) and a tracker for
+// it, as NewCollector would make them. The pool is closed when the test ends.
 func lbPoll(t *testing.T, urls ...string) (*api.Pool, *tracker) {
 	t.Helper()
-	srv := lbServer(urls...)
+	srv := fleettest.LBServer(urls...)
 	pool, err := api.PoolFor(srv)
 	if err != nil {
 		t.Fatal(err)
@@ -94,10 +81,10 @@ func reachLists(ctx context.Context, eps []*api.Client, budget int, want ...stri
 }
 
 func TestReachStopsWhenAllAnswered(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 
-	j := reachLists(context.Background(), staticPool(t, lb.URL).Clients(), 18, "a", "b", "c")
+	j := reachLists(context.Background(), fleettest.StaticPool(t, lb.URL).Clients(), 18, "a", "b", "c")
 
 	// 3 attempts when the round-robin goes a, b, c; a reply slower than the
 	// hedge wait (a loaded machine) adds some, within the budget.
@@ -112,10 +99,10 @@ func TestReachStopsWhenAllAnswered(t *testing.T) {
 }
 
 func TestReachRespectsBudget(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 
-	j := reachLists(context.Background(), staticPool(t, lb.URL).Clients(), 18, "a", "b", "c", "zz")
+	j := reachLists(context.Background(), fleettest.StaticPool(t, lb.URL).Clients(), 18, "a", "b", "c", "zz")
 
 	if ids := slices.Sorted(maps.Keys(j.got)); !slices.Equal(ids, []string{"a", "b", "c"}) || j.sent != 18 {
 		t.Errorf("got %v after %d attempts, want a, b, c (never zz) after the 18-attempt budget", ids, j.sent)
@@ -123,10 +110,10 @@ func TestReachRespectsBudget(t *testing.T) {
 }
 
 func TestReachWithoutWantTriesEveryEndpoint(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb1, lb2 := newRoundRobinLB(t, srvs...), newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb1, lb2 := fleettest.NewRoundRobinLB(t, srvs...), fleettest.NewRoundRobinLB(t, srvs...)
 
-	j := reachLists(context.Background(), staticPool(t, lb1.URL, lb2.URL).Clients(), 18)
+	j := reachLists(context.Background(), fleettest.StaticPool(t, lb1.URL, lb2.URL).Clients(), 18)
 
 	if j.sent != 2 || len(j.got) == 0 {
 		t.Errorf("got %d answers after %d attempts, want one attempt per endpoint", len(j.got), j.sent)
@@ -240,8 +227,8 @@ func TestReachRetriesPastAStuckAttempt(t *testing.T) {
 }
 
 func TestPollRoundRobinBalancer(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 
 	s := pollOnce(context.Background(), pool, tr)
@@ -268,8 +255,8 @@ func TestPollRoundRobinBalancer(t *testing.T) {
 }
 
 func TestPollPerConnBalancerDetected(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newPerConnLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewPerConnLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 
 	s := pollUntil(t, pool, tr, 3, "three units", hasKeys("#a", "#b", "#c"))
@@ -283,17 +270,17 @@ func TestPollPerConnBalancerDetected(t *testing.T) {
 
 func TestPollBalancerRates(t *testing.T) {
 	const interval = 200 * time.Millisecond
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
-	pool, tr := staticPool(t, lb.URL), newTracker(interval, false)
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	pool, tr := fleettest.StaticPool(t, lb.URL), newTracker(interval, false)
 	h := NewHistory(interval)
 
 	h.Append(pollOnce(context.Background(), pool, tr))
 	first := h.Latest()
 	for i, f := range fakes {
-		f.mu.Lock()
+		f.Mu.Lock()
 		f.Workers["w"].Completed += uint64(100 * (i + 1))
-		f.mu.Unlock()
+		f.Mu.Unlock()
 	}
 	time.Sleep(interval)
 	h.Append(pollOnce(context.Background(), pool, tr))
@@ -312,9 +299,9 @@ func TestPollBalancerRates(t *testing.T) {
 }
 
 func TestPollBalancerUnreachedWorker(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
 	fakes[2].Workers["w"].GetStatus = http.StatusInternalServerError
-	lb := newRoundRobinLB(t, srvs...)
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 
 	s := pollUntil(t, pool, tr, 5, "three units", hasKeys("#a", "#b", "#c"))
@@ -331,9 +318,9 @@ func TestPollBalancerUnreachedWorker(t *testing.T) {
 }
 
 func TestPollBalancerListError(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
 	fakes[2].ListStatus = http.StatusInternalServerError
-	lb := newRoundRobinLB(t, srvs...)
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 
 	s := pollUntil(t, pool, tr, 5, "three units", hasKeys("#a", "#b", "#c"))
@@ -347,8 +334,8 @@ func TestPollBalancerListError(t *testing.T) {
 }
 
 func TestPollBalancerMissedInstance(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 	pollUntil(t, pool, tr, 3, "three units", hasKeys("#a", "#b", "#c"))
 
@@ -377,8 +364,8 @@ func TestPollBalancerMissedInstance(t *testing.T) {
 }
 
 func TestPollBalancerForgetsInstance(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 	pollUntil(t, pool, tr, 3, "three units", hasKeys("#a", "#b", "#c"))
 	start := time.Now()
@@ -397,8 +384,8 @@ func TestPollBalancerForgetsInstance(t *testing.T) {
 }
 
 func TestPollBalancerBackToDirect(t *testing.T) {
-	_, srvs := newFakes(t, "a")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 	start := time.Now()
 	tr.saw(lb.URL, "a", start) // b was behind the balancer too, and has left it
@@ -422,10 +409,10 @@ func TestPollBalancerBackToDirect(t *testing.T) {
 }
 
 func TestPollDedupesInstanceAcrossEndpoints(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b")
+	_, srvs := fleettest.NewInstances(t, "a", "b")
 
 	t.Run("two balancers", func(t *testing.T) {
-		lb1, lb2 := newRoundRobinLB(t, srvs...), newRoundRobinLB(t, srvs...)
+		lb1, lb2 := fleettest.NewRoundRobinLB(t, srvs...), fleettest.NewRoundRobinLB(t, srvs...)
 		pool, tr := lbPoll(t, lb1.URL, lb2.URL)
 
 		s := pollUntil(t, pool, tr, 3, "units #a and #b", hasKeys("#a", "#b"))
@@ -435,7 +422,7 @@ func TestPollDedupesInstanceAcrossEndpoints(t *testing.T) {
 		}
 	})
 	t.Run("balancer and own address", func(t *testing.T) {
-		lb := newRoundRobinLB(t, srvs...)
+		lb := fleettest.NewRoundRobinLB(t, srvs...)
 		pool, tr := lbPoll(t, lb.URL, srvs[0].URL)
 
 		pollUntil(t, pool, tr, 3, "units #b and a's address", hasKeys("#b", srvs[0].URL))
@@ -453,8 +440,8 @@ func TestPollDedupesInstanceAcrossEndpoints(t *testing.T) {
 }
 
 func TestPollBalancerIgnoresAnswersWithoutInstance(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b")
-	target, err := url.Parse(newRoundRobinLB(t, srvs...).URL)
+	_, srvs := fleettest.NewInstances(t, "a", "b")
+	target, err := url.Parse(fleettest.NewRoundRobinLB(t, srvs...).URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,8 +472,8 @@ func TestPollBalancerIgnoresAnswersWithoutInstance(t *testing.T) {
 }
 
 func TestPollNoInstanceHeaderStaysDirect(t *testing.T) {
-	_, srvs := newFakes(t, "", "")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "", "")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 
 	for range 3 {
@@ -504,14 +491,14 @@ func TestPollNoInstanceHeaderStaysDirect(t *testing.T) {
 }
 
 func TestPollBalancerDeadline(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 	pollUntil(t, pool, tr, 3, "three units", hasKeys("#a", "#b", "#c"))
 
-	fakes[2].mu.Lock()
+	fakes[2].Mu.Lock()
 	fakes[2].Delay = 2 * time.Second
-	fakes[2].mu.Unlock()
+	fakes[2].Mu.Unlock()
 	const deadline = 300 * time.Millisecond
 	for tick := range 3 {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
@@ -537,12 +524,12 @@ func TestPollBalancerDeadline(t *testing.T) {
 // every instance has answered through the others: the attempt it holds is
 // presumed stuck, which counts as back for the one attempt per endpoint.
 func TestPollBalancerHungEndpointDoesNotHoldTheTick(t *testing.T) {
-	_, srvs := newFakes(t, "a")
+	_, srvs := fleettest.NewInstances(t, "a")
 	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	t.Cleanup(hung.Close)
 	// Three balancer endpoints in front of a, as DNS might list them; the
 	// third has started to blackhole.
-	endpoints := []string{srvs[0].URL, newRoundRobinLB(t, srvs[0]).URL, hung.URL}
+	endpoints := []string{srvs[0].URL, fleettest.NewRoundRobinLB(t, srvs[0]).URL, hung.URL}
 	pool, tr := lbPoll(t, endpoints...)
 
 	const deadline = 800 * time.Millisecond
@@ -570,8 +557,8 @@ func TestPollBalancerHungEndpointDoesNotHoldTheTick(t *testing.T) {
 // which makes a miss about 1 in 700 ticks (it was 1 in 6 when only the
 // wanted unit counted), so 100 ticks allow 3.
 func TestPollBalancerBudgetCountsEveryInstanceBehind(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRandomLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRandomLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL)
 	direct := map[string]bool{"b": true, "c": true}
 
@@ -596,15 +583,15 @@ func TestPollBalancerBudgetCountsEveryInstanceBehind(t *testing.T) {
 
 // A slow direct endpoint does not hold up the balancer next to it.
 func TestPollSlowDirectDoesNotStarveBalancer(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b")
-	fd, d := newFakeVarmq(t, "d", map[string]*fakeWorker{"w": {Status: "Running"}})
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b")
+	fd, d := fleettest.NewVarmq(t, "d", map[string]*fleettest.Worker{"w": {Status: "Running"}})
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := lbPoll(t, lb.URL, d.URL)
 	pollUntil(t, pool, tr, 3, "units #a, #b and d", hasKeys("#a", "#b", d.URL))
 
-	fd.mu.Lock()
+	fd.Mu.Lock()
 	fd.Delay = 2 * time.Second
-	fd.mu.Unlock()
+	fd.Mu.Unlock()
 	const deadline = 300 * time.Millisecond
 	for tick := range 3 {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
@@ -628,9 +615,9 @@ func TestPollSlowDirectDoesNotStarveBalancer(t *testing.T) {
 // A direct unit whose list got no reply is still its instance's unit, so
 // that instance does not also show up through a balancer.
 func TestPollDirectUnitWithoutReplyKeepsItsInstance(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b")
-	lb := newRoundRobinLB(t, srvs...)
-	own := newRoundRobinLB(t, srvs[0]) // a's own address, which can go away alone
+	_, srvs := fleettest.NewInstances(t, "a", "b")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	own := fleettest.NewRoundRobinLB(t, srvs[0]) // a's own address, which can go away alone
 	pool, tr := lbPoll(t, lb.URL, own.URL)
 	pollUntil(t, pool, tr, 3, "units #b and a's address", hasKeys("#b", own.URL))
 
@@ -647,12 +634,12 @@ func TestPollDirectUnitWithoutReplyKeepsItsInstance(t *testing.T) {
 }
 
 func TestPollBalancerEscapesWorkerNames(t *testing.T) {
-	workers := func() map[string]*fakeWorker {
-		return map[string]*fakeWorker{"a/b": {Status: "Running"}, "x y": {Status: "Running"}}
+	workers := func() map[string]*fleettest.Worker {
+		return map[string]*fleettest.Worker{"a/b": {Status: "Running"}, "x y": {Status: "Running"}}
 	}
-	fa, a := newFakeVarmq(t, "a", workers())
-	fb, b := newFakeVarmq(t, "b", workers())
-	lb := newRoundRobinLB(t, a, b)
+	fa, a := fleettest.NewVarmq(t, "a", workers())
+	fb, b := fleettest.NewVarmq(t, "b", workers())
+	lb := fleettest.NewRoundRobinLB(t, a, b)
 	pool, tr := lbPoll(t, lb.URL)
 
 	s := pollUntil(t, pool, tr, 3, "units #a and #b", hasKeys("#a", "#b"))
@@ -662,7 +649,7 @@ func TestPollBalancerEscapesWorkerNames(t *testing.T) {
 			t.Errorf("%s workers = %v, unreached %v; want both under their raw names", p.Key, got, p.Unreached)
 		}
 	}
-	calls := append(fa.calls(), fb.calls()...)
+	calls := append(fa.Calls(), fb.Calls()...)
 	if !slices.Contains(calls, "GET /workers/a%2Fb") || !slices.Contains(calls, "GET /workers/x%20y") ||
 		slices.Contains(calls, "GET /workers/a/b") {
 		t.Errorf("calls = %v, want the escaped names", calls)
@@ -680,15 +667,15 @@ func TestPollBalancerReachesEveryWorker(t *testing.T) {
 			var srvs []*httptest.Server
 			var keys []string
 			for i := range tc.instances {
-				workers := make(map[string]*fakeWorker)
+				workers := make(map[string]*fleettest.Worker)
 				for w := range tc.workers {
-					workers[fmt.Sprintf("w%d", w)] = &fakeWorker{Status: "Running"}
+					workers[fmt.Sprintf("w%d", w)] = &fleettest.Worker{Status: "Running"}
 				}
 				id := string(rune('a' + i))
-				_, srv := newFakeVarmq(t, id, workers)
+				_, srv := fleettest.NewVarmq(t, id, workers)
 				srvs, keys = append(srvs, srv), append(keys, "#"+id)
 			}
-			lb := newRoundRobinLB(t, srvs...)
+			lb := fleettest.NewRoundRobinLB(t, srvs...)
 			pool, tr := lbPoll(t, lb.URL)
 			pollUntil(t, pool, tr, 3, "every unit", hasKeys(keys...))
 
@@ -761,10 +748,10 @@ func TestLabelsFollowTheInstance(t *testing.T) {
 		// balancer looks like a direct unit until a second instance answers.
 		var srvs []*httptest.Server
 		for _, id := range []string{"a", "b", "c"} {
-			_, srv := newFakeVarmq(t, id, nil)
+			_, srv := fleettest.NewVarmq(t, id, nil)
 			srvs = append(srvs, srv)
 		}
-		pool, tr := lbPoll(t, newRoundRobinLB(t, srvs...).URL)
+		pool, tr := lbPoll(t, fleettest.NewRoundRobinLB(t, srvs...).URL)
 
 		s := pollUntil(t, pool, tr, 5, "three units", hasKeys("#a", "#b", "#c"))
 
@@ -791,7 +778,7 @@ func TestLabelsNeverReused(t *testing.T) {
 	}
 
 	t.Run("static list numbers in URL order", func(t *testing.T) {
-		_, srvs := newFakes(t, "x", "y", "z")
+		_, srvs := fleettest.NewInstances(t, "x", "y", "z")
 		urls := []string{srvs[0].URL, srvs[1].URL, srvs[2].URL}
 		slices.Sort(urls)
 		pool, tr := lbPoll(t, urls[2], urls[0], urls[1])
@@ -815,16 +802,16 @@ func TestLabelsNeverReused(t *testing.T) {
 // TestLabelsStayWhileAnInstanceIsDown: a unit keeps its number, and its
 // place in the list, while its process is down and once it is back.
 func TestLabelsStayWhileAnInstanceIsDown(t *testing.T) {
-	// static polls a static server over a, b and c, b down at the session's
+	// static polls a static server over a, b and c, b down at the collector's
 	// start when downAtStart, then up, down, down past the window and up
 	// again, and checks that every tick labels and lists the units in URL
 	// order.
 	static := func(t *testing.T, downAtStart bool) {
-		_, srvs := newFakes(t, "a", "b", "c")
-		b, down := newDownableAddress(t, srvs[1])
+		_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+		b, down := fleettest.NewDownableAddress(t, srvs[1])
 		urls := []string{srvs[0].URL, b.URL, srvs[2].URL}
 		pool, tr := lbPoll(t, urls...)
-		want, order := staticLabels(urls...), slices.Sorted(slices.Values(urls))
+		want, order := fleettest.StaticLabels(urls...), slices.Sorted(slices.Values(urls))
 		first := "b"
 		if downAtStart {
 			first = "" // never seen
@@ -860,8 +847,8 @@ func TestLabelsStayWhileAnInstanceIsDown(t *testing.T) {
 	t.Run("static, up at the start", func(t *testing.T) { static(t, false) })
 
 	t.Run("behind a balancer, across a missed tick", func(t *testing.T) {
-		_, srvs := newFakes(t, "a", "b", "c")
-		lb := newRoundRobinLB(t, srvs...)
+		_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+		lb := fleettest.NewRoundRobinLB(t, srvs...)
 		pool, tr := lbPoll(t, lb.URL)
 		first := pollUntil(t, pool, tr, 3, "three units", hasKeys("#a", "#b", "#c"))
 
@@ -948,8 +935,8 @@ func TestBalancerEndpointDown(t *testing.T) {
 	}
 
 	t.Run("instances known", func(t *testing.T) {
-		_, srvs := newFakes(t, "a", "b")
-		lb := newRoundRobinLB(t, srvs...)
+		_, srvs := fleettest.NewInstances(t, "a", "b")
+		lb := fleettest.NewRoundRobinLB(t, srvs...)
 		pool, tr := lbPoll(t, lb.URL)
 		pollUntil(t, pool, tr, 3, "units #a and #b", hasKeys("#a", "#b"))
 
@@ -970,8 +957,8 @@ func TestBalancerEndpointDown(t *testing.T) {
 		}
 	})
 	t.Run("none known", func(t *testing.T) {
-		_, srvs := newFakes(t, "a", "b")
-		lb := newRoundRobinLB(t, srvs...)
+		_, srvs := fleettest.NewInstances(t, "a", "b")
+		lb := fleettest.NewRoundRobinLB(t, srvs...)
 		pool, tr := lbPoll(t, lb.URL, srvs[0].URL, srvs[1].URL)
 		// a and b are direct units, so nothing behind the balancer is a unit of its own.
 		pollUntil(t, pool, tr, 3, "the balancer noticed", func(s *Snapshot) bool { return s.Behind[lb.URL] == 2 })

@@ -1,7 +1,9 @@
-// Package web serves vartop's browser UI: a poller that samples every pod of
-// the selected server, an in-memory history of those samples, and the HTTP
-// handlers that render them.
-package web
+// Package fleet is vartop's model of a varmq fleet, with no HTTP of its own:
+// a collector that polls every unit of a server (its direct endpoints and
+// the instances behind its load balancers) into snapshots, the per-worker
+// rates derived from them, the view models the UIs render, and the action
+// core that sends a worker action to the units in scope.
+package fleet
 
 import (
 	"sync"
@@ -55,6 +57,10 @@ type Snapshot struct {
 	// answered through it within the lifecycle window (tracker.window), not
 	// only this tick: one gone less than a window ago still counts.
 	Behind map[string]int
+	// Err says why the server could not be polled at all (its units not yet
+	// discovered, discovery failing); "" for a poll that ran, whatever its
+	// units' errors.
+	Err string
 }
 
 // History keeps the last hour of snapshots in a ring and derives per-worker

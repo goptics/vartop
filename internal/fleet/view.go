@@ -1,4 +1,4 @@
-package web
+package fleet
 
 import (
 	"encoding/hex"
@@ -179,7 +179,7 @@ func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) Dash
 	if len(snaps) == 0 {
 		return v
 	}
-	pods := podsOf(snaps[len(snaps)-1], pod)
+	pods := PodsOf(snaps[len(snaps)-1], pod)
 	window := newest(snaps, trendWindow)
 
 	for _, name := range workerNames(pods) {
@@ -197,7 +197,7 @@ func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) Dash
 			Unknown:     m.reporting == 0,
 			PendingTip:  strings.Join(m.pendingTips, tipSep),
 			AbsentOn:    m.absent,
-			Spark:       workerRates(window, pod, name, completedRate, n),
+			Spark:       WorkerRates(window, pod, name, completedRate, n),
 		})
 	}
 
@@ -238,7 +238,7 @@ func BuildGrid(latest *Snapshot) GridView {
 				continue
 			}
 			if sm == nil {
-				cells[i].Unreached = p.unreached(name)
+				cells[i].Unreached = p.IsUnreached(name)
 				continue
 			}
 			cells[i] = GridCell{
@@ -264,7 +264,7 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 	if len(snaps) == 0 {
 		return DetailView{}, false
 	}
-	pods := podsOf(snaps[len(snaps)-1], pod)
+	pods := PodsOf(snaps[len(snaps)-1], pod)
 	m := mergeWorker(pods, worker)
 	if m.reporting == 0 {
 		return DetailView{}, false
@@ -276,8 +276,8 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 		Class:            m.class,
 		StatusTip:        strings.Join(m.statusTips, tipSep),
 		ConcurrencyStart: slices.Max(m.concurrency),
-		Completed1h:      workerRates(snaps, pod, worker, completedRate, n),
-		Failed1h:         workerRates(snaps, pod, worker, failedRate, n),
+		Completed1h:      WorkerRates(snaps, pod, worker, completedRate, n),
+		Failed1h:         WorkerRates(snaps, pod, worker, failedRate, n),
 	}
 	d.ConcurrencyMax = max(concurrencyFloor, 2*d.ConcurrencyStart)
 	for _, p := range pods {
@@ -298,9 +298,9 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 	return d, true
 }
 
-// podsOf returns the pods of s a view covers: all of them, or only the one with
+// PodsOf returns the pods of s a view covers: all of them, or only the one with
 // key pod. The result aliases s.Pods and must not be modified.
-func podsOf(s *Snapshot, pod string) []PodSnapshot {
+func PodsOf(s *Snapshot, pod string) []PodSnapshot {
 	if s == nil {
 		return nil
 	}
@@ -315,8 +315,8 @@ func podsOf(s *Snapshot, pod string) []PodSnapshot {
 	return nil
 }
 
-// unreached reports whether p lists the worker but got no answer for it.
-func (p PodSnapshot) unreached(name string) bool { return slices.Contains(p.Unreached, name) }
+// IsUnreached reports whether p lists the worker but got no answer for it.
+func (p PodSnapshot) IsUnreached(name string) bool { return slices.Contains(p.Unreached, name) }
 
 // workerNames is the sorted union of worker names over the healthy pods,
 // unreached ones included.
@@ -360,7 +360,7 @@ func mergeWorker(pods []PodSnapshot, name string) merged {
 		}
 		sm := p.Workers[name]
 		switch {
-		case sm == nil && p.unreached(name):
+		case sm == nil && p.IsUnreached(name):
 			m.unreached++
 			m.statusTips = append(m.statusTips, p.Label+": not reached")
 			continue
@@ -449,24 +449,24 @@ func newest(snaps []*Snapshot, span time.Duration) []*Snapshot {
 	return snaps[slices.IndexFunc(snaps, func(s *Snapshot) bool { return !s.At.Before(since) }):]
 }
 
-// workerRates charts one worker's rate (pick) per snapshot: the sum over the
+// WorkerRates charts one worker's rate (pick) per snapshot: the sum over the
 // pods with a valid rate. Expected pods (see the file comment) are the healthy
 // ones reporting the worker or listing it unreached, plus every errored one; a
 // healthy pod lacking the worker is not expected. With no contributing pod the
 // point is a gap.
-func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n Noun) []Point {
+func WorkerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n Noun) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
 		var contributing, expected int
-		for _, p := range podsOf(s, pod) {
+		for _, p := range PodsOf(s, pod) {
 			if p.Err != "" {
 				expected++
 				continue
 			}
 			sm := p.Workers[name]
 			if sm == nil {
-				if p.unreached(name) {
+				if p.IsUnreached(name) {
 					expected++
 				}
 				continue
@@ -499,7 +499,7 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 		var sum float64
 		var contributing, expected int
 		var summed bool
-		for _, p := range podsOf(s, pod) {
+		for _, p := range PodsOf(s, pod) {
 			if p.Err != "" {
 				expected++
 				continue
@@ -534,12 +534,12 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 func pendingSeries(snaps []*Snapshot, pod string, n Noun) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
-		total, healthy := peakPending(podsOf(s, pod))
+		total, healthy := peakPending(PodsOf(s, pod))
 		if healthy == 0 {
 			out[i] = noDataPoint(s)
 			continue
 		}
-		out[i] = Point{V: float64(total), Title: fmt.Sprintf("%s · %d pending (max/%s)", pointTime(s), total, n.One)}
+		out[i] = Point{V: float64(total), Title: fmt.Sprintf("%s · %d pending (max/%s)", PointTime(s), total, n.One)}
 	}
 	return out
 }
@@ -551,14 +551,14 @@ func ratePoint(s *Snapshot, sum float64, contributing, expected int, scale float
 	return Point{
 		V:       v,
 		Partial: contributing < expected,
-		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d %s", pointTime(s), v, unit, contributing, expected, n.Many),
+		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d %s", PointTime(s), v, unit, contributing, expected, n.Many),
 	}
 }
 
 // noDataPoint is the gap of a snapshot that has nothing to chart.
 func noDataPoint(s *Snapshot) Point {
-	return Point{Gap: true, Title: pointTime(s) + " · no data"}
+	return Point{Gap: true, Title: PointTime(s) + " · no data"}
 }
 
-// pointTime is the clock time a point's tooltip starts with.
-func pointTime(s *Snapshot) string { return s.At.Local().Format("15:04:05") }
+// PointTime is the clock time a point's tooltip starts with.
+func PointTime(s *Snapshot) string { return s.At.Local().Format("15:04:05") }

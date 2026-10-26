@@ -1,4 +1,4 @@
-package web
+package fleet
 
 import (
 	"fmt"
@@ -582,19 +582,19 @@ func TestUnreachedIsNotAbsent(t *testing.T) {
 	}
 
 	// The rate point counts u2 as expected, not contributing.
-	p := workerRates([]*Snapshot{s}, "", "w", completedRate, podNoun)[0]
+	p := WorkerRates([]*Snapshot{s}, "", "w", completedRate, podNoun)[0]
 	if p.V != 3 || !p.Partial || p.Gap || p.Title != stamp(s)+" · 3.0/s · 1/2 pods" {
 		t.Errorf("rate point = %+v, want partial 3.0/s from 1/2 pods", p)
 	}
 
 	// Alone, with nothing contributing, the point is a gap.
 	only := snap(atTick(0), notReached("#u2", nil, "w"))
-	if p := workerRates([]*Snapshot{only}, "", "w", completedRate, podNoun)[0]; !p.Gap || p.Title != stamp(only)+" · no data" {
+	if p := WorkerRates([]*Snapshot{only}, "", "w", completedRate, podNoun)[0]; !p.Gap || p.Title != stamp(only)+" · no data" {
 		t.Errorf("rate point of an unreached-only worker = %+v, want a gap", p)
 	}
 	// An unreached name on another unit does not make a lacking unit expected.
 	lacking := snap(atTick(0), okPod("u1", map[string]*Sample{"w": rated(smp("Running", 4, 1, 3, 2), 3, 0)}), okPod("u3", map[string]*Sample{}))
-	if p := workerRates([]*Snapshot{lacking}, "", "w", completedRate, podNoun)[0]; p.Partial || p.Title != stamp(lacking)+" · 3.0/s · 1/1 pods" {
+	if p := WorkerRates([]*Snapshot{lacking}, "", "w", completedRate, podNoun)[0]; p.Partial || p.Title != stamp(lacking)+" · 3.0/s · 1/1 pods" {
 		t.Errorf("rate point with a lacking unit = %+v, want solid 1/1", p)
 	}
 }

@@ -1,10 +1,12 @@
-package web
+package fleet
 
 import (
 	"context"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
 func TestRate(t *testing.T) {
@@ -62,10 +64,10 @@ func TestRateAcrossSleepIsGap(t *testing.T) {
 // suspend, so every time the poller takes (the tick and each sample, direct
 // or behind a balancer) must be wall clock, with no monotonic reading.
 func TestPollTimesAreWallClock(t *testing.T) {
-	_, direct := newFakeVarmq(t, "d", map[string]*fakeWorker{"w": {Status: "Running", Concurrency: 1}})
-	_, srvs := newFakes(t, "a", "b")
-	lb := newRoundRobinLB(t, srvs...)
-	dpool := staticPool(t, direct.URL)
+	_, direct := fleettest.NewVarmq(t, "d", map[string]*fleettest.Worker{"w": {Status: "Running", Concurrency: 1}})
+	_, srvs := fleettest.NewInstances(t, "a", "b")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	dpool := fleettest.StaticPool(t, direct.URL)
 	bpool, btr := lbPoll(t, lb.URL)
 
 	samples := 0

@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 // assets holds the HTML templates and the static files (vendored htmx, CSS).
@@ -18,45 +18,18 @@ import (
 //go:embed templates static
 var assets embed.FS
 
-// Noun is what the pages call one unit of a server: "pod" on Kubernetes,
-// "instance" on every other server. Article goes before One ("a pod", "an
-// instance").
-type Noun struct{ One, Many, Article string }
-
-// Cap is One with a capital first letter.
-func (n Noun) Cap() string { return capitalize(n.One) }
-
-// CapMany is Many with a capital first letter.
-func (n Noun) CapMany() string { return capitalize(n.Many) }
-
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-// NounFor is the noun of srv's units: a Kubernetes server's are pods, any
-// other server's (static endpoints, DNS) are instances, and so are nil's.
-func NounFor(srv *config.Server) Noun {
-	if srv != nil && srv.Kubernetes != nil {
-		return Noun{One: "pod", Many: "pods", Article: "a"}
-	}
-	return Noun{One: "instance", Many: "instances", Article: "an"}
-}
-
 // PodOption is one entry of the pod select. Tip is the hover text of Label.
 type PodOption struct{ Key, Label, Tip string }
 
 // Page is everything a full page needs. Handlers fill it; templates never
 // compute anything the view models do not already carry.
 type Page struct {
-	Title, Server, Pod, SelfURL string // SelfURL = current path + query, used by the poller
-	Noun                        Noun   // what the server's units are called
+	Title, Server, Pod, SelfURL string     // SelfURL = current path + query, used by the poller
+	Noun                        fleet.Noun // what the server's units are called
 	Servers                     []string
 	Pods                        []PodOption
 	IntervalSec                 int
-	Health                      HealthView
+	Health                      fleet.HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
 	// ScopeBalanced: what the page's actions reach holds a unit behind a
@@ -78,9 +51,9 @@ type Page struct {
 	Gone string
 
 	// At most one is set; none while connecting, stale or failed.
-	Dashboard *DashboardView
-	Grid      *GridView
-	Detail    *DetailView
+	Dashboard *fleet.DashboardView
+	Grid      *fleet.GridView
+	Detail    *fleet.DetailView
 }
 
 // Scope names what an action on this page touches: the selected unit's label,
@@ -97,25 +70,19 @@ func (p Page) Scope() string {
 	return p.Pod
 }
 
-// ActionResult is one pod's outcome of an action. Key is the unit's key and
-// Tip the hover text of its label (Pod). Outcome is "ok", "no change" or
-// "failed"; Msg, when set, is shown in parentheses after it. Worker names the
-// worker when one response covers several (bulk).
-type ActionResult struct{ Worker, Pod, Key, Tip, Outcome, Msg string }
-
 // ResultsView is what the "results" template renders: the outcome of every
 // unit an action reached. Noun words the notice for an action that reached none.
 type ResultsView struct {
-	Results []ActionResult
-	Noun    Noun
+	Results []fleet.ActionResult
+	Noun    fleet.Noun
 }
 
 // ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
 // on Server. A down pod's column carries its Err.
 type ConfirmView struct {
 	Action, Server, Pod string
-	Noun                Noun
-	Pods                []PodColumn
+	Noun                fleet.Noun
+	Pods                []fleet.PodColumn
 	Rows                []ConfirmRow
 }
 
@@ -139,7 +106,7 @@ var funcs = template.FuncMap{
 	"noData":        noData,
 	"peak":          peak,
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
-	"oneBalanced":   func() string { return oneBalancedMsg },
+	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",
@@ -194,12 +161,12 @@ func pathOf(uri string) string {
 
 // noData reports whether a series has nothing to show as its current value:
 // it is empty, or its newest point is a gap.
-func noData(pts []Point) bool {
+func noData(pts []fleet.Point) bool {
 	return len(pts) == 0 || pts[len(pts)-1].Gap
 }
 
 // peak is the largest value of the non-gap points (0 if none).
-func peak(pts []Point) float64 {
+func peak(pts []fleet.Point) float64 {
 	var top float64
 	for _, p := range pts {
 		if !p.Gap && p.V > top {
@@ -221,7 +188,7 @@ const sparkPad = 3
 // placed is a point positioned inside a w×h plot.
 type placed struct {
 	x, y float64
-	p    Point
+	p    fleet.Point
 }
 
 // xAt is the x of the i-th of n points: evenly spread over w, newest on the
@@ -243,7 +210,7 @@ func yAt(v, top, h float64) float64 {
 }
 
 // runsOf positions the points of pts in a w×h plot and splits them at gaps.
-func runsOf(pts []Point, w, h float64) [][]placed {
+func runsOf(pts []fleet.Point, w, h float64) [][]placed {
 	top := peak(pts)
 	var runs [][]placed
 	var cur []placed
@@ -275,7 +242,7 @@ func joinRun(run []placed) string {
 
 // polylines returns one "x,y x,y" string per gap-free run of pts in a w×h
 // plot, y scaled to the series maximum.
-func polylines(pts []Point, w, h float64) []string {
+func polylines(pts []fleet.Point, w, h float64) []string {
 	var out []string
 	for _, run := range runsOf(pts, w, h) {
 		out = append(out, joinRun(run))
@@ -303,7 +270,7 @@ type sparkHit struct{ X, W, Title string }
 
 // sparkline lays pts out in a w×h plot: a polyline per run, hollow circles
 // for partial points, dots for isolated ones, and hover targets on top.
-func sparkline(pts []Point, w, h float64) sparkView {
+func sparkline(pts []fleet.Point, w, h float64) sparkView {
 	v := sparkView{
 		ViewBox: fmt.Sprintf("%d %d %s %s", -sparkPad, -sparkPad, num(w+2*sparkPad), num(h+2*sparkPad)),
 		Width:   num(w + 2*sparkPad),

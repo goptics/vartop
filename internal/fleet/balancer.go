@@ -1,4 +1,4 @@
-package web
+package fleet
 
 import (
 	"cmp"
@@ -390,7 +390,7 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[s
 	return units
 }
 
-// tracker remembers, across a session's ticks, which instances answered
+// tracker remembers, across a collector's ticks, which instances answered
 // through which endpoint and when, and the numbers units were given. It
 // belongs to the poller goroutine, which lends it to the balancer pass while
 // it waits for the direct endpoints.
@@ -511,8 +511,8 @@ func (t *tracker) prune(now time.Time) {
 // not seen within the window) follows what it followed last, unless a unit
 // of pods shows that instance; a unit numbered by its key hands its number
 // to the first instance it shows that has none. So a static endpoint keeps
-// its number while its process is down, from the session's start or for
-// longer than the window. Numbers are given in the order the session first
+// its number while its process is down, from the collector's start or for
+// longer than the window. Numbers are given in the order the collector first
 // saw what they follow (new ones of one call in unit key order, so a
 // static list numbers in endpoint order) and never reused. On a Kubernetes
 // server it leaves labels and order as they are.

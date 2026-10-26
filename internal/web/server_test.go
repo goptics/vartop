@@ -18,6 +18,8 @@ import (
 
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
 // testToken is the token of every newTestServer server; no response may carry it.
@@ -58,7 +60,7 @@ func startManagerBuilding(t *testing.T, cfg *config.Config, name string, build f
 	if err := m.Switch(name); err != nil {
 		t.Fatalf("Switch(%s): %v", name, err)
 	}
-	waitUntil(t, 3*time.Second, "first snapshot", func() bool {
+	fleettest.WaitUntil(t, 3*time.Second, "first snapshot", func() bool {
 		s := m.Current()
 		return s != nil && s.History.Latest() != nil
 	})
@@ -87,13 +89,13 @@ func serve(t *testing.T, m *Manager) *httptest.Server {
 }
 
 // twoFakes starts two fake pods: orders runs on both, emails only on a.
-func twoFakes(t *testing.T) (fa, fb *fakeVarmq, aSrv, bSrv *httptest.Server) {
+func twoFakes(t *testing.T) (fa, fb *fleettest.Varmq, aSrv, bSrv *httptest.Server) {
 	t.Helper()
-	fa, aSrv = newFakeVarmq(t, "a", map[string]*fakeWorker{
+	fa, aSrv = fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{
 		"orders": {Status: "Running", Concurrency: 4, Busy: 1},
 		"emails": {Status: "Paused", Concurrency: 2},
 	})
-	fb, bSrv = newFakeVarmq(t, "b", map[string]*fakeWorker{
+	fb, bSrv = fleettest.NewVarmq(t, "b", map[string]*fleettest.Worker{
 		"orders": {Status: "Running", Concurrency: 4, Busy: 2},
 	})
 	return fa, fb, aSrv, bSrv
@@ -350,11 +352,11 @@ func threeFakes(t *testing.T) []*httptest.Server {
 	t.Helper()
 	var fakes []*httptest.Server
 	for i, instance := range []string{"a", "b", "c"} {
-		workers := map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 4, Busy: i}}
+		workers := map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 4, Busy: i}}
 		if i == 0 {
-			workers["emails"] = &fakeWorker{Status: "Paused", Concurrency: 2}
+			workers["emails"] = &fleettest.Worker{Status: "Paused", Concurrency: 2}
 		}
-		_, f := newFakeVarmq(t, instance, workers)
+		_, f := fleettest.NewVarmq(t, instance, workers)
 		fakes = append(fakes, f)
 	}
 	return fakes
@@ -492,17 +494,17 @@ func TestMessagesUseNoun(t *testing.T) {
 // TestGoneUnitBannerUsesNoun: the stale-bookmark banner names the unit by the
 // label of the last snapshot that had it.
 func TestGoneUnitBannerUsesNoun(t *testing.T) {
-	both := snap(atTick(0), PodSnapshot{Key: "#a", Label: "instance-1"}, PodSnapshot{Key: "#b", Label: "instance-2"})
-	left := snap(atTick(1), PodSnapshot{Key: "#a", Label: "instance-1"})
+	both := snap(atTick(0), fleet.PodSnapshot{Key: "#a", Label: "instance-1"}, fleet.PodSnapshot{Key: "#b", Label: "instance-2"})
+	left := snap(atTick(1), fleet.PodSnapshot{Key: "#a", Label: "instance-1"})
 	for _, tc := range []struct {
-		n    Noun
+		n    fleet.Noun
 		want string
 	}{
 		{instanceNoun, "Instance instance-2 is no longer reported — reload"},
 		{podNoun, "Pod instance-2 is no longer reported — reload"},
 	} {
 		p := Page{Pod: "#b", Noun: tc.n}
-		if !podGone(&p, []*Snapshot{both, left}) || p.Banner != tc.want {
+		if !podGone(&p, []*fleet.Snapshot{both, left}) || p.Banner != tc.want {
 			t.Errorf("%s: banner = %q, want %q", tc.n.One, p.Banner, tc.want)
 		}
 	}
@@ -541,7 +543,7 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	if err := m.Switch("multi"); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, 3*time.Second, "first snapshot", func() bool {
+	fleettest.WaitUntil(t, 3*time.Second, "first snapshot", func() bool {
 		s := m.Current()
 		return s != nil && s.History.Latest() != nil
 	})
@@ -554,12 +556,12 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	}
 
 	src.set(bSrv.URL) // a leaves discovery
-	waitUntil(t, 3*time.Second, "a snapshot without a", func() bool { return len(m.Current().History.Latest().Pods) == 1 })
+	fleettest.WaitUntil(t, 3*time.Second, "a snapshot without a", func() bool { return len(m.Current().History.Latest().Pods) == 1 })
 
 	// Labelled from the last snapshot that had it, with a way out to the
 	// merged view of the same page: the picker shows the gone unit chosen,
 	// so picking All instances (merged) there is a change.
-	label := staticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
+	label := fleettest.StaticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
 	merged := map[string]string{dash: "/?server=multi", detail: "/workers/orders?server=multi"}
 	for _, path := range []string{dash, detail} {
 		banner := `<p class="banner">Instance ` + label + ` is no longer reported — reload · <a href="` + merged[path] + `">All instances (merged)</a></p>`
@@ -607,8 +609,8 @@ func TestErroredUnitSaysWhy(t *testing.T) {
 	}}, "multi")
 	srv := serve(t, m)
 	// The first poll ran and the next is an hour away: this snapshot is the latest.
-	down := PodSnapshot{Key: "#x", Via: aSrv.URL, Instance: "x", Label: "instance-3", Balanced: true, Err: "not reached this refresh · last seen 40s ago"}
-	m.Current().History.Append(snap(time.Now(), okPod(aSrv.URL, map[string]*Sample{"orders": smp("Running", 4, 0, 4, 0)}), down))
+	down := fleet.PodSnapshot{Key: "#x", Via: aSrv.URL, Instance: "x", Label: "instance-3", Balanced: true, Err: "not reached this refresh · last seen 40s ago"}
+	m.Current().History.Append(snap(time.Now(), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 0, 4, 0)}), down))
 
 	banner := `<p class="banner">instance-3: not reached this refresh · last seen 40s ago</p>`
 	for _, path := range []string{"/?pod=%23x", "/workers/orders?pod=%23x"} {
@@ -660,7 +662,7 @@ func TestRenderErrorIsEscaped(t *testing.T) {
 }
 
 func TestDetailOfEscapedName(t *testing.T) {
-	_, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"a/b c": {Status: "Running", Concurrency: 1}})
+	_, fSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"a/b c": {Status: "Running", Concurrency: 1}})
 	srv, _ := newTestServer(t, fSrv)
 
 	status, body := fetch(t, srv, "/workers/a%2Fb%20c", false)
@@ -719,7 +721,7 @@ func TestStaleServerParamShowsBanner(t *testing.T) {
 // TestServerIdentityIsConfigKey: pages name servers by configuration key,
 // which config.Server.Name need not equal.
 func TestServerIdentityIsConfigKey(t *testing.T) {
-	_, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 1}})
+	_, fSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 1}})
 	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
 		"prod-eu": {Name: "Production EU", Interval: 1, Endpoints: []string{fSrv.URL}},
 		"dev":     {Name: "dev", Interval: 1, Endpoints: []string{"http://dev.invalid"}},
@@ -747,7 +749,7 @@ func TestGETNeverCallsVarmq(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	srv, m := newTestServer(t, aSrv, bSrv)
 	h := m.Current().History
-	calls := func() int { return len(fa.calls()) + len(fb.calls()) }
+	calls := func() int { return len(fa.Calls()) + len(fb.Calls()) }
 	const perTick = (1 + 2) + (1 + 1) // a list and a get per worker, on each fake
 
 	ticksBefore, callsBefore := len(h.Snapshots()), calls()
@@ -833,7 +835,7 @@ func TestConnectingAndErrorStates(t *testing.T) {
 
 	// The first build fails: its error, and Retry for dev.
 	g.release("dev", errors.New("dial tcp: connection refused"))
-	waitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
+	fleettest.WaitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
 	for _, path := range []string{"/", "/grid", "/workers/orders"} {
 		status, body := fetch(t, srv, path, false)
 		if status != http.StatusOK {
@@ -852,7 +854,7 @@ func TestConnectingAndErrorStates(t *testing.T) {
 
 	// Retry succeeds: dev's (empty) dashboard.
 	activate(t, m, g, "dev")
-	waitUntil(t, 3*time.Second, "dev's first snapshot", func() bool { return m.Current().History.Latest() != nil })
+	fleettest.WaitUntil(t, 3*time.Second, "dev's first snapshot", func() bool { return m.Current().History.Latest() != nil })
 	_, body = fetch(t, srv, "/", false)
 	if strings.Contains(body, "Retry") || strings.Contains(body, "Connecting") || !strings.Contains(body, "No workers") {
 		t.Error("GET / with dev active should show dev's dashboard")
@@ -875,7 +877,7 @@ func TestConnectingAndErrorStates(t *testing.T) {
 	// The switch fails: dev keeps polling; prod's tab shows the error and
 	// retries prod.
 	g.release("prod", errors.New("prod unreachable"))
-	waitUntil(t, 3*time.Second, "prod's build error", func() bool { return m.Err() != nil })
+	fleettest.WaitUntil(t, 3*time.Second, "prod's build error", func() bool { return m.Err() != nil })
 	_, body = fetch(t, srv, "/?server=prod", false)
 	for _, want := range []string{"prod unreachable", "Retry", retry("prod")} {
 		if !strings.Contains(body, want) {
@@ -893,11 +895,11 @@ func TestConnectingAndErrorStates(t *testing.T) {
 // TestFillCarriesNoteAndTips: the header of every page names the balancers
 // behind the server and hovers each picker entry with where it was reached.
 func TestFillCarriesNoteAndTips(t *testing.T) {
-	h := NewHistory(time.Second)
+	h := fleet.NewHistory(time.Second)
 	s := snap(time.Unix(1000, 0),
-		PodSnapshot{Key: "#a", Via: "http://lb:8090/varmq", Instance: "a", Label: "instance-1", Balanced: true},
-		PodSnapshot{Key: "#b", Via: "http://lb:8090/varmq", Instance: "b", Label: "instance-2", Balanced: true},
-		PodSnapshot{Key: "http://c:8090/varmq", Via: "http://c:8090/varmq", Label: "instance-3"},
+		fleet.PodSnapshot{Key: "#a", Via: "http://lb:8090/varmq", Instance: "a", Label: "instance-1", Balanced: true},
+		fleet.PodSnapshot{Key: "#b", Via: "http://lb:8090/varmq", Instance: "b", Label: "instance-2", Balanced: true},
+		fleet.PodSnapshot{Key: "http://c:8090/varmq", Via: "http://c:8090/varmq", Label: "instance-3"},
 	)
 	s.Behind = map[string]int{"http://lb:8090/varmq": 2}
 	h.Append(s)
@@ -921,8 +923,8 @@ func TestFillCarriesNoteAndTips(t *testing.T) {
 // TestControlsBehindBalancer: one balanced unit's pages offer no controls,
 // only the note saying why; a scope holding one offers no restart.
 func TestControlsBehindBalancer(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
 	note := `<p class="note">` + oneUnitCopy + `</p>`
 
@@ -965,16 +967,16 @@ func TestControlsBehindBalancer(t *testing.T) {
 // TestFillMarksBalancedScope: a page's scope holds a balanced unit when it
 // is merged over one, or is one.
 func TestFillMarksBalancedScope(t *testing.T) {
-	h := NewHistory(time.Second)
+	h := fleet.NewHistory(time.Second)
 	h.Append(snap(time.Unix(1000, 0),
-		PodSnapshot{Key: "#a", Via: "http://lb:1", Instance: "a", Balanced: true},
-		PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"},
+		fleet.PodSnapshot{Key: "#a", Via: "http://lb:1", Instance: "a", Balanced: true},
+		fleet.PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"},
 	))
-	plain := NewHistory(time.Second)
-	plain.Append(snap(time.Unix(1000, 0), PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"}))
+	plain := fleet.NewHistory(time.Second)
+	plain.Append(snap(time.Unix(1000, 0), fleet.PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"}))
 
 	for _, tc := range []struct {
-		hist          *History
+		hist          *fleet.History
 		pod           string
 		scope, oneBal bool
 	}{

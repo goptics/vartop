@@ -1,3 +1,6 @@
+// Package web serves vartop's browser UI: the HTTP handlers and templates
+// that render the active server's history, which a fleet.Collector fills,
+// and send worker actions to its units.
 package web
 
 import (
@@ -11,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 // Listen listens on addr, which must be loopback only: its host must be
@@ -152,7 +157,7 @@ func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p.Title = pageTitle("vartop", p.Server)
 	if s != nil {
 		if snaps := fill(&p, s.History); !podGone(&p, snaps) {
-			d := BuildDashboard(snaps, p.Pod, s.History.Interval(), p.Noun)
+			d := fleet.BuildDashboard(snaps, p.Pod, s.History.Interval(), p.Noun)
 			p.Dashboard = &d
 			podDown(&p, snaps) // its banner stands in for "No workers reported yet."
 		}
@@ -164,7 +169,7 @@ func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 	p, s := h.page(r)
 	p.Title = pageTitle(p.Noun.Cap()+" grid", p.Server)
 	if s != nil {
-		g := BuildGrid(latestOf(fill(&p, s.History)))
+		g := fleet.BuildGrid(latestOf(fill(&p, s.History)))
 		p.Grid = &g
 	}
 	p.Pods = nil // the grid shows every pod: no pod select
@@ -185,7 +190,7 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 		snaps := fill(&p, s.History)
 		if podGone(&p, snaps) || podDown(&p, snaps) {
 			// p says why; no pod's data is shown under the gone one's name.
-		} else if d, ok := BuildDetail(snaps, p.Pod, name, s.History.Interval(), p.Noun); ok {
+		} else if d, ok := fleet.BuildDetail(snaps, p.Pod, name, s.History.Interval(), p.Noun); ok {
 			p.Detail = &d
 		} else {
 			where := "any " + p.Noun.One
@@ -222,7 +227,7 @@ func pageTitle(what, server string) string {
 // A poll swaps in only #live, #banner and #status, so to htmx the
 // connecting or error message is sent as the Banner instead.
 func (h *handler) page(r *http.Request) (Page, *Session) {
-	p := Page{Servers: h.m.Servers(), SelfURL: r.URL.RequestURI(), Health: Health(nil)}
+	p := Page{Servers: h.m.Servers(), SelfURL: r.URL.RequestURI(), Health: fleet.Health(nil)}
 	want := r.FormValue("server") // a configuration key, like every server name here
 	// Pending before Active: connect clears pending and swaps the session
 	// under one lock, so this order never sees the old session with nothing
@@ -247,7 +252,7 @@ func (h *handler) page(r *http.Request) (Page, *Session) {
 			u.RawQuery = q.Encode()
 			p.SelfURL = u.RequestURI()
 		}
-		p.Noun = NounFor(cur.Server)
+		p.Noun = fleet.NounFor(cur.Server)
 		return p, cur
 	case want == h.m.Failed():
 		h.failure(&p, want)
@@ -257,7 +262,7 @@ func (h *handler) page(r *http.Request) (Page, *Session) {
 		fill(&p, cur.History)
 	}
 
-	p.Noun = NounFor(h.m.cfg.Servers[p.Server])
+	p.Noun = fleet.NounFor(h.m.cfg.Servers[p.Server])
 	if isHTMX(r) && (p.Connecting != "" || p.Err != "") {
 		p.Banner = cmp.Or(p.Connecting, p.Err)
 		p.Connecting, p.Err = "", ""
@@ -278,21 +283,21 @@ func (h *handler) failure(p *Page, want string) {
 // fill sets p's header, and whether its pod scope holds a balanced unit,
 // from hist and returns hist's snapshots, oldest first. It keeps p.Pod even
 // when the newest snapshot lacks it: see podGone.
-func fill(p *Page, hist *History) []*Snapshot {
+func fill(p *Page, hist *fleet.History) []*fleet.Snapshot {
 	snaps := hist.Snapshots()
 	latest := latestOf(snaps)
 	p.IntervalSec = int(hist.Interval() / time.Second)
-	p.Health = Health(latest)
-	p.Note = BalancerNote(latest)
+	p.Health = fleet.Health(latest)
+	p.Note = fleet.BalancerNote(latest)
 
 	p.Pods, p.Updated = nil, ""
 	if latest != nil {
-		p.Updated = pointTime(latest)
+		p.Updated = fleet.PointTime(latest)
 		for _, ps := range latest.Pods {
 			p.Pods = append(p.Pods, PodOption{Key: ps.Key, Label: ps.Label, Tip: ps.Tip()})
 		}
 	}
-	p.ScopeBalanced = slices.ContainsFunc(podsOf(latest, p.Pod), func(ps PodSnapshot) bool { return ps.Balanced })
+	p.ScopeBalanced = slices.ContainsFunc(fleet.PodsOf(latest, p.Pod), func(ps fleet.PodSnapshot) bool { return ps.Balanced })
 	p.OneBalanced = p.Pod != "" && p.ScopeBalanced
 	return snaps
 }
@@ -304,14 +309,14 @@ func fill(p *Page, hist *History) []*Snapshot {
 // pod's, under this pod's name, would mislead. SelfURL keeps the pod, so
 // every poll says the same, and shows the pod's data again should it come
 // back. With no snapshot yet nothing is known, so nothing is gone.
-func podGone(p *Page, snaps []*Snapshot) bool {
+func podGone(p *Page, snaps []*fleet.Snapshot) bool {
 	latest := latestOf(snaps)
-	if p.Pod == "" || latest == nil || podsOf(latest, p.Pod) != nil {
+	if p.Pod == "" || latest == nil || fleet.PodsOf(latest, p.Pod) != nil {
 		return false
 	}
 	label := p.Pod
 	for _, s := range slices.Backward(snaps) {
-		if seen := podsOf(s, p.Pod); seen != nil {
+		if seen := fleet.PodsOf(s, p.Pod); seen != nil {
 			label = seen[0].Label
 			break
 		}
@@ -324,11 +329,11 @@ func podGone(p *Page, snaps []*Snapshot) bool {
 // podDown reports whether p.Pod names a pod that is errored in the newest
 // of snaps, and then puts its label and error in p's banner: the page has
 // none of its data to show, and the banner says why.
-func podDown(p *Page, snaps []*Snapshot) bool {
+func podDown(p *Page, snaps []*fleet.Snapshot) bool {
 	if p.Pod == "" {
 		return false
 	}
-	pods := podsOf(latestOf(snaps), p.Pod)
+	pods := fleet.PodsOf(latestOf(snaps), p.Pod)
 	if len(pods) == 0 || pods[0].Err == "" {
 		return false
 	}
@@ -337,7 +342,7 @@ func podDown(p *Page, snaps []*Snapshot) bool {
 }
 
 // latestOf is the newest of snaps, nil if there are none.
-func latestOf(snaps []*Snapshot) *Snapshot {
+func latestOf(snaps []*fleet.Snapshot) *fleet.Snapshot {
 	if len(snaps) == 0 {
 		return nil
 	}

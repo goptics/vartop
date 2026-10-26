@@ -1,4 +1,4 @@
-package web
+package fleet
 
 import (
 	"cmp"
@@ -14,57 +14,62 @@ import (
 	"github.com/goptics/vartop/internal/config"
 )
 
-// Session polls one server: a single background goroutine fans out to every
-// pod in the pool each interval and appends a Snapshot to History. That
-// goroutine is the History's only writer, so a session's late tick can never
-// land in another session's history.
-type Session struct {
-	Server   *config.Server
-	Interval time.Duration
-	History  *History
-
-	pool    *api.Pool
-	tracker *tracker        // the poller goroutine's
-	ctx     context.Context // cancelled by Close
-	cancel  context.CancelFunc
-	pollNow chan chan struct{} // the poller closes each received channel once its snapshot is appended
+// Tick is what a collector hands its sink after each poll.
+type Tick struct {
+	Snap *Snapshot
 }
 
-// NewSession starts polling srv through pool, which the session now owns.
-// The first poll starts immediately; each next one starts Interval after the
-// previous one ended.
-func NewSession(srv *config.Server, pool *api.Pool) *Session {
+// Collector polls one server: a single background goroutine fans out to
+// every unit in the pool each interval and hands the Snapshot to the sink.
+// That goroutine is the sink's only caller, so a collector's late tick can
+// never reach another collector's sink.
+type Collector struct {
+	interval time.Duration
+	pool     *api.Pool
+	sink     func(Tick) error
+	tracker  *tracker        // the poller goroutine's
+	ctx      context.Context // cancelled by Close
+	cancel   context.CancelFunc
+	pollNow  chan chan struct{} // the poller closes each received channel once its snapshot is sunk
+	stopped  chan struct{}      // closed when the poller goroutine returns
+}
+
+// NewCollector starts polling srv through pool, which the collector now
+// owns, and hands every snapshot to sink. The first poll starts
+// immediately; each next one starts srv's poll interval after the previous
+// one ended. A sink error ends the polling: the sink is not called again,
+// and the caller, which saw the error, still has to Close the collector.
+func NewCollector(srv *config.Server, pool *api.Pool, sink func(Tick) error) *Collector {
 	ctx, cancel := context.WithCancel(context.Background())
 	interval := srv.PollInterval()
-	s := &Session{
-		Server:   srv,
-		Interval: interval,
-		History:  NewHistory(interval),
+	c := &Collector{
+		interval: interval,
 		pool:     pool,
+		sink:     sink,
 		tracker:  newTracker(interval, srv.Kubernetes != nil),
 		ctx:      ctx,
 		cancel:   cancel,
 		pollNow:  make(chan chan struct{}),
+		stopped:  make(chan struct{}),
 	}
-	go s.run()
-	return s
+	go c.run()
+	return c
 }
 
-// Clients returns the pool's current clients, one per pod endpoint.
-func (s *Session) Clients() []*api.Client { return s.pool.Clients() }
-
 // PollNow asks the poller for an immediate poll and waits for it. It returns
-// true once a snapshot started after the request has been appended, and false
-// if ctx ends or the session is closed first. A request made mid-tick waits
-// for that tick and then gets a fresh one, so the snapshot reflects anything
-// done before the call.
-func (s *Session) PollNow(ctx context.Context) bool {
+// true once a snapshot started after the request has been handed to the
+// sink, and false if ctx ends, the collector is closed or its polling ended
+// first. A request made mid-tick waits for that tick and then gets a fresh
+// one, so the snapshot reflects anything done before the call.
+func (c *Collector) PollNow(ctx context.Context) bool {
 	done := make(chan struct{})
 	select {
-	case s.pollNow <- done:
+	case c.pollNow <- done:
 	case <-ctx.Done():
 		return false
-	case <-s.ctx.Done():
+	case <-c.ctx.Done():
+		return false
+	case <-c.stopped:
 		return false
 	}
 	select {
@@ -72,52 +77,55 @@ func (s *Session) PollNow(ctx context.Context) bool {
 		return true
 	case <-ctx.Done():
 		return false
-	case <-s.ctx.Done():
+	case <-c.ctx.Done():
+		return false
+	case <-c.stopped:
 		return false
 	}
 }
 
 // Close stops polling and closes the pool. It does not wait for the poller:
-// a tick in flight has its requests cancelled.
-func (s *Session) Close() error {
-	s.cancel()
-	return s.pool.Close()
+// a tick in flight has its requests cancelled and reaches no sink.
+func (c *Collector) Close() error {
+	c.cancel()
+	return c.pool.Close()
 }
 
 // run is the poller loop. Ticks run inline and the timer is reset only after
 // a tick ends, so a slow tick pushes the next one back instead of overlapping.
-func (s *Session) run() {
+func (c *Collector) run() {
+	defer close(c.stopped)
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
 		var done chan struct{}
 		select {
-		case <-s.ctx.Done():
+		case <-c.ctx.Done():
 			return
 		case <-timer.C:
-		case done = <-s.pollNow:
+		case done = <-c.pollNow:
 		}
-		if !s.tick() {
+		if !c.tick() {
 			return
 		}
 		if done != nil {
 			close(done)
 		}
-		timer.Reset(s.Interval)
+		timer.Reset(c.interval)
 	}
 }
 
-// tick polls every pod with a deadline of 0.8 × Interval and appends the
-// snapshot. It reports false, appending nothing, once the session is closed.
-func (s *Session) tick() bool {
-	ctx, cancel := context.WithTimeout(s.ctx, s.Interval*8/10)
+// tick polls every unit with a deadline of 0.8 × the interval and hands the
+// snapshot to the sink. It reports false, handing over nothing, once the
+// collector is closed, and false when the sink fails.
+func (c *Collector) tick() bool {
+	ctx, cancel := context.WithTimeout(c.ctx, c.interval*8/10)
 	defer cancel()
-	snap := pollOnce(ctx, s.pool, s.tracker)
-	if s.ctx.Err() != nil {
+	snap := pollOnce(ctx, c.pool, c.tracker)
+	if c.ctx.Err() != nil {
 		return false
 	}
-	s.History.Append(snap)
-	return true
+	return c.sink(Tick{Snap: snap}) == nil
 }
 
 // pollOnce polls every unit of the pool within ctx, tracking instances

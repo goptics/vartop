@@ -15,6 +15,7 @@ import (
 
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
 // recordingSource is a discovery.Source with no endpoints that counts its
@@ -106,9 +107,18 @@ func activate(t *testing.T, m *Manager, g *gatedBuilds, name string) *Session {
 	return m.Current()
 }
 
+// polling reports whether s still polls: whether PollNow gets it a fresh
+// snapshot, which a closed session never does.
+func polling(t *testing.T, s *Session) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return s.PollNow(ctx)
+}
+
 func waitForServer(t *testing.T, m *Manager, name string) {
 	t.Helper()
-	waitUntil(t, 3*time.Second, "server "+name+" active", func() bool {
+	fleettest.WaitUntil(t, 3*time.Second, "server "+name+" active", func() bool {
 		s := m.Current()
 		return s != nil && s.Server.Name == name
 	})
@@ -139,8 +149,8 @@ func TestSwitchSuccessReplacesAndClosesOld(t *testing.T) {
 	g.release("b", nil)
 	waitForServer(t, m, "b")
 
-	waitUntil(t, 3*time.Second, "a's pool closed", func() bool { return g.closes("a") == 1 })
-	if a.ctx.Err() == nil {
+	fleettest.WaitUntil(t, 3*time.Second, "a's pool closed", func() bool { return g.closes("a") == 1 })
+	if polling(t, a) {
 		t.Error("a's session still polling after the switch")
 	}
 	if g.closes("b") != 0 {
@@ -159,7 +169,7 @@ func TestSwitchFailureKeepsOld(t *testing.T) {
 		t.Fatalf("Switch(b): %v", err)
 	}
 	g.release("b", errors.New("b unreachable"))
-	waitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
+	fleettest.WaitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
 
 	if !strings.Contains(m.Err().Error(), "b unreachable") {
 		t.Errorf("Err() = %v, want the build error", m.Err())
@@ -167,7 +177,7 @@ func TestSwitchFailureKeepsOld(t *testing.T) {
 	if m.Current() != a || m.Pending() != "" {
 		t.Errorf("Current() = %v, Pending() = %q; want a's session, nothing pending", m.Current(), m.Pending())
 	}
-	if g.closes("a") != 0 || a.ctx.Err() != nil {
+	if g.closes("a") != 0 || !polling(t, a) {
 		t.Error("a's session was closed by a failed switch; want it still polling")
 	}
 
@@ -188,7 +198,7 @@ func TestFailedNamesLastFailedBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.release("a", errors.New("a unreachable"))
-	waitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
+	fleettest.WaitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
 	if m.Failed() != "a" {
 		t.Errorf("Failed() = %q after a's build failed, want a", m.Failed())
 	}
@@ -236,7 +246,7 @@ func TestSupersededBuildIsClosed(t *testing.T) {
 		g.release("c", nil)
 		waitForServer(t, m, "c")
 		g.release("b", nil)
-		waitUntil(t, 3*time.Second, "b's pool closed", func() bool { return g.closes("b") == 1 })
+		fleettest.WaitUntil(t, 3*time.Second, "b's pool closed", func() bool { return g.closes("b") == 1 })
 
 		if s := m.Current(); s == nil || s.Server.Name != "c" {
 			t.Errorf("Current() = %v, want c", s)
@@ -252,7 +262,7 @@ func TestSupersededBuildIsClosed(t *testing.T) {
 		_ = m.Switch("c")
 
 		g.release("b", nil)
-		waitUntil(t, 3*time.Second, "b's pool closed", func() bool { return g.closes("b") == 1 })
+		fleettest.WaitUntil(t, 3*time.Second, "b's pool closed", func() bool { return g.closes("b") == 1 })
 		if m.Current() != nil || m.Pending() != "c" {
 			t.Errorf("after b: Current() = %v, Pending() = %q; want nil, c", m.Current(), m.Pending())
 		}
@@ -301,7 +311,7 @@ func TestSwitchToActiveOrPendingIsNoop(t *testing.T) {
 	g.release("b", nil)
 	waitForServer(t, m, "b")
 	g.expectNoBuild("b")
-	waitUntil(t, 3*time.Second, "a's pool closed", func() bool { return g.closes("a") == 1 })
+	fleettest.WaitUntil(t, 3*time.Second, "a's pool closed", func() bool { return g.closes("a") == 1 })
 	b := m.Current()
 
 	// Back to the active server while another switch is building: that
@@ -314,7 +324,7 @@ func TestSwitchToActiveOrPendingIsNoop(t *testing.T) {
 		t.Errorf("Pending() = %q, Current() = %v; want nothing pending, b kept", m.Pending(), m.Current())
 	}
 	g.release("a", nil)
-	waitUntil(t, 3*time.Second, "dropped a pool closed", func() bool { return g.closes("a") == 2 })
+	fleettest.WaitUntil(t, 3*time.Second, "dropped a pool closed", func() bool { return g.closes("a") == 2 })
 	if m.Current() != b || g.closes("b") != 0 {
 		t.Errorf("Current() = %v, b closes = %d; want b kept open", m.Current(), g.closes("b"))
 	}
@@ -328,7 +338,7 @@ func TestManagerClose(t *testing.T) {
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if g.closes("a") != 1 || a.ctx.Err() == nil {
+	if g.closes("a") != 1 || polling(t, a) {
 		t.Error("Close left the current session open")
 	}
 	if m.Current() != nil || m.Pending() != "" {
@@ -337,7 +347,7 @@ func TestManagerClose(t *testing.T) {
 
 	// A build finishing after Close is closed and dropped.
 	g.release("b", nil)
-	waitUntil(t, 3*time.Second, "late b pool closed", func() bool { return g.closes("b") == 1 })
+	fleettest.WaitUntil(t, 3*time.Second, "late b pool closed", func() bool { return g.closes("b") == 1 })
 	if m.Current() != nil {
 		t.Errorf("Current() = %v after a late build, want nil", m.Current())
 	}
@@ -407,7 +417,7 @@ func TestConcurrentSwitches(t *testing.T) {
 		}
 		return true
 	}
-	waitUntil(t, 5*time.Second, "one open pool, the current session's", settled)
+	fleettest.WaitUntil(t, 5*time.Second, "one open pool, the current session's", settled)
 
 	time.Sleep(100 * time.Millisecond) // nothing may close twice or reopen
 	if !settled() {
@@ -440,7 +450,7 @@ func TestOldTickNeverReachesNewHistory(t *testing.T) {
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(unblock) // before aSrv.Close, which waits for the handler
-	_, bSrv := newFakeVarmq(t, "b", map[string]*fakeWorker{"wb": {Status: "Running"}})
+	_, bSrv := fleettest.NewVarmq(t, "b", map[string]*fleettest.Worker{"wb": {Status: "Running"}})
 
 	cfg := &config.Config{Servers: map[string]*config.Server{
 		"a": {Name: "a", Interval: 1, Endpoints: []string{aSrv.URL}},
@@ -483,6 +493,37 @@ func TestOldTickNeverReachesNewHistory(t *testing.T) {
 		if !slices.Equal(eps, []string{bSrv.URL}) {
 			t.Errorf("b snapshot %d has pods %v, want only b's %s", i, eps, bSrv.URL)
 		}
+	}
+}
+
+// TestSessionPollsIntoHistory: a session's collector fills its History,
+// and PollNow returns once History holds a fresh snapshot.
+func TestSessionPollsIntoHistory(t *testing.T) {
+	f, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running"}})
+	pool := fleettest.StaticPool(t, srv.URL)
+	s := NewSession(&config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}}, pool)
+	t.Cleanup(func() { _ = s.Close() })
+
+	if s.Interval != time.Second || s.History.Interval() != time.Second {
+		t.Fatalf("Interval = %v, History interval = %v; want 1s", s.Interval, s.History.Interval())
+	}
+	if cs := s.Clients(); len(cs) != 1 || cs[0].PrimaryEndpoint() != srv.URL {
+		t.Fatalf("Clients() = %v, want one client for %s", cs, srv.URL)
+	}
+	fleettest.WaitUntil(t, 3*time.Second, "first snapshot", func() bool { return s.History.Latest() != nil })
+	first := s.History.Latest()
+
+	f.Mu.Lock()
+	f.Workers["orders"].Status = "Paused"
+	f.Mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if !s.PollNow(ctx) {
+		t.Fatal("PollNow = false, want true")
+	}
+	latest := s.History.Latest()
+	if !latest.At.After(first.At) || latest.Pods[0].Workers["orders"].Status != "Paused" {
+		t.Errorf("after PollNow: latest at %v (first at %v), pods %+v; want a newer snapshot showing Paused", latest.At, first.At, latest.Pods)
 	}
 }
 
