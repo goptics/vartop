@@ -398,7 +398,8 @@ type tracker struct {
 	window     time.Duration                   // how long a sighting counts: max(1 minute, 3 × interval)
 	kubernetes bool                            // labels are pod names, not instance-N
 	seen       map[string]map[string]time.Time // endpoint → instance → last answer through it
-	numbers    map[string]int                  // what a unit's number follows (see label) → its instance-N; never forgotten, so never reused
+	numbers    map[string]int                  // what a unit's number follows (see label) → its instance-N; never forgotten, only handed from a key to an instance, so never reused
+	followed   map[string]string               // unit key → what its number followed when last labelled
 	direct     map[string]bool                 // instances shown as a direct unit by the latest tick
 }
 
@@ -409,6 +410,7 @@ func newTracker(interval time.Duration, kubernetes bool) *tracker {
 		kubernetes: kubernetes,
 		seen:       make(map[string]map[string]time.Time),
 		numbers:    make(map[string]int),
+		followed:   make(map[string]string),
 	}
 }
 
@@ -505,7 +507,12 @@ func (t *tracker) prune(now time.Time) {
 // and lists them in that order. A unit's number follows its instance when
 // no other unit of pods has the same one, so it stays with the process
 // while its endpoint turns from direct to balancer or back; otherwise it
-// follows the unit's key. Numbers are given in the order the session first
+// follows the unit's key. A unit without an instance (its process down and
+// not seen within the window) follows what it followed last, unless a unit
+// of pods shows that instance; a unit numbered by its key hands its number
+// to the first instance it shows that has none. So a static endpoint keeps
+// its number while its process is down, from the session's start or for
+// longer than the window. Numbers are given in the order the session first
 // saw what they follow (new ones of one call in unit key order, so a
 // static list numbers in endpoint order) and never reused. On a Kubernetes
 // server it leaves labels and order as they are.
@@ -514,23 +521,40 @@ func (t *tracker) label(pods []PodSnapshot) {
 		return
 	}
 	units := make(map[string]int, len(pods)) // instance → units of pods it answered for
+	held := make(map[string]bool, len(pods)) // "#"+instance of pods' instances, then what down units follow
 	for _, p := range pods {
 		units[p.Instance]++
+		if p.Instance != "" {
+			held["#"+p.Instance] = true
+		}
 	}
 	follows := func(p PodSnapshot) string {
 		if p.Instance != "" && units[p.Instance] == 1 {
 			return "#" + p.Instance // a balanced unit's key; no endpoint URL starts with "#"
 		}
+		if f := t.followed[p.Key]; p.Instance == "" && f != "" && !held[f] {
+			held[f] = true // one unit per number
+			return f
+		}
 		return p.Key
 	}
 	slices.SortFunc(pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
+	number := make(map[string]int, len(pods)) // unit key → its number
 	for _, p := range pods {
-		if f := follows(p); t.numbers[f] == 0 {
-			t.numbers[f] = len(t.numbers) + 1
+		f := follows(p)
+		if t.numbers[f] == 0 {
+			if n := t.numbers[p.Key]; n != 0 && t.followed[p.Key] == p.Key {
+				t.numbers[f] = n // its first instance: the key's number moves to it
+				delete(t.numbers, p.Key)
+			} else {
+				t.numbers[f] = len(t.numbers) + 1
+			}
 		}
+		t.followed[p.Key] = f
+		number[p.Key] = t.numbers[f]
 	}
-	slices.SortFunc(pods, func(a, b PodSnapshot) int { return cmp.Compare(t.numbers[follows(a)], t.numbers[follows(b)]) })
+	slices.SortFunc(pods, func(a, b PodSnapshot) int { return cmp.Compare(number[a.Key], number[b.Key]) })
 	for i := range pods {
-		pods[i].Label = fmt.Sprintf("instance-%d", t.numbers[follows(pods[i])])
+		pods[i].Label = fmt.Sprintf("instance-%d", number[pods[i].Key])
 	}
 }

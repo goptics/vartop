@@ -313,3 +313,10 @@ below. Where this section and the text above disagree, this section wins.
   picker and links the merged view from its banner; one filtered to a unit
   that is down shows the unit's label and error in the banner instead of "No
   workers reported yet." or "Worker not found".
+- **R27, R30, labels of a process that is down.** A unit without an instance
+  (its process down and not seen within the window) keeps the number it had,
+  unless another unit of the snapshot shows that instance; a unit numbered by
+  its key (down since the session started) hands that number to the first
+  instance it shows. So a static endpoint keeps its label and place while its
+  process is down, however long. A process that comes back with a new
+  instance ID is a new process and gets a new number.

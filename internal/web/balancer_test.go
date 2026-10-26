@@ -810,6 +810,131 @@ func TestLabelsNeverReused(t *testing.T) {
 	})
 }
 
+// TestLabelsStayWhileAnInstanceIsDown: a unit keeps its number, and its
+// place in the list, while its process is down and once it is back.
+func TestLabelsStayWhileAnInstanceIsDown(t *testing.T) {
+	// static polls a static server over a, b and c, b down at the session's
+	// start when downAtStart, then up, down, down past the window and up
+	// again, and checks that every tick labels and lists the units in URL
+	// order.
+	static := func(t *testing.T, downAtStart bool) {
+		_, srvs := newFakes(t, "a", "b", "c")
+		b, down := newDownableAddress(t, srvs[1])
+		urls := []string{srvs[0].URL, b.URL, srvs[2].URL}
+		pool, tr := lbPoll(t, urls...)
+		want, order := staticLabels(urls...), slices.Sorted(slices.Values(urls))
+		first := "b"
+		if downAtStart {
+			first = "" // never seen
+		}
+		start := time.Now()
+
+		for _, step := range []struct {
+			at       time.Duration
+			down     bool
+			instance string // of b's unit
+		}{
+			{0, downAtStart, first},
+			{time.Second, false, "b"},
+			{2 * time.Second, true, "b"}, // seen within the window
+			{70 * time.Second, true, ""}, // last seen 69s ago
+			{71 * time.Second, false, "b"},
+		} {
+			down.Store(step.down)
+			s := pollAt(context.Background(), pool, tr, start.Add(step.at))
+
+			if p := podByEndpoint(t, s, b.URL); (p.Err != "") != step.down || p.Instance != step.instance {
+				t.Fatalf("at %v: b = %+v, want down %v as instance %q", step.at, p, step.down, step.instance)
+			}
+			if got := labels(s.Pods); !maps.Equal(got, want) {
+				t.Errorf("at %v: labels = %v, want %v", step.at, got, want)
+			}
+			if keys := unitKeys(s); !slices.Equal(keys, order) {
+				t.Errorf("at %v: units listed %v, want %v", step.at, keys, order)
+			}
+		}
+	}
+	t.Run("static, down at the start", func(t *testing.T) { static(t, true) })
+	t.Run("static, up at the start", func(t *testing.T) { static(t, false) })
+
+	t.Run("behind a balancer, across a missed tick", func(t *testing.T) {
+		_, srvs := newFakes(t, "a", "b", "c")
+		lb := newRoundRobinLB(t, srvs...)
+		pool, tr := lbPoll(t, lb.URL)
+		first := pollUntil(t, pool, tr, 3, "three units", hasKeys("#a", "#b", "#c"))
+
+		srvs[1].Close() // the balancer now answers b's turns with a bare 502
+		s := pollOnce(context.Background(), pool, tr)
+
+		if b := podByEndpoint(t, s, "#b"); b.Err != "not reached this refresh" {
+			t.Fatalf("#b Err = %q, want not reached this refresh", b.Err)
+		}
+		if got, want := labels(s.Pods), labels(first.Pods); !maps.Equal(got, want) {
+			t.Errorf("labels = %v, want %v as before the miss", got, want)
+		}
+		if got, want := unitKeys(s), unitKeys(first); !slices.Equal(got, want) {
+			t.Errorf("units listed %v, want %v as before the miss", got, want)
+		}
+	})
+}
+
+// TestLabelsOfDownUnits: a unit without an instance keeps the number its
+// process had, unless that would give two units one number, and a process
+// that comes back with a new instance ID gets a new number.
+func TestLabelsOfDownUnits(t *testing.T) {
+	type step struct {
+		pods []PodSnapshot
+		want map[string]string // unit key → label
+	}
+	run := func(t *testing.T, steps ...step) {
+		tr := newTracker(time.Second, false)
+		for i, s := range steps {
+			tr.label(s.pods)
+			if got := labels(s.pods); !maps.Equal(got, s.want) {
+				t.Errorf("step %d: labels = %v, want %v", i, got, s.want)
+			}
+		}
+	}
+
+	t.Run("a new process gets a new number", func(t *testing.T) {
+		run(t,
+			step{[]PodSnapshot{{Key: "http://x"}}, map[string]string{"http://x": "instance-1"}},                // down from the start
+			step{[]PodSnapshot{{Key: "http://x", Instance: "b"}}, map[string]string{"http://x": "instance-1"}}, // b takes x's number
+			step{[]PodSnapshot{{Key: "http://x"}}, map[string]string{"http://x": "instance-1"}},                // b down past the window
+			step{[]PodSnapshot{{Key: "http://x", Instance: "b2"}}, map[string]string{"http://x": "instance-2"}},
+			step{[]PodSnapshot{{Key: "http://x", Instance: "b2"}, {Key: "http://y", Instance: "c"}},
+				map[string]string{"http://x": "instance-2", "http://y": "instance-3"}},
+		)
+		// x was down from the start while a answered through a balancer,
+		// then showed a: x's own number is not handed to a's successor.
+		run(t,
+			step{[]PodSnapshot{{Key: "#a", Instance: "a", Balanced: true}, {Key: "http://x"}},
+				map[string]string{"#a": "instance-1", "http://x": "instance-2"}},
+			step{[]PodSnapshot{{Key: "http://x", Instance: "a"}}, map[string]string{"http://x": "instance-1"}},
+			step{[]PodSnapshot{{Key: "http://x", Instance: "a2"}}, map[string]string{"http://x": "instance-3"}},
+		)
+	})
+	t.Run("no two units share a number", func(t *testing.T) {
+		// a's address is down past the window while a answers through a
+		// balancer: the number stays with the process.
+		run(t,
+			step{[]PodSnapshot{{Key: "http://a", Instance: "a"}, {Key: "#b", Instance: "b", Balanced: true}},
+				map[string]string{"#b": "instance-1", "http://a": "instance-2"}},
+			step{[]PodSnapshot{{Key: "http://a"}, {Key: "#a", Instance: "a", Balanced: true}, {Key: "#b", Instance: "b", Balanced: true}},
+				map[string]string{"#a": "instance-2", "#b": "instance-1", "http://a": "instance-3"}},
+			step{[]PodSnapshot{{Key: "http://a"}, {Key: "#b", Instance: "b", Balanced: true}},
+				map[string]string{"#b": "instance-1", "http://a": "instance-3"}},
+		)
+		// b answered at x, then at y while x was out of the pool; both down,
+		// the first in key order keeps b's number.
+		run(t,
+			step{[]PodSnapshot{{Key: "http://x", Instance: "b"}}, map[string]string{"http://x": "instance-1"}},
+			step{[]PodSnapshot{{Key: "http://y", Instance: "b"}}, map[string]string{"http://y": "instance-1"}},
+			step{[]PodSnapshot{{Key: "http://x"}, {Key: "http://y"}}, map[string]string{"http://x": "instance-1", "http://y": "instance-2"}},
+		)
+	})
+}
+
 func TestBalancerEndpointDown(t *testing.T) {
 	// dialErr is the error a list request to the closed endpoint gets.
 	dialErr := func(t *testing.T, endpoint string) string {

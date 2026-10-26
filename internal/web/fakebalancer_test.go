@@ -77,6 +77,29 @@ func newHangingLB(t *testing.T, lb *httptest.Server) (srv *httptest.Server, hang
 	return srv, hang
 }
 
+// newDownableAddress starts an address in front of backend that passes every
+// request on until down is set, then answers each one with a bare 502 (no
+// instance header), like the address of a process that is down. It is
+// closed when the test ends.
+func newDownableAddress(t *testing.T, backend *httptest.Server) (srv *httptest.Server, down *atomic.Bool) {
+	t.Helper()
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	down = new(atomic.Bool)
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, down
+}
+
 // newFakeLB proxies every request to backends[pick(r) % len(backends)],
 // keeping its escaped path. It is closed when the test ends.
 func newFakeLB(t *testing.T, backends []*httptest.Server, pick func(*http.Request) uint64) *httptest.Server {
