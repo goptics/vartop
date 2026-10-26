@@ -1,14 +1,19 @@
 {{define "live_body"}}{{with .Detail}}
 <div class="detail-head">
   <h2>{{.Name}}</h2>
-  <span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>
+  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{end}}
 </div>
-<section class="counters" aria-label="Counters">
+<section class="counters" aria-label="Counters">{{if $.Stale}}
+  <div class="card"><h3>Submitted</h3><p class="big">—</p></div>
+  <div class="card"><h3>Completed</h3><p class="big">—</p></div>
+  <div class="card"><h3>Successful</h3><p class="big">—</p></div>
+  <div class="card failed"><h3>Failed</h3><p class="big">—</p></div>
+  <div class="card"><h3>Success rate</h3><p class="big">—</p></div>{{else}}
   <div class="card"><h3>Submitted</h3><p class="big">{{.Submitted}}</p></div>
   <div class="card"><h3>Completed</h3><p class="big">{{.Completed}}</p></div>
   <div class="card"><h3>Successful</h3><p class="big">{{.Successful}}</p></div>
   <div class="card failed"><h3>Failed</h3><p class="big">{{.Failed}}</p></div>
-  <div class="card"><h3>Success rate</h3><p class="big">{{.SuccessRate}}</p></div>
+  <div class="card"><h3>Success rate</h3><p class="big">{{.SuccessRate}}</p></div>{{end}}
 </section>
 <figure class="chart">
   <figcaption>Completed /s <span class="peak">peak {{printf "%.1f" (peak .Completed1h)}}/s</span></figcaption>
@@ -24,7 +29,7 @@
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
 {{define "live_oob"}}<div id="live" hx-swap-oob="outerHTML">{{template "live_body" .}}</div>{{end}}
 
-{{define "content"}}{{with .Detail}}<p class="back"><a href="{{pageURL "/" $.Server $.Pod}}">← Dashboard</a></p>{{end}}
+{{define "content"}}{{with .Detail}}<p class="back"><a href="{{pageURL "/" $.Server $.Noun.Param $.Pod}}">← Dashboard</a></p>{{end}}
 {{template "live" .}}
 {{with .Detail}}{{$name := pathEscape .Name}}
 {{if $.OneBalanced}}<p class="note">{{oneBalanced}}</p>
@@ -32,20 +37,20 @@
   <h3>Concurrency <span class="sub">per {{$.Noun.One}}, on {{$.Scope}}</span></h3>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
-    <input type="hidden" name="pod" value="{{$.Pod}}">
+    {{template "label_field" $}}
     <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}">
     <span class="sub">1 – {{.ConcurrencyMax}}, applied on release</span>
   </form>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
-    <input type="hidden" name="pod" value="{{$.Pod}}">
+    {{template "label_field" $}}
     <input type="number" name="n" min="1" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}, exact">
     <button type="submit">Set</button>
   </form>
   <h3>Actions <span class="sub">on {{$.Scope}}</span></h3>
   <form class="actions" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
-    <input type="hidden" name="pod" value="{{$.Pod}}">
+    {{template "label_field" $}}
     <button type="button" hx-post="/workers/{{$name}}/actions/pause">Pause</button>
     <button type="button" hx-post="/workers/{{$name}}/actions/resume">Resume</button>
     {{if not $.ScopeBalanced}}<button type="button" class="warn" hx-post="/workers/{{$name}}/actions/restart" hx-confirm="Restart {{.Name}} on {{$.Scope}} ({{$.Server}})?">Restart</button>

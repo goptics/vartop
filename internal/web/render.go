@@ -18,17 +18,22 @@ import (
 //go:embed templates static
 var assets embed.FS
 
-// PodOption is one entry of the pod select. Tip is the hover text of Label.
-type PodOption struct{ Key, Label, Tip string }
+// PodOption is one entry of the unit select. Tip is the hover text of
+// Label.
+type PodOption struct{ Label, Tip string }
 
 // Page is everything a full page needs. Handlers fill it; templates never
 // compute anything the view models do not already carry.
 type Page struct {
-	Title, Server, Pod, SelfURL string     // SelfURL = current path + query, used by the poller
+	// Server is the key of the server the page shows, Pod the label of
+	// the unit it is filtered to ("" for every unit), named in the URL by
+	// Noun.Param. SelfURL is the page's path with its server and unit, as
+	// the poller asks for it.
+	Title, Server, Pod, SelfURL string
 	Noun                        fleet.Noun // what the server's units are called
-	Servers                     []string
+	Servers                     []string   // every configured server, sorted
 	Pods                        []PodOption
-	IntervalSec                 int
+	IntervalSec                 int // the server's poll interval; 0: no poller
 	Health                      fleet.HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
@@ -38,34 +43,36 @@ type Page struct {
 	ScopeBalanced, OneBalanced bool
 
 	// Note is the quiet line about the balancers behind the server (see
-	// BalancerNote). Banner is a notice about what this tab shows: its server
-	// changed, its pod is gone or down, or its worker is not found.
-	// Connecting is the whole "Connecting to {label}…" message. Err is a
-	// failure to show; with no view model set it also offers a Retry form
-	// that posts Server to /server.
-	Note, Banner, Connecting, Err string
+	// BalancerNote). Banner is a notice about what this tab shows: its
+	// server is not configured or failing, its unit is gone, unknown or
+	// down, or its worker is not found. Waiting is the whole "Waiting for
+	// the first snapshot of {server}…" message of a full page (to htmx it
+	// is the Banner). Stale says how old the newest snapshot is, and why:
+	// the page then shows no current value, only history.
+	Note, Banner, Waiting, Stale string
 
-	// Gone is the label of the pod Pod names when the newest snapshot no
-	// longer has it (see podGone): the pod select shows it chosen, and the
-	// banner links to the merged view.
+	// DaemonDown: no daemon collects; the banner offers to start it.
+	// Unconfigured: Server is not in the config; the server select shows
+	// it chosen.
+	DaemonDown, Unconfigured bool
+
+	// Gone is Pod when the newest snapshot has no unit so labelled (see
+	// podGone): the unit select shows it chosen, and the banner links to
+	// the merged view.
 	Gone string
 
-	// At most one is set; none while connecting, stale or failed.
+	// At most one is set; none while waiting or when the server or unit
+	// cannot be shown.
 	Dashboard *fleet.DashboardView
 	Grid      *fleet.GridView
 	Detail    *fleet.DetailView
 }
 
-// Scope names what an action on this page touches: the selected unit's label,
-// or "all pods" ("all instances" off Kubernetes).
+// Scope names what an action on this page touches: the selected unit's
+// label, or "all pods" ("all instances" off Kubernetes).
 func (p Page) Scope() string {
 	if p.Pod == "" {
 		return "all " + p.Noun.Many
-	}
-	for _, o := range p.Pods {
-		if o.Key == p.Pod {
-			return o.Label
-		}
 	}
 	return p.Pod
 }
@@ -78,7 +85,8 @@ type ResultsView struct {
 }
 
 // ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
-// on Server. A down pod's column carries its Err.
+// on Server, scoped to the unit labelled Pod ("" for every unit). A down
+// unit's column carries its Err.
 type ConfirmView struct {
 	Action, Server, Pod string
 	Noun                fleet.Noun
@@ -129,15 +137,16 @@ func parseTemplates() (map[string]*template.Template, error) {
 	return sets, nil
 }
 
-// pageURL is path plus the server and pod the page is bound to; empty ones
-// are left out.
-func pageURL(path, server, pod string) string {
+// pageURL is path plus the server the page is bound to and the label of
+// its unit, under param (the server's Noun.Param); empty ones are left
+// out.
+func pageURL(path, server, param, label string) string {
 	q := url.Values{}
 	if server != "" {
 		q.Set("server", server)
 	}
-	if pod != "" {
-		q.Set("pod", pod)
+	if label != "" {
+		q.Set(param, label)
 	}
 	if len(q) == 0 {
 		return path
@@ -146,8 +155,8 @@ func pageURL(path, server, pod string) string {
 }
 
 // workerURL is the detail page of a worker; the name is path-escaped.
-func workerURL(name, server, pod string) string {
-	return pageURL("/workers/"+url.PathEscape(name), server, pod)
+func workerURL(name, server, param, label string) string {
+	return pageURL("/workers/"+url.PathEscape(name), server, param, label)
 }
 
 // pathOf drops the query from a request URI ("" is the root).

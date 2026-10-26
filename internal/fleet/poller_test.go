@@ -19,16 +19,16 @@ import (
 )
 
 // newTestCollector starts a collector polling the endpoints every second
-// into a History; it is closed when the test ends, before the fakes it polls
+// into a Ring; it is closed when the test ends, before the fakes it polls
 // shut down.
-func newTestCollector(t *testing.T, endpoints ...string) (*Collector, *History) {
+func newTestCollector(t *testing.T, endpoints ...string) (*Collector, *Ring) {
 	t.Helper()
 	srv := &config.Server{Name: "test", Interval: 1, Endpoints: endpoints}
 	pool, err := api.PoolFor(srv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hist := NewHistory(srv.PollInterval())
+	hist := NewRing(srv.PollInterval())
 	c := NewCollector(srv, pool, CollectorInit{}, func(tick Tick) error {
 		hist.Append(tick.Snap)
 		return nil

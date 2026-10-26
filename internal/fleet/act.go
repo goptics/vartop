@@ -32,15 +32,6 @@ const (
 	OneBalancedMsg    = "A load balancer picks which instance answers, so actions here would reach a random one. Use All instances (merged), or list the instances' own addresses in the server config."
 )
 
-// Until a snapshot shows what an endpoint is, it may be a balancer, so
-// nothing is sent to it: WaitingMsg refuses an action before the server's
-// first snapshot, and NotRefreshedMsg is the failure of an endpoint found
-// since the latest one.
-const (
-	WaitingMsg      = "Waiting for the first refresh — try again"
-	NotRefreshedMsg = "not refreshed yet — try again"
-)
-
 // ActionResult is one pod's outcome of an action. Key is the unit's key and
 // Tip the hover text of its label (Pod). Outcome is "ok", "no change" or
 // "failed"; Msg, when set, is shown in parentheses after it. Worker names the
@@ -56,13 +47,12 @@ func (e NoChange) Error() string { return string(e) }
 // ActScope is what an action reaches, as latest shows the server. Clients
 // are sorted by endpoint; units are in latest's order.
 type ActScope struct {
-	Direct      []*api.Client  // the direct units' clients, each sent the action
-	Unrefreshed []*api.Client  // clients latest has no unit for, sent nothing
-	Balanced    []PodSnapshot  // units of instances behind a balancer, reached through balancers
-	Dead        []PodSnapshot  // units of balancer endpoints no instance answered through, sent nothing
-	balancers   []*api.Client  // the balancer endpoints' clients
-	behind      int            // how many instances latest counts behind balancers, in all
-	place       map[string]int // unit key → its index in latest.Pods, the order the pages list units in
+	Direct    []*api.Client  // the direct units' clients, each sent the action
+	Balanced  []PodSnapshot  // units of instances behind a balancer, reached through balancers
+	Dead      []PodSnapshot  // units of balancer endpoints no instance answered through, sent nothing
+	balancers []*api.Client  // the balancer endpoints' clients
+	behind    int            // how many instances latest counts behind balancers, in all
+	place     map[string]int // unit key → its index in latest.Pods, the order the pages list units in
 }
 
 // ViaBalancer reports whether sc holds a unit behind a load balancer.
@@ -81,19 +71,19 @@ func (sc ActScope) Listed(a, b string) int {
 }
 
 // ScopeOf is what an action on pod reaches, as latest shows the server:
-// every unit when pod is "", else the direct unit whose endpoint is pod. An
+// every unit when pod is "", else the unit labelled pod (see PodsOf), when
+// it is a direct unit. clients are the server's (see ClientsFor). An
 // endpoint is a balancer, never a direct unit, when it is a key of
 // latest.Behind or the endpoint a balanced unit was reached through, dead
 // ones included; it is a direct unit only when it is the key of an
-// unbalanced unit of latest. A client that is neither, found since latest,
-// may be a balancer too, so it is unrefreshed. A pod naming a balanced unit
-// or a balancer is refused with OneBalancedMsg: the balancer would pick the
-// instance. n words the error for a pod that is no unit of the server.
+// unbalanced unit of latest; a client that is neither is sent nothing. A
+// pod naming a balanced unit is refused with OneBalancedMsg: the balancer
+// would pick the instance. n words the error for a pod that is no unit of
+// latest.
 func ScopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (ActScope, error) {
 	sc := ActScope{place: make(map[string]int)}
 	balancer := make(map[string]bool) // endpoint → it is a balancer
 	direct := make(map[string]bool)   // endpoint → it is a direct unit
-	one := false                      // pod is a balanced unit
 	if latest != nil {
 		for ep := range latest.Behind {
 			balancer[ep] = true
@@ -105,7 +95,6 @@ func ScopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (ActSc
 				continue
 			}
 			balancer[u.Via] = true
-			one = one || u.Key == pod
 			if u.Instance != "" {
 				sc.Balanced = append(sc.Balanced, u)
 			} else {
@@ -114,19 +103,20 @@ func ScopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (ActSc
 		}
 	}
 	if pod != "" {
-		if one || balancer[pod] {
+		missing := fmt.Errorf("the selected %s is not %s %s of this server; reload", n.One, n.Article, n.One)
+		units := PodsOf(latest, pod)
+		switch {
+		case len(units) == 0:
+			return ActScope{}, missing
+		case units[0].Balanced:
 			return ActScope{}, errors.New(OneBalancedMsg)
 		}
 		for _, c := range clients {
-			switch {
-			case c.PrimaryEndpoint() != pod:
-			case direct[pod]:
-				return ActScope{Direct: []*api.Client{c}}, nil
-			default:
-				return ActScope{Unrefreshed: []*api.Client{c}}, nil
+			if c.PrimaryEndpoint() == units[0].Key {
+				return ActScope{Direct: []*api.Client{c}, place: sc.place}, nil
 			}
 		}
-		return ActScope{}, fmt.Errorf("the selected %s is not %s %s of this server; reload", n.One, n.Article, n.One)
+		return ActScope{}, missing
 	}
 	for _, c := range slices.SortedFunc(slices.Values(clients), func(a, b *api.Client) int {
 		return strings.Compare(a.PrimaryEndpoint(), b.PrimaryEndpoint())
@@ -137,8 +127,6 @@ func ScopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (ActSc
 			sc.behind += latest.Behind[ep]
 		case direct[ep]:
 			sc.Direct = append(sc.Direct, c)
-		default:
-			sc.Unrefreshed = append(sc.Unrefreshed, c)
 		}
 	}
 	return sc, nil
@@ -165,9 +153,8 @@ func ActionSender(action string) Sender {
 // Act sends send's request about each worker of names to every unit of sc
 // and returns, per name, one result per unit, listed as the pages list the
 // units (see ActScope.Listed): the direct units' outcomes, the balanced
-// units' (see reachUnits), the dead units', failed with their error, and
-// the unrefreshed ones', failed with NotRefreshedMsg. Results are labelled
-// from units (see UnitsOf); n words their messages.
+// units' (see reachUnits), and the dead units', failed with their error.
+// Results are labelled from units (see UnitsOf); n words their messages.
 //
 // A send that panics, on whichever goroutine Act fans it out to, is raised
 // again on the caller's goroutine, as a *TickPanic, once every send has
@@ -194,9 +181,6 @@ func Act(ctx context.Context, sc ActScope, units map[string]PodSnapshot, n Noun,
 		}
 		for _, u := range sc.Dead {
 			results[i] = append(results[i], outcome(u.Key, units, n, errors.New(u.Err)))
-		}
-		for _, c := range sc.Unrefreshed {
-			results[i] = append(results[i], outcome(c.PrimaryEndpoint(), units, n, errors.New(NotRefreshedMsg)))
 		}
 		slices.SortStableFunc(results[i], func(a, b ActionResult) int { return sc.Listed(a.Key, b.Key) })
 	}

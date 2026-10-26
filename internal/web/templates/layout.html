@@ -1,4 +1,5 @@
 {{define "server_field"}}<input type="hidden" name="server" value="{{.Server}}">{{end}}
+{{define "label_field"}}<input type="hidden" name="{{.Noun.Param}}" value="{{.Pod}}">{{end}}
 {{define "spark"}}<svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>{{end}}
 {{define "layout"}}<!doctype html>
 <html lang="en">
@@ -6,45 +7,42 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true,"target":"#errors","swapOverride":"innerHTML"}]}'>
-{{if .Connecting}}<meta http-equiv="refresh" content="2">
+{{if .Waiting}}<meta http-equiv="refresh" content="2">
 {{end}}<title>{{or .Title "vartop"}}</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/htmx-2.0.4.min.js" defer></script>
 </head>
 <body id="page">
 <header class="top">
-  <a class="brand" href="{{pageURL "/" .Server .Pod}}">vartop</a>
+  <a class="brand" href="{{pageURL "/" .Server .Noun.Param .Pod}}">vartop</a>
   <nav>
-    <a href="{{pageURL "/" .Server .Pod}}"{{if .Dashboard}} aria-current="page"{{end}}>Dashboard</a>
-    <a href="{{pageURL "/grid" .Server .Pod}}"{{if .Grid}} aria-current="page"{{end}}>{{.Noun.Cap}} grid</a>
+    <a href="{{pageURL "/" .Server .Noun.Param .Pod}}"{{if .Dashboard}} aria-current="page"{{end}}>Dashboard</a>
+    <a href="{{pageURL "/grid" .Server .Noun.Param .Pod}}"{{if .Grid}} aria-current="page"{{end}}>{{.Noun.Cap}} grid</a>
   </nav>
-  {{if .Servers}}<form class="pick" hx-post="/server" hx-trigger="change" hx-sync="#page:replace">
-    {{template "server_field" .}}
-    <label>Server <select name="name">{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+  {{if .Servers}}<form class="pick" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
+    <label>Server <select name="server">{{if .Unconfigured}}<option value="{{.Server}}" selected disabled>{{.Server}}</option>{{end}}{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
   </form>{{end}}
   {{if .Pods}}<form class="pick" hx-get="{{pathOf .SelfURL}}" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
     {{template "server_field" .}}
-    <label>{{.Noun.Cap}} <select name="pod"><option value=""{{if not .Pod}} selected{{end}}>All {{.Noun.Many}} (merged)</option>{{range .Pods}}<option value="{{.Key}}"{{if eq .Key $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}{{with .Gone}}<option value="{{$.Pod}}" selected disabled>{{.}}</option>{{end}}</select></label>
+    <label>{{.Noun.Cap}} <select name="{{.Noun.Param}}"><option value=""{{if not .Pod}} selected{{end}}>All {{.Noun.Many}} (merged)</option>{{range .Pods}}<option value="{{.Label}}"{{if eq .Label $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}{{with .Gone}}<option value="{{.}}" selected disabled>{{.}}</option>{{end}}</select></label>
   </form>{{end}}
 </header>
-<div id="status">{{if not .Connecting}}
+<div id="status">{{if not .Waiting}}
   <span class="health" title="healthy / total {{.Noun.Many}}">{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}} {{.Noun.Many}}</span>
   {{if gt .IntervalSec 0}}<span class="interval">refresh every {{.IntervalSec}}s</span>{{end}}
-  {{with .Updated}}<span class="updated">updated {{.}}</span>{{end}}
+  {{with .Updated}}<span class="updated{{if $.Stale}} stale{{end}}">updated {{.}}</span>{{end}}
   {{if .Note}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}
 </div>
-<div id="errors" role="alert">{{if .Err}}<p class="err">{{.Err}}</p>{{end}}</div>
-<div id="banner" role="status">{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}</div>
-<main>
-{{if .Connecting}}<p class="connecting" role="status">{{.Connecting}}</p>{{end}}
-{{if and .Err (not .Dashboard) (not .Grid) (not .Detail)}}<form class="retry" hx-post="/server" hx-sync="#page:replace">
+<div id="errors" role="alert"></div>
+<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}{{if .DaemonDown}}<form class="start" hx-post="/daemon/start" hx-target="body" hx-sync="#page:replace">
   {{template "server_field" .}}
-  <input type="hidden" name="name" value="{{.Server}}">
-  <button type="submit">Retry</button>
-</form>{{end}}
+  <button type="submit">Start collector</button>
+</form>{{end}}</div>
+<main>
+{{if .Waiting}}<p class="waiting" role="status">{{.Waiting}}</p>{{end}}
 {{template "content" .}}
 </main>
-{{if and (gt .IntervalSec 0) (not .Connecting)}}<div id="poller" hidden hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="#live" hx-swap="outerHTML" hx-sync="#page:drop"></div>{{end}}
+{{if and (gt .IntervalSec 0) (not .Waiting)}}<div id="poller" hidden hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="#live" hx-swap="outerHTML" hx-sync="#page:drop"></div>{{end}}
 </body>
 </html>
 {{end}}

@@ -65,11 +65,7 @@ func (f *Feed) Sync() error {
 func (f *Feed) sync() error {
 	fi, err := os.Stat(f.path)
 	if errors.Is(err, fs.ErrNotExist) || err == nil && fi.Size() == 0 {
-		// None, or one the daemon has only just created: nothing to show yet.
-		f.close()
-		if f.Latest() != nil {
-			f.ring.Store(fleet.NewRing(f.interval))
-		}
+		f.none()
 		return nil
 	}
 	if err != nil {
@@ -80,6 +76,10 @@ func (f *Feed) sync() error {
 	}
 	if f.db == nil {
 		db, err := OpenServer(f.dataDir, f.key, false)
+		if errors.Is(err, fs.ErrNotExist) {
+			f.none() // gone since, or not set up yet
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -116,6 +116,15 @@ func (f *Feed) sync() error {
 	f.ring.Store(ring)
 	f.loaded, f.meta, f.cursor = true, m, last
 	return nil
+}
+
+// none empties the feed of a server with no file, or one the daemon has
+// only just created: nothing to show yet.
+func (f *Feed) none() {
+	f.close()
+	if f.Latest() != nil {
+		f.ring.Store(fleet.NewRing(f.interval))
+	}
 }
 
 // close closes the file, if open; the snapshots held stay.

@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -189,6 +191,44 @@ func TestFeedWaitsForEmptyFile(t *testing.T) {
 	sync1(t, f)
 	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{1}) {
 		t.Errorf("feed once the file is written: %v, want 1", got)
+	}
+}
+
+// TestFeedWaitsForFileBeingSetUp: a file the daemon is creating is a
+// database before it has its tables — its first connection writes the
+// header — and a reader that opens it then finds nothing yet, not an
+// error. Nor does the daemon's status.
+func TestFeedWaitsForFileBeingSetUp(t *testing.T) {
+	dir := t.TempDir()
+	path := PathFor(dir, "prod")
+	if _, err := prepareFile(path); err != nil {
+		t.Fatal(err)
+	}
+	db := openDB(path, true, "")
+	if _, err := db.Exec(`PRAGMA user_version`); err != nil { // connects: the WAL header is written
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+		t.Fatalf("file being set up: %v, size %d; want a header", err, fi.Size())
+	}
+
+	f := newFeed(t, dir, "prod")
+	for range 2 {
+		sync1(t, f)
+	}
+	if len(f.Snapshots()) != 0 {
+		t.Errorf("feed of a file being set up: %d snapshots, want none", len(f.Snapshots()))
+	}
+	if _, err := OpenServer(dir, "prod", false); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("OpenServer of a file being set up = %v, want an error wrapping fs.ErrNotExist", err)
+	}
+
+	_, token := claimed(t, dir)
+	appendAll(t, newWriter(t, dir, "prod"), token, tick(base, 1))
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{1}) {
+		t.Errorf("feed once the file is set up: %v, want 1", got)
 	}
 }
 

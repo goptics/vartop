@@ -176,26 +176,6 @@ func (r *Ring) Latest() *Snapshot {
 	return r.ring[(r.next-1+len(r.ring))%len(r.ring)]
 }
 
-// History is a Ring that rates what it stores, the web's in-memory history.
-// It is safe for one writer and many readers.
-type History struct {
-	*Ring
-	rater *Rater // the writer's
-}
-
-// NewHistory returns an empty history for a server polled every interval;
-// see NewRing.
-func NewHistory(interval time.Duration) *History {
-	return &History{Ring: NewRing(interval), rater: NewRater(interval)}
-}
-
-// Append rates s (see Rater.Rate), then publishes it (see Ring.Append). s
-// must not be modified afterwards.
-func (h *History) Append(s *Snapshot) {
-	h.rater.Rate(s)
-	h.Ring.Append(s)
-}
-
 // early reports whether cur came under half an interval after prev, which
 // has a rate to repeat, from the same instance with no counter gone back.
 // A restart or another instance is never early: rate makes it a gap.

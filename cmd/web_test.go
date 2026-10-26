@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/daemon"
+	"github.com/goptics/vartop/internal/store"
+	"github.com/goptics/vartop/internal/web"
 )
 
 // fakeOrdersVarmq is a varmq pod running one worker, "orders".
@@ -40,22 +43,60 @@ func fakeOrdersVarmq(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// startServeWeb runs serveWeb on a free loopback port in the background. The
-// returned channel yields its result; opened yields each URL passed to open.
-// Cancel the context to stop it.
+// collectingSource is the web UI's source over a temporary data dir, with
+// cfg its config and a daemon collecting it in-process until the test
+// ends, before the fakes it polls shut down. Start starts nothing.
+func collectingSource(t *testing.T, cfg *config.Config) web.Source {
+	t.Helper()
+	dataDir := isolate(t)
+	ctl, err := store.OpenControl(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctl.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = daemon.Run(ctx, daemon.Options{
+			DataDir: dataDir,
+			Config:  func() (*config.Config, string, error) { return cfg, "", nil },
+			Lease:   store.Lease{PID: os.Getpid(), Build: "test"},
+		})
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	return web.Source{
+		DataDir: dataDir,
+		Config:  func() (*config.Config, error) { return cfg, nil },
+		Control: ctl,
+		Start:   func() error { return nil },
+	}
+}
+
+// startServeWeb runs serveWeb over a daemon collecting cfg (see
+// collectingSource) on a free loopback port in the background. The
+// returned channel yields its result; opened yields each URL passed to
+// open. Cancel the context to stop it.
 func startServeWeb(t *testing.T, cfg *config.Config, key string, out io.Writer, openErr error) (cancel context.CancelFunc, opened <-chan string, result <-chan error) {
 	t.Helper()
+	src := collectingSource(t, cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	urls := make(chan string, 1)
 	res := make(chan error, 1)
 	go func() {
-		res <- serveWeb(ctx, cfg, key, "127.0.0.1:0", out, func(u string) error {
+		res <- serveWeb(ctx, src, key, "127.0.0.1:0", out, func(u string) error {
 			urls <- u
 			return openErr
 		})
 	}()
 	return cancel, urls, res
+}
+
+// configSource is a source whose config is cfg, over no store: for a
+// serveWeb that fails before it serves.
+func configSource(cfg *config.Config) web.Source {
+	return web.Source{Config: func() (*config.Config, error) { return cfg, nil }}
 }
 
 // waitResult returns serveWeb's result, failing the test if it takes over 6s.
@@ -173,7 +214,10 @@ func TestServeWebServesAndShutsDown(t *testing.T) {
 	cancel, opened, result := startServeWeb(t, cfg, "prod", &out, nil)
 
 	url := waitURL(t, opened, result)
-	getUntil(t, url+"/", "orders") // the first snapshot is async
+	if !strings.HasSuffix(url, "/?server=prod") {
+		t.Errorf("opened %q, want prod's dashboard", url)
+	}
+	getUntil(t, url, "orders") // the daemon's first snapshot is async
 	cancel()
 
 	if err := waitResult(t, result); err != nil {
@@ -183,7 +227,7 @@ func TestServeWebServesAndShutsDown(t *testing.T) {
 	if want := "vartop web: " + url; !strings.Contains(out.String(), want) || !strings.HasPrefix(url, "http://127.0.0.1:") {
 		t.Fatalf("out = %q, want it to announce %q (a http://127.0.0.1: URL)", out.String(), want)
 	}
-	if _, status := httpGet(url + "/"); status != 0 {
+	if _, status := httpGet(url); status != 0 {
 		t.Fatalf("server still answering after shutdown (status %d)", status)
 	}
 }
@@ -195,7 +239,9 @@ func TestServeWebOpenFailureIsNotFatal(t *testing.T) {
 		Servers:       map[string]*config.Server{"prod": {Name: "prod", Endpoints: []string{fake.URL}}},
 	}
 	var out bytes.Buffer
-	cancel, opened, result := startServeWeb(t, cfg, "prod", &out, errors.New("no xdg-open"))
+	// No server named: the URL is the server's root, which shows the
+	// default server.
+	cancel, opened, result := startServeWeb(t, cfg, "", &out, errors.New("no xdg-open"))
 
 	url := waitURL(t, opened, result)
 	getUntil(t, url+"/", "orders")
@@ -216,7 +262,7 @@ func TestServeWebRejectsNonLoopback(t *testing.T) {
 	}
 	opened := false
 	var out bytes.Buffer
-	err := serveWeb(context.Background(), cfg, "prod", "0.0.0.0:7070", &out, func(string) error {
+	err := serveWeb(context.Background(), configSource(cfg), "prod", "0.0.0.0:7070", &out, func(string) error {
 		opened = true
 		return nil
 	})
@@ -234,7 +280,7 @@ func TestServeWebUnknownServer(t *testing.T) {
 		Servers:       map[string]*config.Server{"prod": {Name: "prod", Endpoints: []string{"http://pod:8080/varmq"}}},
 	}
 	opened := false
-	err := serveWeb(context.Background(), cfg, "nope", "127.0.0.1:0", io.Discard, func(string) error {
+	err := serveWeb(context.Background(), configSource(cfg), "nope", "127.0.0.1:0", io.Discard, func(string) error {
 		opened = true
 		return nil
 	})
@@ -242,6 +288,6 @@ func TestServeWebUnknownServer(t *testing.T) {
 		t.Fatalf("serveWeb() error = %v, want a not-found error naming \"nope\"", err)
 	}
 	if opened {
-		t.Fatal("open was called although no server was connected")
+		t.Fatal("open was called for a server not configured")
 	}
 }

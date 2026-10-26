@@ -377,14 +377,20 @@ func installService(o ensureOptions) (store.Lease, error) {
 // opens. A UI works without it, so a failure is printed to w, not
 // returned.
 func startCollecting(w io.Writer) {
-	o, closeCtl, err := localDaemon()
-	if err == nil {
-		err = ensureDaemon(o)
-		closeCtl()
-	}
-	if err != nil {
+	if err := ensureLocalDaemon(); err != nil {
 		fmt.Fprintln(w, err)
 	}
+}
+
+// ensureLocalDaemon is ensureDaemon over this vartop's daemon (see
+// localDaemon): what a UI starts the daemon with.
+func ensureLocalDaemon() error {
+	o, closeCtl, err := localDaemon()
+	if err != nil {
+		return err
+	}
+	defer closeCtl()
+	return ensureDaemon(o)
 }
 
 // offerLoginService asks, once onboarding saved the first config, whether

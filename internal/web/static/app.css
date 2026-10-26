@@ -74,8 +74,9 @@ button.danger { color: var(--bad); }
 #errors:empty, #banner:empty { display: none; }
 .err { color: var(--bad); margin: 8px 0; overflow-wrap: anywhere; }
 .banner { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--warn); background: var(--panel); color: var(--warn); font-weight: 600; }
-.connecting { padding: 24px 0; color: var(--accent); font-size: 1.1rem; }
-.retry { margin: 12px 0; }
+.waiting { padding: 24px 0; color: var(--accent); font-size: 1.1rem; }
+.start { margin: 8px 0; }
+.updated.stale { color: var(--warn); }
 
 /* cards */
 .kpis, .counters {

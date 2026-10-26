@@ -124,3 +124,34 @@ func TestClientsFor(t *testing.T) {
 		t.Errorf("ClientsFor(nil) = %d clients, want none", len(c))
 	}
 }
+
+// TestScopeOfByLabel: an action on one unit names it by its label; it
+// reaches a direct unit's own client, refuses a balanced one, and a label
+// latest lacks.
+func TestScopeOfByLabel(t *testing.T) {
+	latest := &Snapshot{
+		Pods: []PodSnapshot{
+			{Key: "http://a", Via: "http://a", Label: "instance-1"},
+			{Key: "#b", Via: "http://lb", Instance: "b", Label: "instance-2", Balanced: true},
+		},
+		Behind: map[string]int{"http://lb": 1},
+	}
+	clients := ClientsFor(latest, "")
+
+	sc, err := ScopeOf(clients, latest, "instance-1", instanceNoun)
+	if err != nil || len(sc.Direct) != 1 || sc.Direct[0].PrimaryEndpoint() != "http://a" || sc.ViaBalancer() {
+		t.Errorf("ScopeOf(instance-1) = %+v, %v; want a's client alone", sc, err)
+	}
+	if _, err := ScopeOf(clients, latest, "instance-2", instanceNoun); err == nil || err.Error() != OneBalancedMsg {
+		t.Errorf("ScopeOf(a balanced unit) error = %v, want the one-unit refusal", err)
+	}
+	for _, label := range []string{"instance-9", "http://a", "#b"} {
+		if _, err := ScopeOf(clients, latest, label, instanceNoun); err == nil || !strings.Contains(err.Error(), "is not an instance of this server") {
+			t.Errorf("ScopeOf(%q) error = %v, want not an instance: units are named by label", label, err)
+		}
+	}
+	sc, err = ScopeOf(clients, latest, "", instanceNoun)
+	if err != nil || len(sc.Direct) != 1 || len(sc.Balanced) != 1 || len(sc.balancers) != 1 {
+		t.Errorf("ScopeOf(merged) = %+v, %v; want a direct, b balanced through lb", sc, err)
+	}
+}

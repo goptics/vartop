@@ -98,7 +98,7 @@ func TestPollTimesAreWallClock(t *testing.T) {
 }
 
 func TestHistoryCapacityAndRollOff(t *testing.T) {
-	h := NewHistory(time.Minute) // 60 slots
+	h := newTestHistory(time.Minute) // 60 slots
 	for i := range 70 {
 		h.Append(&Snapshot{At: time.Unix(int64(i*60), 0)})
 	}
@@ -109,7 +109,7 @@ func TestHistoryCapacityAndRollOff(t *testing.T) {
 }
 
 func TestHistoryEmptyAndInterval(t *testing.T) {
-	h := NewHistory(7 * time.Second)
+	h := newTestHistory(7 * time.Second)
 	if h.Latest() != nil {
 		t.Errorf("Latest on empty history = %v, want nil", h.Latest())
 	}
@@ -122,7 +122,7 @@ func TestHistoryEmptyAndInterval(t *testing.T) {
 }
 
 func TestHistoryCapacityRoundsUp(t *testing.T) {
-	h := NewHistory(7 * time.Second) // ceil(3600/7) = 515 slots
+	h := newTestHistory(7 * time.Second) // ceil(3600/7) = 515 slots
 	for i := range 600 {
 		h.Append(&Snapshot{At: time.Unix(int64(i*7), 0)})
 	}
@@ -132,7 +132,7 @@ func TestHistoryCapacityRoundsUp(t *testing.T) {
 }
 
 func TestSnapshotsReturnsCopy(t *testing.T) {
-	h := NewHistory(time.Minute)
+	h := newTestHistory(time.Minute)
 	h.Append(&Snapshot{At: time.Unix(1, 0)})
 	h.Append(&Snapshot{At: time.Unix(2, 0)})
 	got := h.Snapshots()
@@ -146,7 +146,7 @@ func TestAppendFillsRatesAcrossSnapshots(t *testing.T) {
 	iv := 5 * time.Second
 	t0 := time.Unix(1000, 0)
 	t1 := t0.Add(iv)
-	h := NewHistory(iv)
+	h := newTestHistory(iv)
 
 	sample := func(name string, at time.Time, completed, failed uint64) *Sample {
 		s := &Sample{At: at}
@@ -218,7 +218,7 @@ func TestAppendCarriesRateOverEarlyPoll(t *testing.T) {
 		s.Metrics.Completed, s.Metrics.Failed = completed, failed
 		return s
 	}
-	appendTo := func(h *History, samples ...*Sample) {
+	appendTo := func(h *testHistory, samples ...*Sample) {
 		for _, s := range samples {
 			h.Append(&Snapshot{At: s.At, Pods: []PodSnapshot{{Key: "p", Workers: map[string]*Sample{"w": s}}}})
 		}
@@ -228,7 +228,7 @@ func TestAppendCarriesRateOverEarlyPoll(t *testing.T) {
 	s1 := sample(5*time.Second, 150, 5) // 10/s, 1/s
 	early := sample(5008*time.Millisecond, 151, 5)
 	s2 := sample(10*time.Second, 250, 15) // against s1: 20/s, 2/s
-	appendTo(NewHistory(iv), s0, s1, early, s2)
+	appendTo(newTestHistory(iv), s0, s1, early, s2)
 	for _, c := range []struct {
 		name         string
 		s            *Sample
@@ -242,14 +242,14 @@ func TestAppendCarriesRateOverEarlyPoll(t *testing.T) {
 
 	// With no rate to repeat, an early poll is still a gap.
 	first, soon := sample(0, 100, 0), sample(8*time.Millisecond, 101, 0)
-	appendTo(NewHistory(iv), first, soon)
+	appendTo(newTestHistory(iv), first, soon)
 	if soon.RateOK {
 		t.Errorf("early poll after an unrated sample has RateOK (completed=%v)", soon.CompletedRate)
 	}
 	// So is one whose counter went back (a restart), which becomes the base:
 	// rated against r1 instead, r2's counter would be back too, a gap.
 	r0, r1, reset, r2 := sample(0, 100, 0), sample(5*time.Second, 150, 0), sample(5008*time.Millisecond, 2, 0), sample(10*time.Second, 52, 0)
-	appendTo(NewHistory(iv), r0, r1, reset, r2)
+	appendTo(newTestHistory(iv), r0, r1, reset, r2)
 	if reset.RateOK || !r2.RateOK {
 		t.Errorf("reset: RateOK=%v, next: RateOK=%v; want a gap, then a rate against the reset", reset.RateOK, r2.RateOK)
 	}
@@ -259,7 +259,7 @@ func TestHistoryConcurrentAppendAndRead(t *testing.T) {
 	const appends = 1000
 	iv := 5 * time.Second
 	t0 := time.Unix(1000, 0)
-	h := NewHistory(iv)
+	h := newTestHistory(iv)
 
 	var wg sync.WaitGroup
 	done := make(chan struct{})
@@ -334,7 +334,7 @@ func TestHistoryConcurrentAppendAndRead(t *testing.T) {
 // each one's own.
 func TestAppendKeysRatesByUnitKey(t *testing.T) {
 	iv := 5 * time.Second
-	h := NewHistory(iv)
+	h := newTestHistory(iv)
 	t0 := time.Unix(1000, 0)
 	unit := func(key string, at time.Time, completed uint64) PodSnapshot {
 		sm := &Sample{At: at}
@@ -405,26 +405,6 @@ func rates(snaps []*Snapshot) []string {
 	return out
 }
 
-// TestRaterMatchesHistory: rating with a Rater gives every sample the rates
-// History.Append gives it.
-func TestRaterMatchesHistory(t *testing.T) {
-	iv := 5 * time.Second
-	viaHistory, viaRater := rateRun(), rateRun()
-	h, r := NewHistory(iv), NewRater(iv)
-	for i := range viaHistory {
-		h.Append(viaHistory[i])
-		r.Rate(viaRater[i])
-	}
-
-	want, got := rates(viaHistory), rates(viaRater)
-	if !slices.Equal(got, want) {
-		t.Errorf("Rater rates:\n%s\nwant History's:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
-	}
-	if !slices.ContainsFunc(want, func(s string) bool { return strings.Contains(s, "true") }) {
-		t.Error("no sample of the run got a rate: the run tests nothing")
-	}
-}
-
 // TestRaterSeed: a rater seeded with a snapshot rated before (as a restart
 // seeds it with the latest stored one) rates the next snapshot as a rater
 // that saw every snapshot does, early polls included.
@@ -475,4 +455,21 @@ func TestRingStoresWithoutRating(t *testing.T) {
 	if ring.Latest() != run[len(run)-1] || ring.Interval() != iv {
 		t.Errorf("Latest = %p, Interval = %v; want the last appended and %v", ring.Latest(), ring.Interval(), iv)
 	}
+}
+
+// testHistory is a Ring that rates what it stores, as a collector rates
+// each snapshot before its sink keeps it.
+type testHistory struct {
+	*Ring
+	rater *Rater
+}
+
+func newTestHistory(interval time.Duration) *testHistory {
+	return &testHistory{Ring: NewRing(interval), rater: NewRater(interval)}
+}
+
+// Append rates s, then publishes it.
+func (h *testHistory) Append(s *Snapshot) {
+	h.rater.Rate(s)
+	h.Ring.Append(s)
 }

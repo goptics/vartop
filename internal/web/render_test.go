@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/goptics/vartop/internal/fleet"
 )
@@ -19,15 +20,14 @@ var (
 )
 
 func TestPageScope(t *testing.T) {
-	opts := []PodOption{{Key: "#a", Label: "instance-1"}, {Key: "#b", Label: "instance-2"}}
 	for _, tc := range []struct {
 		p    Page
 		want string
 	}{
 		{Page{Noun: podNoun}, "all pods"},
 		{Page{Noun: instanceNoun}, "all instances"},
-		{Page{Noun: instanceNoun, Pod: "#b", Pods: opts}, "instance-2"},
-		{Page{Noun: instanceNoun, Pod: "#gone", Pods: opts}, "#gone"},
+		{Page{Noun: instanceNoun, Pod: "instance-2"}, "instance-2"},
+		{Page{Noun: podNoun, Pod: "web-0"}, "web-0"},
 	} {
 		if got := tc.p.Scope(); got != tc.want {
 			t.Errorf("Scope() of %+v = %q, want %q", tc.p, got, tc.want)
@@ -150,7 +150,7 @@ func dashboardPage() Page {
 		Title: "vartop", Server: "dev", SelfURL: "/?server=dev", IntervalSec: 5,
 		Noun:    podNoun,
 		Servers: []string{"dev", "prod"},
-		Pods:    []PodOption{{Key: "http://a:3000", Label: "a"}, {Key: "http://b:3000", Label: "b"}},
+		Pods:    []PodOption{{Label: "a"}, {Label: "b"}},
 		Health:  fleet.HealthView{Healthy: 2, Total: 2, Dot: "●"},
 		Dashboard: &fleet.DashboardView{
 			KPIs: fleet.KPIView{
@@ -213,7 +213,8 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 		"title=\"a: Running\nb: Running\"",
 		`hx-post="/bulk/pause"`,
 		`hx-post="/bulk/resume"`,
-		`hx-post="/server"`,
+		`<form class="pick" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">`,
+		`<select name="server">`,
 		"All pods (merged)",
 	} {
 		if !strings.Contains(body, want) {
@@ -281,8 +282,9 @@ func TestEveryFormCarriesServer(t *testing.T) {
 		}
 		for i, f := range forms {
 			f, _, _ = strings.Cut(f, "</form>")
-			if !strings.Contains(f, `<input type="hidden" name="server" value="dev">`) {
-				t.Errorf("%s: form %d lacks hidden server:\n%s", set, i, f)
+			// The server picker's select is the server.
+			if !strings.Contains(f, `<input type="hidden" name="server" value="dev">`) && !strings.Contains(f, `<select name="server">`) {
+				t.Errorf("%s: form %d lacks the server:\n%s", set, i, f)
 			}
 		}
 	}
@@ -308,43 +310,38 @@ func TestEmptyPagesRender(t *testing.T) {
 			t.Error("empty grid has no empty-state copy")
 		}
 	})
-	t.Run("connecting", func(t *testing.T) {
-		body := run(t, "dashboard", "layout", Page{Title: "vartop", Connecting: "Connecting to dev…", SelfURL: "/"})
-		if !strings.Contains(body, "Connecting to dev…") {
-			t.Error("connecting copy missing")
-		}
-		if strings.Contains(body, "every 0s") {
-			t.Error("poller with a zero interval")
+	t.Run("waiting", func(t *testing.T) {
+		body := run(t, "dashboard", "layout", Page{Title: "vartop", Server: "dev", Waiting: "Waiting for the first snapshot of dev…", SelfURL: "/?server=dev", IntervalSec: 5})
+		if !strings.Contains(body, `<p class="waiting" role="status">Waiting for the first snapshot of dev…</p>`) {
+			t.Error("waiting copy missing")
 		}
 		if !strings.Contains(body, `<meta http-equiv="refresh" content="2">`) {
-			t.Error("connecting page does not reload itself")
+			t.Error("waiting page does not reload itself")
 		}
 		if strings.Contains(body, `hx-select="#live"`) {
-			t.Error("connecting page polls #live only, so the header would never update")
+			t.Error("waiting page polls #live only, so the header would never update")
 		}
 	})
-	t.Run("startup error offers retry", func(t *testing.T) {
-		body := run(t, "dashboard", "layout", Page{Title: "vartop", Server: "dev", Err: "dial tcp: refused"})
-		for _, want := range []string{"dial tcp: refused", "Retry", `hx-post="/server"`, `name="name" value="dev"`} {
-			if !strings.Contains(body, want) {
-				t.Errorf("body lacks %q", want)
-			}
-		}
-	})
-	t.Run("stale banner", func(t *testing.T) {
-		p := Page{Title: "vartop", Server: "old", Banner: "Server changed to new — reload", IntervalSec: 5, SelfURL: "/?server=old"}
+	t.Run("banner", func(t *testing.T) {
+		p := Page{Title: "vartop", Server: "dev", Banner: "instance-9 is not an instance of dev", IntervalSec: 5, SelfURL: "/?server=dev"}
 		body := run(t, "dashboard", "layout", p)
-		if !strings.Contains(body, `id="banner"`) || !strings.Contains(body, "Server changed to new — reload") {
+		if !strings.Contains(body, `id="banner"`) || !strings.Contains(body, "instance-9 is not an instance of dev") {
 			t.Error("banner missing")
 		}
 		if !strings.Contains(body, `hx-select-oob="#banner,#status"`) {
-			t.Error("poller cannot deliver the banner to a stale tab")
+			t.Error("poller cannot deliver the banner")
 		}
 		if !strings.Contains(body, `id="live"`) {
 			t.Error("#live must exist so the poll swap has something to replace")
 		}
-		if strings.Contains(body, "Retry") {
-			t.Error("banner page offers Retry")
+	})
+	t.Run("not configured", func(t *testing.T) {
+		p := Page{Title: "vartop", Server: "gone", Servers: []string{"dev"}, Unconfigured: true, Banner: "Server gone is not configured", SelfURL: "/?server=gone"}
+		body := run(t, "dashboard", "layout", p)
+		for _, want := range []string{`<option value="gone" selected disabled>gone</option>`, `<option value="dev">dev</option>`, "Server gone is not configured"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("not-configured page lacks %q:\n%s", want, body)
+			}
 		}
 	})
 	t.Run("balancer note", func(t *testing.T) {
@@ -399,7 +396,7 @@ func TestGridRenders(t *testing.T) {
 func TestTipsAreTitles(t *testing.T) {
 	const tip = "inst-a via http://a:3000"
 	for name, body := range map[string]string{
-		"select option": run(t, "dashboard", "layout", Page{Server: "dev", SelfURL: "/", Pods: []PodOption{{Key: "#a", Label: "instance-1", Tip: tip}}}),
+		"select option": run(t, "dashboard", "layout", Page{Server: "dev", SelfURL: "/", Pods: []PodOption{{Label: "instance-1", Tip: tip}}}),
 		"grid column": run(t, "grid", "layout", Page{Server: "dev", Grid: &fleet.GridView{
 			Pods: []fleet.PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}},
 			Rows: []fleet.GridRow{{Name: "w", Cells: []fleet.GridCell{{}}}},
@@ -451,9 +448,9 @@ func TestDetailRenders(t *testing.T) {
 	}
 
 	// Scope names the selected pod, in the confirm text and the pod field.
-	p.Pod = "http://a:3000"
+	p.Pod = "a"
 	body = run(t, "detail", "layout", p)
-	for _, want := range []string{`hx-confirm="Stop a/b c on a (dev)?"`, `name="pod" value="http://a:3000"`} {
+	for _, want := range []string{`hx-confirm="Stop a/b c on a (dev)?"`, `name="pod" value="a"`, `href="/?pod=a&amp;server=dev"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("pod-scoped body lacks %q", want)
 		}
@@ -551,7 +548,7 @@ func TestCopyFollowsNoun(t *testing.T) {
 			p.Noun = n
 			p.Dashboard.Rows[0].Concurrency = "4 ×2 " + many // fixture copy: a view model words this itself
 			check(t, "dashboard", run(t, "dashboard", "layout", p),
-				"<label>"+n.Cap()+` <select name="pod">`,
+				"<label>"+n.Cap()+` <select name="`+n.Param+`">`,
 				"All "+many+" (merged)",
 				">"+n.Cap()+" grid</a>",
 				`title="healthy / total `+many+`"`,
@@ -698,5 +695,59 @@ func TestControlsFollowBalancedScope(t *testing.T) {
 	body = run(t, "dashboard", "layout", d)
 	if !strings.Contains(body, note) || strings.Contains(body, `id="bulk"`) {
 		t.Errorf("dashboard of one balanced unit should have the note and no bulk form:\n%s", body)
+	}
+}
+
+// TestStaleHidesCurrentValues: a stale page shows no current value, only
+// "—", and keeps its history drawn; with the daemon down its banner offers
+// to start it.
+func TestStaleHidesCurrentValues(t *testing.T) {
+	const stale = "No new data for 1m0s — the vartop daemon is not running."
+	for set, p := range map[string]Page{"dashboard": dashboardPage(), "detail": detailPage(), "grid": gridPage()} {
+		p.Stale, p.DaemonDown = stale, true
+		body := run(t, set, "layout", p)
+		_, banner, _ := strings.Cut(body, `<div id="banner" role="status">`)
+		banner, _, _ = strings.Cut(banner, "</div>")
+		for _, want := range []string{`<p class="banner stale">` + stale + `</p>`, `hx-post="/daemon/start"`, `<input type="hidden" name="server" value="dev">`, `>Start collector</button>`} {
+			if !strings.Contains(banner, want) {
+				t.Errorf("%s: banner lacks %q:\n%s", set, want, banner)
+			}
+		}
+		_, live, _ := strings.Cut(body, `<div id="live">`)
+		for _, current := range []string{"12.5", ">9<", "87.5%", ">10<", `class="status active"`, "2/4", "4 ×2 pods"} {
+			if strings.Contains(live, current) {
+				t.Errorf("%s: a stale page shows the current value %q", set, current)
+			}
+		}
+		if set != "grid" && !strings.Contains(live, "<polyline") {
+			t.Errorf("%s: a stale page lost its history", set)
+		}
+	}
+	p := dashboardPage()
+	p.Stale = "No new data for 1m0s — dev: discovery failed"
+	if body := run(t, "dashboard", "layout", p); strings.Contains(body, "Start collector") {
+		t.Error("the daemon runs, yet the page offers to start it")
+	}
+}
+
+// TestFeedCacheEvicts: a server's feed is kept per poll interval and
+// closed once no request read it for feedIdle.
+func TestFeedCacheEvicts(t *testing.T) {
+	c := newFeedCache(t.TempDir())
+	t.Cleanup(c.close)
+	t0 := time.Now()
+	a := c.get("a", time.Second, t0)
+	if c.get("a", time.Second, t0.Add(time.Minute)) != a {
+		t.Error("a second read of a got a new feed")
+	}
+	if c.get("a", 2*time.Second, t0.Add(time.Minute)) == a {
+		t.Error("a's new interval kept its old feed")
+	}
+	c.get("b", time.Second, t0.Add(time.Minute+feedIdle+time.Second))
+	if len(c.feeds) != 1 {
+		t.Errorf("%d feeds after a's went idle, want b's alone", len(c.feeds))
+	}
+	if c.get("a", time.Second, t0.Add(time.Minute+feedIdle+time.Second)) == a {
+		t.Error("a's idle feed was kept")
 	}
 }

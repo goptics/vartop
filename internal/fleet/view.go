@@ -171,8 +171,8 @@ func BalancerNote(latest *Snapshot) string {
 
 // BuildDashboard aggregates the newest snapshot into one row per worker and the
 // KPI cards, with sparklines over the 10 minutes up to the newest of snaps
-// (oldest first). pod "" merges every pod; otherwise only the one with that key
-// is considered. The interval is not needed: the window is a span of time. n
+// (oldest first). pod "" merges every pod; otherwise only the one with that
+// label is considered (see PodsOf). The interval is not needed: the window is a span of time. n
 // words the labels and tooltips.
 func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) DashboardView {
 	v := DashboardView{KPIs: KPIView{StatusCounts: map[string]int{}}}
@@ -298,8 +298,11 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 	return d, true
 }
 
-// PodsOf returns the pods of s a view covers: all of them, or only the one with
-// key pod. The result aliases s.Pods and must not be modified.
+// PodsOf returns the pods of s a view covers: all of them, or only the one
+// labelled pod. Matching by label, what the pages show and name units by,
+// a view filtered to one unit follows it through the snapshots even when
+// its key changed (a process restarted behind a balancer, its instance ID
+// new). The result aliases s.Pods and must not be modified.
 func PodsOf(s *Snapshot, pod string) []PodSnapshot {
 	if s == nil {
 		return nil
@@ -308,7 +311,7 @@ func PodsOf(s *Snapshot, pod string) []PodSnapshot {
 		return s.Pods
 	}
 	for i := range s.Pods {
-		if s.Pods[i].Key == pod {
+		if s.Pods[i].Label == pod {
 			return s.Pods[i : i+1]
 		}
 	}

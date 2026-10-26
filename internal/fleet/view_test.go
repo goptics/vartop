@@ -912,3 +912,30 @@ func TestBuildersDoNotMutateSnapshots(t *testing.T) {
 		t.Error("a view builder modified its input snapshots")
 	}
 }
+
+// TestFilterFollowsLabel: a view filtered to a label charts that unit in
+// every snapshot, though its key changed between them (its process
+// restarted behind a balancer under a new instance ID).
+func TestFilterFollowsLabel(t *testing.T) {
+	iv := 5 * time.Second
+	unit := func(key string, completed float64) PodSnapshot {
+		return PodSnapshot{Key: key, Via: "http://lb", Instance: key[1:], Label: "instance-2", Balanced: true,
+			Workers: map[string]*Sample{"orders": rated(smp("Running", 1, 0, 1, 0), completed, 0)}}
+	}
+	other := okPod("http://c", map[string]*Sample{"orders": rated(smp("Running", 1, 0, 1, 0), 100, 0)})
+	snaps := []*Snapshot{snap(atTick(0), unit("#old", 3), other), snap(atTick(1), unit("#new", 4), other)}
+
+	pts := WorkerRates(snaps, "instance-2", "orders", completedRate, instanceNoun)
+	if len(pts) != 2 || pts[0].Gap || pts[0].V != 3 || pts[1].V != 4 {
+		t.Errorf("instance-2's points = %+v, want 3 then 4: the unit's own, across its key change", pts)
+	}
+	if got := PodsOf(snaps[1], "instance-2"); len(got) != 1 || got[0].Key != "#new" {
+		t.Errorf("PodsOf(instance-2) = %+v, want the unit labelled so", got)
+	}
+	if got := PodsOf(snaps[1], "#new"); got != nil {
+		t.Errorf("PodsOf(a key) = %+v, want none: units are named by label", got)
+	}
+	if _, ok := BuildDetail(snaps, "instance-2", "orders", iv, instanceNoun); !ok {
+		t.Error("BuildDetail(instance-2) finds no orders")
+	}
+}

@@ -46,12 +46,18 @@ CREATE INDEX snapshots_at ON snapshots (at);`
 
 var errReadOnly = errors.New("server file opened read-only")
 
+// errNotSetUp is a reader's error for a file that has no tables yet: its
+// writer's first connection has made it a database, and its first
+// transaction, which creates them, is not committed yet.
+var errNotSetUp = fmt.Errorf("server file not set up yet: %w", fs.ErrNotExist)
+
 // OpenServer opens the file of the server configured under key (see
 // PathFor). A writer — the daemon — creates it if needed; drops its
 // snapshots, keeping its labels, when they are of another StoreVersion; and
 // renames a corrupt file to <file>.corrupt-<unix seconds> and starts afresh.
-// A reader needs the file to exist (an error wrapping fs.ErrNotExist when
-// it does not) and to be of this key and version.
+// A reader needs the file to exist and be set up (an error wrapping
+// fs.ErrNotExist when it is not: the daemon may be creating it), and to be
+// of this key and version.
 func OpenServer(dataDir, key string, writer bool) (*ServerDB, error) {
 	path := PathFor(dataDir, key)
 	if !writer {
@@ -59,7 +65,7 @@ func OpenServer(dataDir, key string, writer bool) (*ServerDB, error) {
 			return nil, err
 		}
 		s := &ServerDB{db: openDB(path, false, ""), key: key}
-		if _, err := s.meta(); err != nil {
+		if err := s.checkReader(); err != nil {
 			_ = s.db.Close()
 			return nil, fmt.Errorf("open %s: %w", path, err)
 		}
@@ -162,14 +168,37 @@ func readMeta(q queryer) (meta, error) {
 	return m, rows.Err()
 }
 
+// checkReader checks, as one read of the file, that its writer set it up
+// (errNotSetUp if not) and that it is this key's and version's.
+func (s *ServerDB) checkReader() error {
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var tables int
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'`).Scan(&tables); err != nil {
+		return err
+	}
+	if tables == 0 {
+		return errNotSetUp
+	}
+	_, err = checkMeta(tx, s.key)
+	return err
+}
+
 // meta reads the file's meta, which must be this key's and version's.
-func (s *ServerDB) meta() (meta, error) {
-	m, err := readMeta(s.db)
+func (s *ServerDB) meta() (meta, error) { return checkMeta(s.db, s.key) }
+
+// checkMeta reads the meta of a file through q, which must be key's and
+// of this version.
+func checkMeta(q queryer, key string) (meta, error) {
+	m, err := readMeta(q)
 	switch {
 	case err != nil:
 		return meta{}, err
-	case m.key != s.key:
-		return meta{}, fmt.Errorf("server file is %q's, not %q's", m.key, s.key)
+	case m.key != key:
+		return meta{}, fmt.Errorf("server file is %q's, not %q's", m.key, key)
 	case m.version != StoreVersion:
 		return meta{}, fmt.Errorf("server file is of store version %d, not %d", m.version, StoreVersion)
 	}

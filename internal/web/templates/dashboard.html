@@ -2,23 +2,23 @@
 <section class="kpis" aria-label="Fleet totals">
   <div class="card">
     <h3>Completed /s</h3>
-    <p class="big">{{if noData $k.Completed}}—{{else}}{{printf "%.1f" $k.CompletedPerSec}}{{end}}</p>
+    <p class="big">{{if or $.Stale (noData $k.Completed)}}—{{else}}{{printf "%.1f" $k.CompletedPerSec}}{{end}}</p>
     {{template "spark" (sparkline $k.Completed 160 32)}}
   </div>
   <div class="card failed">
     <h3>Failed /min</h3>
-    <p class="big">{{if noData $k.Failed}}—{{else}}{{printf "%.1f" $k.FailedPerMin}}{{end}}</p>
+    <p class="big">{{if or $.Stale (noData $k.Failed)}}—{{else}}{{printf "%.1f" $k.FailedPerMin}}{{end}}</p>
     {{template "spark" (sparkline $k.Failed 160 32)}}
   </div>
   <div class="card pending">
     <h3>Pending (max/{{$.Noun.One}})</h3>
-    <p class="big">{{if noData $k.Pending}}—{{else}}{{$k.PendingMax}}{{end}}</p>
+    <p class="big">{{if or $.Stale (noData $k.Pending)}}—{{else}}{{$k.PendingMax}}{{end}}</p>
     {{template "spark" (sparkline $k.Pending 160 32)}}
   </div>
   <div class="card">
     <h3>Workers by status</h3>
     <p class="sub">{{$.Noun.One}} × worker</p>
-    <ul class="chips">{{range statusClasses}}{{$n := index $k.StatusCounts .}}{{if $n}}<li class="status {{.}}">{{$n}} {{.}}</li>{{end}}{{end}}{{if not $k.StatusCounts}}<li>—</li>{{end}}</ul>
+    <ul class="chips">{{if $.Stale}}<li>—</li>{{else}}{{range statusClasses}}{{$n := index $k.StatusCounts .}}{{if $n}}<li class="status {{.}}">{{$n}} {{.}}</li>{{end}}{{end}}{{if not $k.StatusCounts}}<li>—</li>{{end}}{{end}}</ul>
   </div>
 </section>
 {{if .Rows}}<div class="table-wrap">
@@ -36,12 +36,12 @@
   <tbody>{{range .Rows}}
   <tr id="{{.ID}}">
     <td class="sel"><input type="checkbox" id="sel-{{.ID}}" form="bulk" name="names" value="{{.Name}}" aria-label="Select {{.Name}}" hx-preserve></td>
-    <td class="name"><a href="{{workerURL .Name $.Server $.Pod}}">{{.Name}}</a></td>
-    <td><span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}</td>
-    <td>{{.Concurrency}}</td>
-    <td class="num">{{if .Unknown}}—{{else}}{{.Busy}}{{end}}</td>
-    <td class="num">{{if .Unknown}}—{{else}}{{.Idle}}{{end}}</td>
-    <td class="num"{{with .PendingTip}} title="{{.}}"{{end}}>{{if .Unknown}}—{{else}}{{.PendingMax}}{{end}}</td>
+    <td class="name"><a href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></td>
+    <td>{{if $.Stale}}—{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}{{end}}</td>
+    <td>{{if $.Stale}}—{{else}}{{.Concurrency}}{{end}}</td>
+    <td class="num">{{if or .Unknown $.Stale}}—{{else}}{{.Busy}}{{end}}</td>
+    <td class="num">{{if or .Unknown $.Stale}}—{{else}}{{.Idle}}{{end}}</td>
+    <td class="num"{{with .PendingTip}}{{if not $.Stale}} title="{{.}}"{{end}}{{end}}>{{if or .Unknown $.Stale}}—{{else}}{{.PendingMax}}{{end}}</td>
     <td class="trend">{{template "spark" (sparkline .Spark 120 24)}}</td>
   </tr>{{end}}
   </tbody>
@@ -57,7 +57,7 @@
 {{if .Dashboard}}{{if .OneBalanced}}<p class="note">{{oneBalanced}}</p>
 {{else}}<form id="bulk" class="bulk" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
   {{template "server_field" .}}
-  <input type="hidden" name="pod" value="{{.Pod}}">
+  {{template "label_field" .}}
   <span>Selected workers on {{.Scope}}:</span>
   <button type="button" hx-post="/bulk/pause">Pause selected</button>
   <button type="button" hx-post="/bulk/resume">Resume selected</button>

@@ -1,12 +1,11 @@
 package cmd
 
 import (
-	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,8 +15,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/store"
 	"github.com/goptics/vartop/internal/web"
 )
 
@@ -49,30 +48,36 @@ func openBrowser(url string) error {
 	return nil
 }
 
-// serveWeb serves the dashboard of the server configured under key (a
-// configuration key, not Server.Name) on the loopback address addr until ctx
-// is done, then shuts down: in-flight requests get shutdownTimeout to finish,
-// and the session is closed. It prints the URL to out and passes it to open,
-// whose error is only printed.
-func serveWeb(ctx context.Context, cfg *config.Config, key, addr string, out io.Writer, open func(string) error) error {
+// serveWeb serves the web UI over src on the loopback address addr until
+// ctx is done, then shuts down: in-flight requests get shutdownTimeout to
+// finish. It prints the URL to out and passes it to open, whose error is
+// only printed. With key, a configuration key (not Server.Name), the URL
+// opens that server's dashboard, else the default server's; a key that is
+// not configured is an error.
+func serveWeb(ctx context.Context, src web.Source, key, addr string, out io.Writer, open func(string) error) error {
+	if key != "" {
+		cfg, err := src.Config()
+		if err != nil {
+			return err
+		}
+		if _, err := cfg.GetActiveServer(key); err != nil {
+			return err
+		}
+	}
 	ln, err := web.Listen(addr)
 	if err != nil {
 		return err
 	}
-
-	m := web.NewManager(cfg, api.PoolFor)
-	if err := m.Switch(key); err != nil {
-		_ = ln.Close()
-		return err
-	}
-	h, err := web.NewHandler(m, web.AllowedHosts(ln))
+	h, err := web.NewHandler(src, web.AllowedHosts(ln))
 	if err != nil {
 		_ = ln.Close()
-		_ = m.Close()
 		return err
 	}
 
 	url := "http://" + ln.Addr().String()
+	if key != "" {
+		url += "/?server=" + neturl.QueryEscape(key)
+	}
 	fmt.Fprintf(out, "vartop web: %s\n", url)
 	if err := open(url); err != nil {
 		fmt.Fprintf(out, "could not open a browser: %v\n", err)
@@ -84,18 +89,34 @@ func serveWeb(ctx context.Context, cfg *config.Config, key, addr string, out io.
 
 	select {
 	case err := <-serveErr: // Serve failed on its own; it is never ErrServerClosed here
-		_ = m.Close()
 		return err
 	case <-ctx.Done():
 	}
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	shutErr := srv.Shutdown(shutCtx)
-	if shutErr != nil {
+	err = srv.Shutdown(shutCtx)
+	if err != nil {
 		_ = srv.Close() // drop the requests that outlived the timeout
 	}
-	return errors.Join(shutErr, m.Close())
+	return err
+}
+
+// webSource is what vartop web reads and acts through: the store of this
+// vartop's environment, the config read again on every request (the
+// daemon follows its changes too), and ensureDaemon to start the daemon.
+// release closes it.
+func webSource() (src web.Source, release func(), err error) {
+	dataDir, err := store.DataDir()
+	if err != nil {
+		return src, nil, err
+	}
+	ctl, err := store.OpenControl(dataDir)
+	if err != nil {
+		return src, nil, err
+	}
+	return web.Source{DataDir: dataDir, Config: config.Load, Control: ctl, Start: ensureLocalDaemon},
+		func() { _ = ctl.Close() }, nil
 }
 
 var webCmd = &cobra.Command{
@@ -111,9 +132,12 @@ var webCmd = &cobra.Command{
 		if _, err := cfg.GetActiveServer(serverFlag); err != nil {
 			return err
 		}
-		// The key GetActiveServer resolved: the web session follows keys.
-		key := cmp.Or(serverFlag, cfg.DefaultServer)
 		startCollecting(cmd.ErrOrStderr())
+		src, release, err := webSource()
+		if err != nil {
+			return err
+		}
+		defer release()
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -125,7 +149,7 @@ var webCmd = &cobra.Command{
 		if webNoOpen {
 			open = func(string) error { return nil }
 		}
-		return serveWeb(ctx, cfg, key, webAddr, cmd.OutOrStdout(), open)
+		return serveWeb(ctx, src, serverFlag, webAddr, cmd.OutOrStdout(), open)
 	},
 }
 

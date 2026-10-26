@@ -274,7 +274,7 @@ func TestPollBalancerRates(t *testing.T) {
 	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
 	lb := fleettest.NewRoundRobinLB(t, srvs...)
 	pool, tr := fleettest.StaticPool(t, lb.URL), newTracker(interval, false)
-	h := NewHistory(interval)
+	h := newTestHistory(interval)
 
 	h.Append(pollOnce(context.Background(), pool, tr))
 	first := h.Latest()
