@@ -3,6 +3,7 @@ package fleet
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"maps"
 	"net/url"
 	"runtime/debug"
@@ -25,12 +26,17 @@ type Tick struct {
 	Panic *TickPanic
 }
 
-// TickPanic is a panic recovered from a tick, and the stack it was raised
-// on.
+// TickPanic is a panic recovered from a tick, or from the goroutines an
+// action fans out to, and the stack it was raised on.
 type TickPanic struct {
 	Value any
 	Stack []byte
 }
+
+// Error is the panic's value, then the stack it was raised on: what is
+// printed of it when it is raised again and not recovered, or logged by
+// an HTTP server's recovery.
+func (p *TickPanic) Error() string { return fmt.Sprintf("panic: %v\n\n%s", p.Value, p.Stack) }
 
 // CollectorInit is the state a collector starts from, kept from an earlier
 // run: the zero value starts afresh.

@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/goptics/vartop/internal/api"
@@ -168,22 +168,26 @@ func ActionSender(action string) Sender {
 // units' (see reachUnits), the dead units', failed with their error, and
 // the unrefreshed ones', failed with NotRefreshedMsg. Results are labelled
 // from units (see UnitsOf); n words their messages.
+//
+// A send that panics, on whichever goroutine Act fans it out to, is raised
+// again on the caller's goroutine, as a *TickPanic, once every send has
+// returned: an HTTP handler's recovery gets it, and the process lives on.
 func Act(ctx context.Context, sc ActScope, units map[string]PodSnapshot, n Noun, names []string, send Sender) [][]ActionResult {
 	results := make([][]ActionResult, len(names))
 	var reached [][]ActionResult
-	var wg sync.WaitGroup
+	var g panicGroup
 	for i, name := range names {
 		escaped := url.PathEscape(name)
-		wg.Go(func() {
+		g.Go(func() {
 			results[i] = fanOut(ctx, sc.Direct, units, n, func(ctx context.Context, c *api.Client) error {
 				return send.Direct(ctx, c, escaped)
 			})
 		})
 	}
 	if len(sc.Balanced) > 0 {
-		wg.Go(func() { reached = reachUnits(ctx, sc, units, n, names, send.Fresh) })
+		g.Go(func() { reached = reachUnits(ctx, sc, units, n, names, send.Fresh) })
 	}
-	wg.Wait()
+	g.Wait()
 	for i := range results {
 		if reached != nil {
 			results[i] = append(results[i], reached[i]...)
@@ -201,15 +205,16 @@ func Act(ctx context.Context, sc ActScope, units map[string]PodSnapshot, n Noun,
 
 // fanOut calls fn concurrently on every client of targets and returns one
 // result per client, in targets' order, labelled from units (see UnitsOf).
-// n words the results' messages.
+// n words the results' messages. A call that panics is raised again once
+// every call has returned (see panicGroup).
 func fanOut(ctx context.Context, targets []*api.Client, units map[string]PodSnapshot, n Noun,
 	fn func(context.Context, *api.Client) error) []ActionResult {
 	results := make([]ActionResult, len(targets))
-	var wg sync.WaitGroup
+	var g panicGroup
 	for i, c := range targets {
-		wg.Go(func() { results[i] = outcome(c.PrimaryEndpoint(), units, n, fn(ctx, c)) })
+		g.Go(func() { results[i] = outcome(c.PrimaryEndpoint(), units, n, fn(ctx, c)) })
 	}
-	wg.Wait()
+	g.Wait()
 	return results
 }
 
@@ -289,6 +294,31 @@ func outcome(key string, units map[string]PodSnapshot, n Noun, err error) Action
 		r.Outcome, r.Msg = "failed", err.Error()
 	}
 	return r
+}
+
+// ClientsFor makes the clients an action on latest's units is sent
+// through, with token: one per direct unit, at its key, and one per
+// balancer endpoint — a key of latest.Behind, or the endpoint a balanced
+// unit was reached through, dead ones included. They are sorted by
+// endpoint, each once. With nil (no snapshot yet) there are none.
+func ClientsFor(latest *Snapshot, token string) []*api.Client {
+	if latest == nil {
+		return nil
+	}
+	endpoints := slices.Collect(maps.Keys(latest.Behind))
+	for _, u := range latest.Pods {
+		if u.Balanced {
+			endpoints = append(endpoints, u.Via)
+		} else {
+			endpoints = append(endpoints, u.Key)
+		}
+	}
+	slices.Sort(endpoints)
+	clients := make([]*api.Client, 0, len(endpoints))
+	for _, ep := range slices.Compact(endpoints) {
+		clients = append(clients, api.NewClient(ep, token))
+	}
+	return clients
 }
 
 // UnitsOf maps each unit key of snap to the unit, for its label and tip.
