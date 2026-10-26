@@ -175,8 +175,15 @@ func (f *fakeVarmq) action(w http.ResponseWriter, r *http.Request) {
 		writeFakeError(w, http.StatusBadRequest, "unknown action")
 		return
 	}
-	f.mutate(w, r.PathValue("name"), func(fw *fakeWorker) { fw.Status = status })
+	f.mutate(w, r.PathValue("name"), func(fw *fakeWorker) string {
+		fw.Status = status
+		return ""
+	})
 }
+
+// sameConcurrency is varmq's ErrSameConcurrency, which it answers with a 409
+// when a worker is set to the concurrency it already has.
+const sameConcurrency = "worker already has the same concurrency"
 
 func (f *fakeVarmq) concurrency(w http.ResponseWriter, r *http.Request) {
 	n, err := strconv.Atoi(r.PathValue("n"))
@@ -184,31 +191,42 @@ func (f *fakeVarmq) concurrency(w http.ResponseWriter, r *http.Request) {
 		writeFakeError(w, http.StatusBadRequest, "invalid concurrency value")
 		return
 	}
-	f.mutate(w, r.PathValue("name"), func(fw *fakeWorker) { fw.Concurrency = n })
+	f.mutate(w, r.PathValue("name"), func(fw *fakeWorker) string {
+		if fw.Concurrency == n {
+			return sameConcurrency
+		}
+		fw.Concurrency = n
+		return ""
+	})
 }
 
 // mutate applies change to the named worker unless it is missing (404) or
-// set to fail with its ActionStatus.
-func (f *fakeVarmq) mutate(w http.ResponseWriter, name string, change func(*fakeWorker)) {
+// set to fail with its ActionStatus. A change that returns a message changed
+// nothing: the reply is a 409 with that message.
+func (f *fakeVarmq) mutate(w http.ResponseWriter, name string, change func(*fakeWorker) (conflict string)) {
 	f.mu.Lock()
 	fw := f.Workers[name]
-	failWith := 0
+	failWith, msg := 0, ""
 	switch {
 	case fw == nil:
 		failWith = http.StatusNotFound
 	case fw.ActionStatus != 0:
 		failWith = fw.ActionStatus
 	default:
-		change(fw)
+		if msg = change(fw); msg != "" {
+			failWith = http.StatusConflict
+		}
 	}
 	f.mu.Unlock()
 
-	switch failWith {
-	case 0:
+	switch {
+	case failWith == 0:
 		w.WriteHeader(http.StatusOK)
-	case http.StatusNotFound:
+	case msg != "":
+		writeFakeError(w, failWith, msg)
+	case failWith == http.StatusNotFound:
 		writeFakeError(w, failWith, "worker not found")
-	case http.StatusConflict:
+	case failWith == http.StatusConflict:
 		writeFakeError(w, failWith, "worker is not running")
 	default:
 		writeFakeError(w, failWith, http.StatusText(failWith))

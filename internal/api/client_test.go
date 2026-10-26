@@ -154,6 +154,11 @@ func TestAuthHeader(t *testing.T) {
 		"Action":          func(c *Client) error { return c.Action("w", "pause") },
 		"TuneConcurrency": func(c *Client) error { return c.TuneConcurrency("w", 3) },
 		"GetHealth":       func(c *Client) error { return c.GetHealth() },
+		// The new-connection variants carry every request through a balancer.
+		"ListWorkersFresh":     func(c *Client) error { _, _, err := c.ListWorkersFresh(context.Background()); return err },
+		"GetWorkerFresh":       func(c *Client) error { _, _, err := c.GetWorkerFresh(context.Background(), "w"); return err },
+		"ActionFresh":          func(c *Client) error { _, err := c.ActionFresh(context.Background(), "w", "pause"); return err },
+		"TuneConcurrencyFresh": func(c *Client) error { _, err := c.TuneConcurrencyFresh(context.Background(), "w", 3); return err },
 	}
 
 	tests := []struct {
@@ -170,7 +175,7 @@ func TestAuthHeader(t *testing.T) {
 			t.Run(tt.name+"/"+callName, func(t *testing.T) {
 				// "{}" decodes into WorkerDetails; ListWorkers needs an array.
 				body := "{}"
-				if callName == "ListWorkers" {
+				if callName == "ListWorkers" || callName == "ListWorkersFresh" {
 					body = "[]"
 				}
 				srv, got := recordingServer(t, http.StatusOK, nil, body)

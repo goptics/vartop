@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -987,20 +988,20 @@ func TestActionMergedReachesEveryInstance(t *testing.T) {
 }
 
 // TestActionBalancedRepeatIsNoChange409: a balanced unit is never skipped
-// from the latest sample; varmq's 409 there is no change.
+// from the latest sample; varmq's 409 there, for a concurrency it already
+// has, is no change.
 func TestActionBalancedRepeatIsNoChange409(t *testing.T) {
 	fakes, srvs := newFakes(t, "a", "b", "c")
 	fakes[1].mu.Lock()
 	fakes[1].Workers["w"].Concurrency = 4
 	fakes[1].mu.Unlock()
-	setActionStatus(fakes[1], "w", http.StatusConflict)
 	lb := newRoundRobinLB(t, srvs...)
 	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
 	units := unitsOf(m.Current().History.Latest())
 
 	_, body := post(t, srv, "/workers/w/concurrency", multi("n", "4"), true)
 	wantResults(t, body, units,
-		[2]string{"#a", "ok"}, [2]string{"#b", "no change (worker is not running)"}, [2]string{"#c", "ok"})
+		[2]string{"#a", "ok"}, [2]string{"#b", "no change (" + sameConcurrency + ")"}, [2]string{"#c", "ok"})
 	wantWorker(t, "concurrency 4", func(w fakeWorker) bool { return w.Concurrency == 4 }, fakes[0], fakes[2])
 	if len(patches(fakes[1])) == 0 {
 		t.Error("b was skipped: a balanced unit's PATCH is always sent")
@@ -1026,6 +1027,59 @@ func TestActionBalancedUnreachableInstance(t *testing.T) {
 	if n := totalPatches(fakes...); n > attemptCap(3) {
 		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
 	}
+}
+
+// TestActionBalancedErrorIsRetried: an instance answering a 500 through the
+// balancer is tried again within the budget; with no other answer from it,
+// it fails with varmq's error.
+func TestActionBalancedErrorIsRetried(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs...)
+	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := unitsOf(m.Current().History.Latest())
+	setActionStatus(fakes[1], "w", http.StatusInternalServerError)
+
+	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
+	wantResults(t, body, units, [2]string{"#a", "ok"},
+		[2]string{"#b", "failed (API error (status 500): Internal Server Error)"}, [2]string{"#c", "ok"})
+	if n := len(patches(fakes[1])); n < 2 {
+		t.Errorf("b got %d PATCHes, want it tried again after its 500", n)
+	}
+	wantWorker(t, "paused", paused, fakes[0], fakes[2])
+}
+
+// TestConcurrencyMixedScope: an instance listed by its own address and
+// behind the balancer too is one unit, set at its address. When the
+// balancer hands it the PATCH again, varmq answers that duplicate 409, which
+// is no result: every unit reads ok.
+//
+// The balancer's PATCHes take turns of their own, starting at a, after a
+// head start for a's own address, so its first one is a's duplicate. (With
+// no head start the balancer can reach a first; a's own PATCH is then the
+// duplicate and reads no change.)
+func TestConcurrencyMixedScope(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b")
+	var gets, sets atomic.Uint64
+	lb := newFakeLB(t, srvs, func(r *http.Request) uint64 {
+		if r.Method != http.MethodPatch {
+			return gets.Add(1) - 1
+		}
+		time.Sleep(100 * time.Millisecond)
+		return sets.Add(1) - 1
+	})
+	srv, m := serveBalanced(t, []string{lb.URL, srvs[0].URL}, srvs[0].URL, "#b")
+	latest := m.Current().History.Latest()
+	var want [][2]string
+	for _, u := range latest.Pods {
+		want = append(want, [2]string{u.Key, "ok"})
+	}
+
+	_, body := post(t, srv, "/workers/w/concurrency", multi("n", "4"), true)
+	wantResults(t, body, unitsOf(latest), want...)
+	wantWorker(t, "concurrency 4", func(w fakeWorker) bool { return w.Concurrency == 4 }, fakes...)
+	set := "PATCH /workers/w/config/concurrency/4"
+	wantPatches(t, fakes[0], set, set) // its own, then the balancer's duplicate
+	wantPatches(t, fakes[1], set)
 }
 
 // TestActionBudgetCountsEveryInstanceBehind: a balancer picks among every
