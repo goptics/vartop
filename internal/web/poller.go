@@ -3,8 +3,7 @@ package web
 import (
 	"cmp"
 	"context"
-	"errors"
-	"net/http"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -129,11 +128,14 @@ func pollOnce(ctx context.Context, pool *api.Pool, t *tracker) *Snapshot {
 	return pollAt(ctx, pool, t, time.Now())
 }
 
-// pollAt is pollOnce for a tick that started at now. The pool's direct
-// endpoints are polled concurrently, one unit each; one whose replies came
-// from more than one instance joins the balancers and its unit is dropped.
-// Then every instance behind the balancers becomes a unit of its own. now
-// dates the tracker's sightings, so tests can step past its window.
+// pollAt is pollOnce for a tick that started at now, which dates the
+// tracker's sightings, so tests can step past its window. Endpoints that are
+// balancers at the start are polled alongside the direct ones, skipping the
+// instances the previous tick showed as direct units, so neither waits on the
+// other. A direct endpoint whose replies came from more than one instance
+// becomes a balancer: its unit is dropped and, time permitting, it gets a
+// balancer pass of its own. Balanced units of an instance that is a direct
+// unit this tick are dropped.
 func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Snapshot {
 	snap := &Snapshot{At: now}
 	var directs, balancers []*api.Client
@@ -145,50 +147,58 @@ func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Sna
 		}
 	}
 
+	// Until wg.Wait, only the balancer pass uses t.
+	var balanced []PodSnapshot
 	pods := make([]PodSnapshot, len(directs))
 	answered := make([][]string, len(directs))
 	var wg sync.WaitGroup
+	if len(balancers) > 0 {
+		wg.Go(func() { balanced = pollBalanced(ctx, balancers, t, t.direct, now) })
+	}
 	for i, c := range directs {
 		wg.Go(func() { pods[i], answered[i] = pollDirect(ctx, c) })
 	}
 	wg.Wait()
 
-	behind := make(map[string]map[string]bool) // endpoint → instances that answered through it
-	heard := func(endpoint, instance string) {
-		if instance == "" {
-			return
-		}
-		t.saw(endpoint, instance, now)
-		if behind[endpoint] == nil {
-			behind[endpoint] = make(map[string]bool)
-		}
-		behind[endpoint][instance] = true
-	}
-	direct := make(map[string]bool) // instances shown as a direct unit
+	direct := make(map[string]bool) // instances shown as a direct unit this tick
+	var moved []*api.Client
 	for i, c := range directs {
+		endpoint := c.PrimaryEndpoint()
 		for _, id := range answered[i] {
-			heard(c.PrimaryEndpoint(), id)
+			t.saw(endpoint, id, now)
 		}
 		if len(answered[i]) > 1 {
-			balancers = append(balancers, c)
+			moved = append(moved, c)
 			continue
 		}
-		snap.Pods = append(snap.Pods, pods[i])
-		if id := pods[i].Instance; id != "" {
-			direct[id] = true
+		pod := pods[i]
+		if pod.Instance == "" && pod.Err != "" {
+			pod.Instance = t.lastSeen(endpoint, now) // no reply: still that instance's unit
+		}
+		snap.Pods = append(snap.Pods, pod)
+		if pod.Instance != "" {
+			direct[pod.Instance] = true
 		}
 	}
-	if len(balancers) > 0 {
-		snap.Pods = append(snap.Pods, pollBalanced(ctx, balancers, t, direct, now, heard)...)
+	if len(moved) > 0 && ctx.Err() == nil {
+		skip := maps.Clone(direct)
+		for _, u := range balanced {
+			skip[u.Instance] = true
+		}
+		balanced = append(balanced, pollBalanced(ctx, moved, t, skip, now)...)
 	}
-	for _, c := range balancers {
-		if n := len(behind[c.PrimaryEndpoint()]); n > 0 {
-			if snap.Behind == nil {
-				snap.Behind = make(map[string]int)
-			}
-			snap.Behind[c.PrimaryEndpoint()] = n
+	for _, u := range balanced {
+		if !direct[u.Instance] {
+			snap.Pods = append(snap.Pods, u)
 		}
 	}
+	for _, c := range slices.Concat(balancers, moved) {
+		if snap.Behind == nil {
+			snap.Behind = make(map[string]int)
+		}
+		snap.Behind[c.PrimaryEndpoint()] = t.behind(c.PrimaryEndpoint(), now)
+	}
+	t.direct = direct
 
 	if t.kubernetes {
 		for i := range snap.Pods {
@@ -250,14 +260,13 @@ func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered [
 
 	pod.Workers = make(map[string]*Sample, len(list))
 	for i, w := range list {
-		var apiErr *api.APIError
 		switch {
 		case errs[i] == nil:
 			pod.Workers[w.Name] = samples[i]
 			if samples[i].Instance != "" {
 				answered = append(answered, samples[i].Instance)
 			}
-		case errors.As(errs[i], &apiErr) && apiErr.StatusCode == http.StatusNotFound:
+		case isNotFound(errs[i]):
 			// removed since the list: skip
 		case pod.Err == "":
 			pod.Err = "worker " + w.Name + ": " + errs[i].Error()

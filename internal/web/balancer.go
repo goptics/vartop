@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
@@ -15,17 +16,18 @@ import (
 	"github.com/goptics/vartop/internal/api"
 )
 
-// attemptCap is the most requests sent through a server's balancers in one
-// go to reach k instances: ⌈k·(ln k + 4)⌉ + 2, so a balancer picking at random
-// misses one of them with probability under e⁻⁴ (≈2%). k < 1 counts as 1.
+// attemptCap is the most requests a reach job sends through a server's
+// balancers to reach k instances: ⌈k·(ln k + 4)⌉ + 2, so a balancer picking
+// at random misses one of them with probability under e⁻⁴ (≈2%). k < 1
+// counts as 1.
 func attemptCap(k int) int {
 	n := float64(max(k, 1))
 	return int(math.Ceil(n*(math.Log(n)+4))) + 2
 }
 
-// answer is one instance's first reply to a reach: what send returned (Err
-// is an *api.APIError for a non-2xx reply, nil for a 2xx one), the endpoint
-// it came through and when it arrived.
+// answer is one reply to a reach attempt: what send returned (Err is an
+// *api.APIError for a non-2xx reply, nil for a 2xx one), the endpoint it
+// came through and when it arrived.
 type answer[T any] struct {
 	V   T
 	Err error
@@ -33,163 +35,347 @@ type answer[T any] struct {
 	At  time.Time
 }
 
-// reach sends through eps in turn (attempt i goes to eps[i%len(eps)]), each
-// attempt reaching whichever instance the balancer picks, until every
-// instance in want has answered, limit attempts were sent, or ctx is done.
-// Attempts go in concurrent rounds of min(limit-sent, max(missing, len(eps)))
-// with missing the wanted instances yet to answer, so every round tries every
-// endpoint; with want empty, exactly one round is sent. got holds each
-// instance's first answer, wanted or not. An attempt that names no instance
-// (a transport error, a balancer's own error page, a varmq without the
-// header) is nobody's answer; the last such error is lastErr. Every attempt
-// has returned when reach does.
-func reach[T any](ctx context.Context, eps []*api.Client, want []string, limit int,
-	send func(context.Context, *api.Client) (T, string, error)) (got map[string]answer[T], sent int, lastErr error) {
-	got = make(map[string]answer[T])
-	if len(eps) == 0 {
-		return got, 0, nil
-	}
-	missing := func() int {
-		n := 0
-		for _, id := range want {
-			if _, ok := got[id]; !ok {
-				n++
-			}
-		}
-		return n
-	}
-	type reply struct {
-		answer[T]
-		instance string
-	}
-	for sent < limit && ctx.Err() == nil {
-		round := make([]reply, min(limit-sent, max(missing(), len(eps))))
-		var wg sync.WaitGroup
-		for i := range round {
-			c := eps[(sent+i)%len(eps)]
-			wg.Go(func() {
-				v, instance, err := send(ctx, c)
-				round[i] = reply{answer[T]{V: v, Err: err, Via: c.PrimaryEndpoint(), At: time.Now()}, instance}
-			})
-		}
-		wg.Wait()
-		sent += len(round)
-
-		for _, r := range round {
-			if r.instance == "" {
-				if r.Err != nil {
-					lastErr = r.Err
-				}
-				continue
-			}
-			if _, ok := got[r.instance]; !ok {
-				got[r.instance] = r.answer
-			}
-		}
-		if missing() == 0 {
-			break
-		}
-	}
-	return got, sent, lastErr
+// reacher sends its jobs' requests through balancer endpoints, each attempt
+// reaching whichever instance the balancer picks, until every job has a
+// definitive reply from every instance it wants or has spent its budget.
+// There are no rounds: each finished attempt is recorded at once and the
+// freed slot refilled. A slot goes to a job drawn at random, not to the job
+// whose attempt came back: that job would take the balancer's next pick
+// again, and since which attempt comes back first follows which instance it
+// reached, jobs side by side behind a round-robin balancer would each get
+// the same instance over and over. When no reply has come for twice the
+// slowest round trip so far, the attempts in flight are presumed stuck on a
+// slow instance: they stop counting as in flight, so others are sent.
+//
+// ponytail: budgets are per job, so an instance that never answers costs
+// jobs × budget connections; add a shared budget if that bites.
+type reacher struct {
+	eps     []*api.Client
+	budget  int // attempts per job
+	jobs    []reachJob
+	replies chan func()   // a finished attempt's bookkeeping, run by run's loop
+	flying  int           // attempts started and not yet recorded
+	slowest time.Duration // longest round trip of a reply naming an instance
+	gen     int           // bumped each time the attempts in flight are presumed stuck
 }
 
-// listFresh is (*api.Client).ListWorkersFresh as a reach send.
+// minHedge is the shortest wait for a reply before attempts in flight are
+// presumed stuck.
+const minHedge = 10 * time.Millisecond
+
+// reachJob is a job[T] as the reacher schedules it.
+type reachJob interface {
+	load(eps, budget int) (owed, target, active, left int)
+	settled(eps, budget int) bool
+	start(ctx context.Context, r *reacher, wg *sync.WaitGroup)
+	stall() // presume every attempt in flight stuck
+}
+
+// newReacher returns a reacher over the balancer endpoints eps that lets
+// each job send at most budget attempts.
+func newReacher(eps []*api.Client, budget int) *reacher {
+	return &reacher{eps: eps, budget: budget, replies: make(chan func())}
+}
+
+// job is one request (a worker list, one worker's details, an action) that a
+// reacher gets a definitive reply to from each instance it wants: a 2xx, or
+// an error definitive accepts (a 404 for a worker that is gone). While some
+// wanted instance is missing it has about max(missing, endpoints) attempts
+// in flight, and it sends at least one attempt per endpoint. Its fields are
+// written by the reacher's loop only; read them after run.
+type job[T any] struct {
+	send       func(context.Context, *api.Client) (T, string, error)
+	definitive func(error) bool                   // error replies that settle an instance; nil for none
+	onReply    func(instance string, a answer[T]) // run in the loop for each reply naming an instance, once recorded
+
+	wants   map[string]bool      // instances it needs a definitive reply from
+	got     map[string]answer[T] // first definitive reply per instance, wanted or not
+	failed  map[string]answer[T] // latest other reply per instance without a definitive one
+	lastErr error                // latest error of an attempt that named no instance
+	sent    int
+	flying  int // attempts in flight
+	stuck   int // of those, the ones presumed stuck
+}
+
+// addJob adds a job sending send to r. Its wants start empty; see want.
+func addJob[T any](r *reacher, send func(context.Context, *api.Client) (T, string, error), definitive func(error) bool) *job[T] {
+	j := &job[T]{
+		send:       send,
+		definitive: definitive,
+		wants:      make(map[string]bool),
+		got:        make(map[string]answer[T]),
+		failed:     make(map[string]answer[T]),
+	}
+	r.jobs = append(r.jobs, j)
+	return j
+}
+
+// want adds instances to those j needs a definitive reply from. It may be
+// called from an onReply while the reacher runs.
+func (j *job[T]) want(ids ...string) {
+	for _, id := range ids {
+		j.wants[id] = true
+	}
+}
+
+// missing is how many wanted instances have no definitive reply yet.
+func (j *job[T]) missing() int {
+	n := 0
+	for id := range j.wants {
+		if _, ok := j.got[id]; !ok {
+			n++
+		}
+	}
+	return n
+}
+
+// load is what j asks of the next launch: the attempts it is owed outright
+// (one per endpoint, so new instances get noticed, once it misses nobody);
+// while it misses someone, the attempts it wants in flight; its attempts in
+// flight not presumed stuck; and its budget left.
+func (j *job[T]) load(eps, budget int) (owed, target, active, left int) {
+	left = budget - j.sent
+	if m := j.missing(); m > 0 {
+		return 0, max(m, eps), j.flying - j.stuck, left
+	}
+	return max(0, min(eps-j.sent, left)), 0, 0, left
+}
+
+// settled reports whether j is done: every wanted instance replied
+// definitively and its one attempt per endpoint came back, or its whole
+// budget came back.
+func (j *job[T]) settled(eps, budget int) bool {
+	if j.missing() == 0 {
+		return j.sent-j.flying >= min(eps, budget)
+	}
+	return j.sent >= budget && j.flying == 0
+}
+
+// start sends one attempt of j through the next endpoint in j's turn.
+func (j *job[T]) start(ctx context.Context, r *reacher, wg *sync.WaitGroup) {
+	c := r.eps[j.sent%len(r.eps)]
+	j.sent++
+	j.flying++
+	r.flying++
+	gen, began := r.gen, time.Now()
+	wg.Go(func() {
+		v, instance, err := j.send(ctx, c)
+		a := answer[T]{V: v, Err: err, Via: c.PrimaryEndpoint(), At: time.Now()}
+		r.replies <- func() {
+			j.flying--
+			if gen < r.gen {
+				j.stuck--
+			}
+			if instance != "" {
+				r.slowest = max(r.slowest, a.At.Sub(began))
+			}
+			j.record(instance, a)
+		}
+	})
+}
+
+func (j *job[T]) stall() { j.stuck = j.flying }
+
+// record files one reply. One that names no instance (a transport error, a
+// balancer's own error page, a varmq without the header) is nobody's: only
+// its error is kept.
+func (j *job[T]) record(instance string, a answer[T]) {
+	if instance == "" {
+		if a.Err != nil {
+			j.lastErr = a.Err
+		}
+		return
+	}
+	if _, done := j.got[instance]; !done {
+		if a.Err == nil || j.definitive != nil && j.definitive(a.Err) {
+			j.got[instance] = a
+			delete(j.failed, instance)
+		} else {
+			j.failed[instance] = a
+		}
+	}
+	if j.onReply != nil {
+		j.onReply(instance, a)
+	}
+}
+
+// run sends the jobs' attempts until every job has settled or ctx is done,
+// then cancels the attempts still in flight and returns once every one has
+// returned. Replies recorded by then stay in the jobs.
+func (r *reacher) run(ctx context.Context) {
+	if len(r.eps) == 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	for {
+		if ctx.Err() == nil {
+			r.launch(ctx, &wg)
+		}
+		if r.flying == 0 || r.settled() {
+			break
+		}
+		var hedge <-chan time.Time
+		if r.slowest > 0 {
+			hedge = time.After(max(minHedge, 2*r.slowest))
+		}
+		select {
+		case finish := <-r.replies:
+			r.flying--
+			finish()
+		case <-hedge:
+			r.gen++
+			for _, j := range r.jobs {
+				j.stall()
+			}
+		}
+	}
+	cancel()
+	for ; r.flying > 0; r.flying-- {
+		<-r.replies // every job has settled: late replies are dropped
+	}
+	wg.Wait()
+}
+
+// launch starts the attempts owed outright, then fills the free slots (the
+// targets of the jobs missing someone, less their attempts in flight) with
+// jobs drawn at random, weighted by target, within their budgets. The batch
+// goes out in random order.
+func (r *reacher) launch(ctx context.Context, wg *sync.WaitGroup) {
+	type candidate struct {
+		job          reachJob
+		weight, left int
+	}
+	var batch []reachJob
+	var draw []candidate
+	free, total := 0, 0
+	for _, j := range r.jobs {
+		owed, target, active, left := j.load(len(r.eps), r.budget)
+		for range owed {
+			batch = append(batch, j)
+		}
+		if target > 0 && left > 0 {
+			free += target - active
+			draw = append(draw, candidate{j, target, left})
+			total += target
+		}
+	}
+	for ; free > 0 && total > 0; free-- {
+		n, i := rand.IntN(total), 0
+		for n >= draw[i].weight {
+			n -= draw[i].weight
+			i++
+		}
+		batch = append(batch, draw[i].job)
+		if draw[i].left--; draw[i].left == 0 {
+			total -= draw[i].weight
+			draw[i].weight = 0
+		}
+	}
+	rand.Shuffle(len(batch), func(i, k int) { batch[i], batch[k] = batch[k], batch[i] })
+	for _, j := range batch {
+		j.start(ctx, r, wg)
+	}
+}
+
+// settled reports whether every job has settled.
+func (r *reacher) settled() bool {
+	for _, j := range r.jobs {
+		if !j.settled(len(r.eps), r.budget) {
+			return false
+		}
+	}
+	return true
+}
+
+// listFresh is (*api.Client).ListWorkersFresh as a job's send.
 func listFresh(ctx context.Context, c *api.Client) ([]api.WorkerSummary, string, error) {
 	return c.ListWorkersFresh(ctx)
 }
 
+// isNotFound reports whether err is a 404 reply.
+func isNotFound(err error) bool {
+	var apiErr *api.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
 // pollBalanced polls every instance behind the balancer endpoints eps as a
-// unit of its own, keyed "#"+instance ID, except the instances in direct,
-// which are shown as their direct units only. Lists are fetched first, then
-// every listed worker from the instances whose list has it, all on new
-// connections and within one attempt cap. heard is called with the endpoint
-// and instance of every answer.
-//
-// ponytail: no per-endpoint request limit; add one if new-connection volume
-// bites.
-func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, direct map[string]bool, now time.Time,
-	heard func(endpoint, instance string)) []PodSnapshot {
+// unit of its own, keyed "#"+instance ID, except the instances in skip. One
+// reacher runs the list job and a fetch job per listed worker: an instance's
+// list adds it to the fetch jobs of its workers as soon as it arrives. Every
+// reply is recorded in t, dated now; pollBalanced writes t, so nothing else
+// may use t while it runs.
+func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[string]bool, now time.Time) []PodSnapshot {
 	endpoints := make([]string, len(eps))
 	for i, c := range eps {
 		endpoints[i] = c.PrimaryEndpoint()
 	}
-	known := t.known(endpoints, direct, now)
-	limit := attemptCap(max(len(known), len(eps)))
+	known := t.known(endpoints, skip, now)
+	r := newReacher(eps, attemptCap(max(len(known), len(eps))))
 
-	lists, _, lastErr := reach(ctx, eps, slices.Sorted(maps.Keys(known)), limit, listFresh)
-	listed := make(map[string][]api.WorkerSummary) // instance → its 2xx list
-	having := make(map[string][]string)            // worker → instances whose list has it
-	for id, ans := range lists {
-		heard(ans.Via, id)
-		if direct[id] {
-			continue
+	lists := addJob(r, listFresh, nil)
+	lists.want(slices.Collect(maps.Keys(known))...)
+	fetches := make(map[string]*job[*api.WorkerDetails]) // by worker name
+	replied := false                                     // some list reply named an instance
+	lists.onReply = func(id string, a answer[[]api.WorkerSummary]) {
+		t.saw(a.Via, id, now)
+		replied = true
+		if skip[id] {
+			return
 		}
-		if _, ok := known[id]; !ok {
-			known[id] = now // newly found
+		lists.want(id) // known from now on, new or not
+		list, ok := lists.got[id]
+		if !ok {
+			return
 		}
-		if ans.Err == nil {
-			listed[id] = ans.V
-			for _, w := range ans.V {
-				having[w.Name] = append(having[w.Name], id)
+		for _, w := range list.V {
+			f := fetches[w.Name]
+			if f == nil {
+				name := url.PathEscape(w.Name)
+				f = addJob(r, func(ctx context.Context, c *api.Client) (*api.WorkerDetails, string, error) {
+					return c.GetWorkerFresh(ctx, name)
+				}, isNotFound)
+				f.onReply = func(id string, a answer[*api.WorkerDetails]) { t.saw(a.Via, id, now) }
+				fetches[w.Name] = f
 			}
+			f.want(id)
 		}
 	}
-
-	names := slices.Sorted(maps.Keys(having))
-	fetched := make([]map[string]answer[*api.WorkerDetails], len(names))
-	var wg sync.WaitGroup
-	for i, name := range names {
-		ids := having[name]
-		wg.Go(func() {
-			fetched[i], _, _ = reach(ctx, eps, ids, limit,
-				func(ctx context.Context, c *api.Client) (*api.WorkerDetails, string, error) {
-					return c.GetWorkerFresh(ctx, url.PathEscape(name))
-				})
-		})
-	}
-	wg.Wait()
-	answers := make(map[string]map[string]answer[*api.WorkerDetails], len(names)) // worker → instance → answer
-	for i, name := range names {
-		answers[name] = fetched[i]
-		for id, ans := range fetched[i] {
-			heard(ans.Via, id)
-		}
-	}
+	r.run(ctx)
 
 	var units []PodSnapshot
-	for id, at := range known {
+	for id := range lists.wants {
 		unit := PodSnapshot{Key: "#" + id, Instance: id, Balanced: true}
-		ans, answered := lists[id]
-		switch {
-		case answered && ans.Err == nil:
-			unit.Via = ans.Via
-			unit.Workers = make(map[string]*Sample, len(listed[id]))
-			for _, w := range listed[id] {
-				got, ok := answers[w.Name][id]
-				var apiErr *api.APIError
+		if list, ok := lists.got[id]; ok {
+			unit.Via = list.Via
+			unit.Workers = make(map[string]*Sample, len(list.V))
+			for _, w := range list.V {
+				got, ok := fetches[w.Name].got[id]
 				switch {
-				case ok && got.Err == nil:
-					unit.Workers[w.Name] = &Sample{At: got.At, WorkerDetails: *got.V}
-				case ok && errors.As(got.Err, &apiErr) && apiErr.StatusCode == http.StatusNotFound:
-					// removed since the list: skip
-				default:
+				case !ok:
 					unit.Unreached = append(unit.Unreached, w.Name)
+				case got.Err == nil:
+					unit.Workers[w.Name] = &Sample{At: got.At, WorkerDetails: *got.V}
+				default:
+					// 404: removed since the list
 				}
 			}
 			slices.Sort(unit.Unreached)
-		case answered:
-			unit.Via, unit.Err = ans.Via, ans.Err.Error()
-		case len(lists) == 0 && lastErr != nil:
-			unit.Via, unit.Err = t.lastVia(id), lastErr.Error()
-		default:
+		} else if failed, ok := lists.failed[id]; ok {
+			unit.Via, unit.Err = failed.Via, failed.Err.Error()
+		} else {
 			unit.Via = t.lastVia(id)
-			unit.Err = "not reached this refresh · last seen " + now.Sub(at).Round(time.Second).String() + " ago"
+			if !replied && lists.lastErr != nil {
+				unit.Err = lists.lastErr.Error()
+			} else {
+				unit.Err = "not reached this refresh · last seen " + now.Sub(known[id]).Round(time.Second).String() + " ago"
+			}
 		}
 		units = append(units, unit)
 	}
-	if len(known) == 0 && len(lists) == 0 && lastErr != nil {
+	if len(known) == 0 && !replied && lists.lastErr != nil {
 		for _, ep := range endpoints {
-			units = append(units, PodSnapshot{Key: ep, Via: ep, Balanced: true, Err: lastErr.Error()})
+			units = append(units, PodSnapshot{Key: ep, Via: ep, Balanced: true, Err: lists.lastErr.Error()})
 		}
 	}
 	return units
@@ -197,12 +383,14 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, direct map
 
 // tracker remembers, across a session's ticks, which instances answered
 // through which endpoint and when, and the labels units were given. It
-// belongs to the poller goroutine.
+// belongs to the poller goroutine, which lends it to the balancer pass while
+// it waits for the direct endpoints.
 type tracker struct {
 	window     time.Duration                   // how long a sighting counts: max(1 minute, 3 × interval)
 	kubernetes bool                            // labels are pod names, not instance-N
 	seen       map[string]map[string]time.Time // endpoint → instance → last answer through it
 	labels     map[string]string               // unit key → instance-N; never forgotten, so never reused
+	direct     map[string]bool                 // instances shown as a direct unit by the latest tick
 }
 
 // newTracker returns an empty tracker for a server polled every interval.
@@ -234,16 +422,32 @@ func (t *tracker) saw(endpoint, instance string, at time.Time) {
 // recent reports whether a sighting at at is still within the window at now.
 func (t *tracker) recent(at, now time.Time) bool { return now.Sub(at) <= t.window }
 
-// balancer reports whether more than one instance answered through endpoint
-// within the window.
-func (t *tracker) balancer(endpoint string, now time.Time) bool {
+// behind is how many instances answered through endpoint within the window.
+func (t *tracker) behind(endpoint string, now time.Time) int {
 	n := 0
 	for _, at := range t.seen[endpoint] {
 		if t.recent(at, now) {
 			n++
 		}
 	}
-	return n > 1
+	return n
+}
+
+// balancer reports whether more than one instance answered through endpoint
+// within the window.
+func (t *tracker) balancer(endpoint string, now time.Time) bool { return t.behind(endpoint, now) > 1 }
+
+// lastSeen returns the instance that last answered through endpoint (the
+// smallest on a tie), "" if none did within the window.
+func (t *tracker) lastSeen(endpoint string, now time.Time) string {
+	var instance string
+	var last time.Time
+	for id, at := range t.seen[endpoint] {
+		if t.recent(at, now) && (at.After(last) || at.Equal(last) && id < instance) {
+			instance, last = id, at
+		}
+	}
+	return instance
 }
 
 // known returns every instance that answered through any of balancers within

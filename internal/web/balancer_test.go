@@ -81,65 +81,157 @@ func TestAttemptCap(t *testing.T) {
 	}
 }
 
+// reachLists runs one list job wanting want through eps with the given
+// budget, and returns it.
+func reachLists(ctx context.Context, eps []*api.Client, budget int, want ...string) *job[[]api.WorkerSummary] {
+	r := newReacher(eps, budget)
+	j := addJob(r, listFresh, nil)
+	j.want(want...)
+	r.run(ctx)
+	return j
+}
+
 func TestReachStopsWhenAllAnswered(t *testing.T) {
 	_, srvs := newFakes(t, "a", "b", "c")
 	lb := newRoundRobinLB(t, srvs...)
 
-	got, sent, _ := reach(context.Background(), staticPool(t, lb.URL).Clients(), []string{"a", "b", "c"}, 18, listFresh)
+	j := reachLists(context.Background(), staticPool(t, lb.URL).Clients(), 18, "a", "b", "c")
 
-	if ids := slices.Sorted(maps.Keys(got)); !slices.Equal(ids, []string{"a", "b", "c"}) || sent != 3 {
-		t.Fatalf("got %v after %d attempts, want a, b, c after 3", ids, sent)
+	if ids := slices.Sorted(maps.Keys(j.got)); !slices.Equal(ids, []string{"a", "b", "c"}) || j.sent != 3 {
+		t.Fatalf("got %v after %d attempts, want a, b, c after 3", ids, j.sent)
 	}
-	for id, ans := range got {
+	for id, ans := range j.got {
 		if ans.Err != nil || ans.Via != lb.URL || ans.At.IsZero() || len(ans.V) != 1 || ans.V[0].Instance != id {
 			t.Errorf("%s: answer %+v, want its 2xx list via %s with an arrival time", id, ans, lb.URL)
 		}
 	}
 }
 
-func TestReachRespectsLimit(t *testing.T) {
+func TestReachRespectsBudget(t *testing.T) {
 	_, srvs := newFakes(t, "a", "b", "c")
 	lb := newRoundRobinLB(t, srvs...)
 
-	got, sent, _ := reach(context.Background(), staticPool(t, lb.URL).Clients(), []string{"a", "b", "c", "zz"}, 18, listFresh)
+	j := reachLists(context.Background(), staticPool(t, lb.URL).Clients(), 18, "a", "b", "c", "zz")
 
-	if ids := slices.Sorted(maps.Keys(got)); !slices.Equal(ids, []string{"a", "b", "c"}) || sent != 18 {
-		t.Errorf("got %v after %d attempts, want a, b, c (never zz) after the 18-attempt limit", ids, sent)
+	if ids := slices.Sorted(maps.Keys(j.got)); !slices.Equal(ids, []string{"a", "b", "c"}) || j.sent != 18 {
+		t.Errorf("got %v after %d attempts, want a, b, c (never zz) after the 18-attempt budget", ids, j.sent)
 	}
 }
 
-func TestReachWithoutWantSendsOneRound(t *testing.T) {
+func TestReachWithoutWantTriesEveryEndpoint(t *testing.T) {
 	_, srvs := newFakes(t, "a", "b", "c")
 	lb1, lb2 := newRoundRobinLB(t, srvs...), newRoundRobinLB(t, srvs...)
 
-	got, sent, _ := reach(context.Background(), staticPool(t, lb1.URL, lb2.URL).Clients(), nil, 18, listFresh)
+	j := reachLists(context.Background(), staticPool(t, lb1.URL, lb2.URL).Clients(), 18)
 
-	if sent != 2 || len(got) == 0 {
-		t.Errorf("got %d answers after %d attempts, want one attempt per endpoint", len(got), sent)
+	if j.sent != 2 || len(j.got) == 0 {
+		t.Errorf("got %d answers after %d attempts, want one attempt per endpoint", len(j.got), j.sent)
 	}
 }
 
-// reach returns only after every attempt it started has returned, even when
-// its context ends first.
-func TestReachReturnsWithItsAttempts(t *testing.T) {
-	var inFlight atomic.Int32
-	slow := func(ctx context.Context, c *api.Client) (int, string, error) {
-		inFlight.Add(1)
-		defer inFlight.Add(-1)
+// fakeSend is a job send answering from a script: call n (from 0) gets
+// replies[n], or the last one past its end. A reply with block set waits
+// for ctx to end and returns its error. inFlight counts calls running.
+type fakeSend struct {
+	replies  []fakeReply
+	calls    atomic.Int32
+	inFlight atomic.Int32
+}
+
+type fakeReply struct {
+	v        int
+	instance string
+	err      error
+	block    bool
+}
+
+func (f *fakeSend) send(ctx context.Context, _ *api.Client) (int, string, error) {
+	f.inFlight.Add(1)
+	defer f.inFlight.Add(-1)
+	r := f.replies[min(int(f.calls.Add(1))-1, len(f.replies)-1)]
+	if r.block {
 		<-ctx.Done()
 		time.Sleep(20 * time.Millisecond) // a request slow to wind down
 		return 0, "", ctx.Err()
 	}
+	return r.v, r.instance, r.err
+}
+
+// oneEndpoint is a reacher endpoint list for sends that never dial.
+func oneEndpoint() []*api.Client { return []*api.Client{api.NewClient("http://unused", "")} }
+
+// run returns only after every attempt it started has returned, even when
+// its context ends first.
+func TestReachReturnsWithItsAttempts(t *testing.T) {
+	f := &fakeSend{replies: []fakeReply{{block: true}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
+	r := newReacher(oneEndpoint(), 6)
+	j := addJob(r, f.send, nil)
+	j.want("a")
 
-	got, sent, lastErr := reach(ctx, []*api.Client{api.NewClient("http://unused", "")}, []string{"a"}, 6, slow)
+	r.run(ctx)
 
-	if n := inFlight.Load(); n != 0 {
-		t.Errorf("%d attempts still running after reach returned", n)
+	if n := f.inFlight.Load(); n != 0 {
+		t.Errorf("%d attempts still running after run returned", n)
 	}
-	if len(got) != 0 || sent != 1 || lastErr == nil {
-		t.Errorf("got %v, sent %d, lastErr %v; want no answer after the one attempt the deadline cut", got, sent, lastErr)
+	if len(j.got) != 0 || j.sent != 1 || j.lastErr == nil {
+		t.Errorf("got %v, sent %d, lastErr %v; want no answer after the one attempt the deadline cut", j.got, j.sent, j.lastErr)
+	}
+}
+
+// An instance's error reply does not settle it: a later 2xx does, and wins.
+func TestReachTakesDefinitiveAnswer(t *testing.T) {
+	boom := &api.APIError{StatusCode: http.StatusInternalServerError, Message: "boom"}
+	gone := &api.APIError{StatusCode: http.StatusNotFound, Message: "gone"}
+
+	f := &fakeSend{replies: []fakeReply{{instance: "a", err: boom}, {v: 7, instance: "a"}}}
+	r := newReacher(oneEndpoint(), 6)
+	j := addJob(r, f.send, nil)
+	j.want("a")
+	r.run(context.Background())
+	if got, ok := j.got["a"]; !ok || got.Err != nil || got.V != 7 || j.sent != 2 || len(j.failed) != 0 {
+		t.Errorf("got %+v (ok %v) after %d attempts, failed %v; want the 2xx after the 500", got, ok, j.sent, j.failed)
+	}
+
+	f = &fakeSend{replies: []fakeReply{{instance: "a", err: boom}}}
+	r = newReacher(oneEndpoint(), 6)
+	j = addJob(r, f.send, nil)
+	j.want("a")
+	r.run(context.Background())
+	if _, ok := j.got["a"]; ok || j.sent != 6 || j.failed["a"].Err != boom {
+		t.Errorf("got %v after %d attempts, failed %v; want the 500 kept after the whole budget", j.got, j.sent, j.failed)
+	}
+
+	f = &fakeSend{replies: []fakeReply{{instance: "a", err: gone}}}
+	r = newReacher(oneEndpoint(), 6)
+	j = addJob(r, f.send, isNotFound)
+	j.want("a")
+	r.run(context.Background())
+	if got, ok := j.got["a"]; !ok || got.Err != gone || j.sent != 1 {
+		t.Errorf("got %+v (ok %v) after %d attempts; want the 404 to settle a fetch at once", got, ok, j.sent)
+	}
+}
+
+// An attempt stuck on a slow instance does not hold its job up: once the
+// replies stop coming, the job sends others, and the stuck one is cancelled
+// when the job is done.
+func TestReachRetriesPastAStuckAttempt(t *testing.T) {
+	f := &fakeSend{replies: []fakeReply{{instance: "a"}, {block: true}, {instance: "b"}}}
+	r := newReacher(oneEndpoint(), 6)
+	j := addJob(r, f.send, nil)
+	j.want("a", "b")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	r.run(ctx)
+
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("run took %v, want it to retry well before any deadline", elapsed)
+	}
+	if ids := slices.Sorted(maps.Keys(j.got)); !slices.Equal(ids, []string{"a", "b"}) || f.inFlight.Load() != 0 {
+		t.Errorf("got %v with %d attempts in flight, want a and b and the stuck attempt cancelled", ids, f.inFlight.Load())
 	}
 }
 
@@ -272,8 +364,8 @@ func TestPollBalancerMissedInstance(t *testing.T) {
 			t.Errorf("%s = %+v, want healthy", key, p)
 		}
 	}
-	if s.Behind[lb.URL] != 2 {
-		t.Errorf("Behind = %v, want the 2 instances that answered", s.Behind)
+	if s.Behind[lb.URL] != 3 {
+		t.Errorf("Behind = %v, want the 3 instances seen within the window", s.Behind)
 	}
 }
 
@@ -339,10 +431,16 @@ func TestPollDedupesInstanceAcrossEndpoints(t *testing.T) {
 		lb := newRoundRobinLB(t, srvs...)
 		pool, tr := lbPoll(t, lb.URL, srvs[0].URL)
 
-		s := pollUntil(t, pool, tr, 3, "units #b and a's address", hasKeys("#b", srvs[0].URL))
+		pollUntil(t, pool, tr, 3, "units #b and a's address", hasKeys("#b", srvs[0].URL))
 
-		if a := podByEndpoint(t, s, srvs[0].URL); a.Balanced || a.Instance != "a" || a.Err != "" {
-			t.Errorf("a = %+v, want the healthy direct unit of instance a", a)
+		for range 3 {
+			s := pollOnce(context.Background(), pool, tr)
+			if keys := unitKeys(s); !slices.Equal(keys, []string{"#b", srvs[0].URL}) {
+				t.Fatalf("units = %v, want #b and a's own address, never #a", keys)
+			}
+			if a := podByEndpoint(t, s, srvs[0].URL); a.Balanced || a.Instance != "a" || a.Err != "" {
+				t.Errorf("a = %+v, want the healthy direct unit of instance a", a)
+			}
 		}
 	})
 }
@@ -408,20 +506,74 @@ func TestPollBalancerDeadline(t *testing.T) {
 	fakes[2].Delay = 2 * time.Second
 	fakes[2].mu.Unlock()
 	const deadline = 300 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
-	defer cancel()
-	start := time.Now()
-	s := pollOnce(ctx, pool, tr)
+	for tick := range 3 {
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		start := time.Now()
+		s := pollOnce(ctx, pool, tr)
+		cancel()
 
-	if elapsed := time.Since(start); elapsed > deadline+100*time.Millisecond {
-		t.Errorf("pollOnce took %v, want it bounded by the %v deadline", elapsed, deadline)
+		if elapsed := time.Since(start); elapsed > deadline+100*time.Millisecond {
+			t.Errorf("tick %d took %v, want it bounded by the %v deadline", tick, elapsed, deadline)
+		}
+		if c := podByEndpoint(t, s, "#c"); c.Err == "" && len(c.Unreached) == 0 {
+			t.Errorf("tick %d: #c = %+v, want errored or its workers not reached", tick, c)
+		}
+		for _, key := range []string{"#a", "#b"} {
+			if p := podByEndpoint(t, s, key); p.Err != "" || p.Workers["w"] == nil {
+				t.Errorf("tick %d: %s = %+v, want healthy with its w sample", tick, key, p)
+			}
+		}
 	}
-	if c := podByEndpoint(t, s, "#c"); c.Err == "" && len(c.Unreached) == 0 {
-		t.Errorf("#c = %+v, want errored or its workers not reached", c)
+}
+
+// A slow direct endpoint does not hold up the balancer next to it.
+func TestPollSlowDirectDoesNotStarveBalancer(t *testing.T) {
+	_, srvs := newFakes(t, "a", "b")
+	fd, d := newFakeVarmq(t, "d", map[string]*fakeWorker{"w": {Status: "Running"}})
+	lb := newRoundRobinLB(t, srvs...)
+	pool, tr := lbPoll(t, lb.URL, d.URL)
+	pollUntil(t, pool, tr, 3, "units #a, #b and d", hasKeys("#a", "#b", d.URL))
+
+	fd.mu.Lock()
+	fd.Delay = 2 * time.Second
+	fd.mu.Unlock()
+	const deadline = 300 * time.Millisecond
+	for tick := range 3 {
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		s := pollOnce(ctx, pool, tr)
+		cancel()
+
+		if keys := unitKeys(s); !slices.Equal(keys, []string{"#a", "#b", d.URL}) {
+			t.Fatalf("tick %d: units = %v, want #a, #b and d", tick, keys)
+		}
+		if p := podByEndpoint(t, s, d.URL); p.Err == "" {
+			t.Errorf("tick %d: d = %+v, want errored by the deadline", tick, p)
+		}
+		for _, key := range []string{"#a", "#b"} {
+			if p := podByEndpoint(t, s, key); p.Err != "" || p.Workers["w"] == nil {
+				t.Errorf("tick %d: %s = %+v, want healthy with its w sample", tick, key, p)
+			}
+		}
 	}
-	for _, key := range []string{"#a", "#b"} {
-		if p := podByEndpoint(t, s, key); p.Err != "" {
-			t.Errorf("%s Err = %q, want healthy", key, p.Err)
+}
+
+// A direct unit whose list got no reply is still its instance's unit, so
+// that instance does not also show up through a balancer.
+func TestPollDirectUnitWithoutReplyKeepsItsInstance(t *testing.T) {
+	_, srvs := newFakes(t, "a", "b")
+	lb := newRoundRobinLB(t, srvs...)
+	own := newRoundRobinLB(t, srvs[0]) // a's own address, which can go away alone
+	pool, tr := lbPoll(t, lb.URL, own.URL)
+	pollUntil(t, pool, tr, 3, "units #b and a's address", hasKeys("#b", own.URL))
+
+	own.Close()
+	for range 3 {
+		s := pollOnce(context.Background(), pool, tr)
+		if keys := unitKeys(s); !slices.Equal(keys, []string{"#b", own.URL}) {
+			t.Fatalf("units = %v, want #b and a's own address, never #a", keys)
+		}
+		if a := podByEndpoint(t, s, own.URL); a.Err == "" || a.Instance != "a" {
+			t.Errorf("a = %+v, want errored, still instance a's unit", a)
 		}
 	}
 }
@@ -437,22 +589,64 @@ func TestPollBalancerEscapesWorkerNames(t *testing.T) {
 
 	s := pollUntil(t, pool, tr, 3, "units #a and #b", hasKeys("#a", "#b"))
 
-	// Not every unit is asserted to have both: concurrent per-name reaches
-	// can fall into lockstep behind a round-robin balancer, each name handed
-	// the same instance on every retry. Each name reaches some instance.
-	sampled := map[string]bool{}
 	for _, p := range s.Pods {
-		for _, name := range sampleNames(p) {
-			sampled[name] = true
+		if got := sampleNames(p); !slices.Equal(got, []string{"a/b", "x y"}) || len(p.Unreached) != 0 {
+			t.Errorf("%s workers = %v, unreached %v; want both under their raw names", p.Key, got, p.Unreached)
 		}
-	}
-	if got := slices.Sorted(maps.Keys(sampled)); !slices.Equal(got, []string{"a/b", "x y"}) {
-		t.Errorf("sampled workers = %v, want both under their raw names", got)
 	}
 	calls := append(fa.calls(), fb.calls()...)
 	if !slices.Contains(calls, "GET /workers/a%2Fb") || !slices.Contains(calls, "GET /workers/x%20y") ||
 		slices.Contains(calls, "GET /workers/a/b") {
 		t.Errorf("calls = %v, want the escaped names", calls)
+	}
+}
+
+// Fetches of different workers behind a round-robin balancer must not fall
+// into lockstep, each handed the same instance on every try: that misses
+// pairs of (instance, worker) tick after tick. A pair missed now and then is
+// the attempt cap at work (about one in a few thousand here), which the spec
+// allows: one miss over the ten ticks passes, a second fails.
+func TestPollBalancerReachesEveryWorker(t *testing.T) {
+	for _, tc := range []struct{ instances, workers int }{{2, 2}, {2, 4}, {3, 3}, {3, 6}} {
+		t.Run(fmt.Sprintf("%d instances, %d workers", tc.instances, tc.workers), func(t *testing.T) {
+			var srvs []*httptest.Server
+			var keys []string
+			for i := range tc.instances {
+				workers := make(map[string]*fakeWorker)
+				for w := range tc.workers {
+					workers[fmt.Sprintf("w%d", w)] = &fakeWorker{Status: "Running"}
+				}
+				id := string(rune('a' + i))
+				_, srv := newFakeVarmq(t, id, workers)
+				srvs, keys = append(srvs, srv), append(keys, "#"+id)
+			}
+			lb := newRoundRobinLB(t, srvs...)
+			pool, tr := lbPoll(t, lb.URL)
+			pollUntil(t, pool, tr, 3, "every unit", hasKeys(keys...))
+
+			var missed map[string]bool // unit key + "/" + worker, on the previous tick
+			misses := 0
+			for tick := range 10 {
+				s := pollOnce(context.Background(), pool, tr)
+				now := make(map[string]bool)
+				for _, p := range s.Pods {
+					if p.Err != "" || len(p.Workers)+len(p.Unreached) != tc.workers {
+						t.Fatalf("tick %d: %s = %+v, want healthy with all %d workers listed", tick, p.Key, p, tc.workers)
+					}
+					misses += len(p.Unreached)
+					for _, w := range p.Unreached {
+						now[p.Key+"/"+w] = true
+						if missed[p.Key+"/"+w] {
+							t.Errorf("tick %d: %s/%s not reached two ticks running", tick, p.Key, w)
+						}
+					}
+				}
+				missed = now
+			}
+			if misses > 1 {
+				t.Errorf("%d (instance, worker) pairs not reached over 10 ticks, want at most 1", misses)
+			}
+		})
 	}
 }
 
@@ -528,8 +722,8 @@ func TestBalancerEndpointDown(t *testing.T) {
 				t.Errorf("%s Err = %q, want the balancer's dial error %q", p.Key, p.Err, want)
 			}
 		}
-		if len(s.Behind) != 0 {
-			t.Errorf("Behind = %v, want none: no instance answered", s.Behind)
+		if want := map[string]int{lb.URL: 2}; !maps.Equal(s.Behind, want) {
+			t.Errorf("Behind = %v, want %v: both were seen within the window", s.Behind, want)
 		}
 	})
 	t.Run("none known", func(t *testing.T) {
@@ -538,6 +732,13 @@ func TestBalancerEndpointDown(t *testing.T) {
 		pool, tr := lbPoll(t, lb.URL, srvs[0].URL, srvs[1].URL)
 		// a and b are direct units, so nothing behind the balancer is a unit of its own.
 		pollUntil(t, pool, tr, 3, "the balancer noticed", func(s *Snapshot) bool { return s.Behind[lb.URL] == 2 })
+		for range 3 {
+			// One list attempt goes through the balancer, finding one instance:
+			// the note still counts both.
+			if s := pollOnce(context.Background(), pool, tr); s.Behind[lb.URL] != 2 || len(s.Pods) != 2 {
+				t.Fatalf("Behind = %v, units %v; want 2 behind and only the direct a and b", s.Behind, unitKeys(s))
+			}
+		}
 
 		lb.Close()
 		s := pollOnce(context.Background(), pool, tr)
