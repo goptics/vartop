@@ -380,6 +380,54 @@ func TestCollectorRatesSnapshots(t *testing.T) {
 	}
 }
 
+// TestCollectorLabels: a collector hands its sink the label state with the
+// tick that changed it, and numbers units by the state LoadLabels gives it.
+func TestCollectorLabels(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", nil)
+	ticks := make(chan Tick, 8)
+	c := NewCollector(&config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}},
+		fleettest.StaticPool(t, srv.URL), func(tick Tick) error {
+			select {
+			case ticks <- tick:
+			default:
+			}
+			return nil
+		})
+	t.Cleanup(func() { _ = c.Close() })
+
+	select {
+	case first := <-ticks:
+		if l := first.Snap.Pods[0].Label; l != "instance-1" {
+			t.Errorf("first tick labels the unit %q, want instance-1", l)
+		}
+		if first.Labels == nil || first.Labels.Numbers["#i"].N != 1 {
+			t.Errorf("first tick's Labels = %+v, want #i numbered 1", first.Labels)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no tick within 3s")
+	}
+
+	c.LoadLabels(LabelState{
+		Numbers:  map[string]LabelNumber{"#i": {N: 7, Seen: time.Now().Truncate(time.Minute)}},
+		Followed: map[string]string{srv.URL: "#i"},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if !c.PollNow(ctx) {
+		t.Fatal("PollNow = false, want true")
+	}
+	var last Tick
+	for len(ticks) > 0 {
+		last = <-ticks
+	}
+	if last.Snap == nil {
+		t.Fatal("no tick after PollNow")
+	}
+	if l := last.Snap.Pods[0].Label; l != "instance-7" {
+		t.Errorf("after LoadLabels the unit is labelled %q, want instance-7", l)
+	}
+}
+
 func TestTicksDoNotOverlap(t *testing.T) {
 	f, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running"}})
 	f.Delay = 1500 * time.Millisecond // 1.5 × the 1s interval

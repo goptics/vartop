@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -705,6 +706,9 @@ func TestPollBalancerReachesEveryWorker(t *testing.T) {
 	}
 }
 
+// labelT0 is when the label tests' ticks happen, unless they say otherwise.
+var labelT0 = time.Date(2026, 10, 26, 12, 0, 30, 0, time.UTC)
+
 // labels maps each unit key of pods to its label.
 func labels(pods []PodSnapshot) map[string]string {
 	m := make(map[string]string, len(pods))
@@ -721,9 +725,9 @@ func labels(pods []PodSnapshot) map[string]string {
 func TestLabelsFollowTheInstance(t *testing.T) {
 	tr := newTracker(time.Second, false)
 	first := []PodSnapshot{{Key: "http://lb", Instance: "b"}}
-	tr.label(first)
+	tr.label(first, labelT0)
 	second := []PodSnapshot{{Key: "#a", Instance: "a", Balanced: true}, {Key: "#b", Instance: "b", Balanced: true}}
-	tr.label(second)
+	tr.label(second, labelT0)
 
 	if got, want := labels(first), map[string]string{"http://lb": "instance-1"}; !maps.Equal(got, want) {
 		t.Errorf("first tick labels = %v, want %v", got, want)
@@ -737,7 +741,7 @@ func TestLabelsFollowTheInstance(t *testing.T) {
 
 	t.Run("a shared instance numbers by key", func(t *testing.T) {
 		pods := []PodSnapshot{{Key: "http://z", Instance: "x"}, {Key: "http://y", Instance: "x"}, {Key: "http://w"}}
-		newTracker(time.Second, false).label(pods)
+		newTracker(time.Second, false).label(pods, labelT0)
 		want := map[string]string{"http://w": "instance-1", "http://y": "instance-2", "http://z": "instance-3"}
 		if got := labels(pods); !maps.Equal(got, want) {
 			t.Errorf("labels = %v, want %v", got, want)
@@ -762,19 +766,22 @@ func TestLabelsFollowTheInstance(t *testing.T) {
 	})
 }
 
-func TestLabelsNeverReused(t *testing.T) {
+// TestLabelsNotReusedWithinADay: a number no unit shows any more is not
+// given to another unit for a day, while stored snapshots may still show
+// it (TestLabelNumberFreedAfter24h has the day after).
+func TestLabelsNotReusedWithinADay(t *testing.T) {
 	tr := newTracker(time.Second, false)
 
 	first := []PodSnapshot{{Key: "#b"}, {Key: "#a"}}
-	tr.label(first)
+	tr.label(first, labelT0)
 	second := []PodSnapshot{{Key: "#c"}, {Key: "#a"}}
-	tr.label(second)
+	tr.label(second, labelT0.Add(23*time.Hour))
 
 	if got, want := labels(first), map[string]string{"#a": "instance-1", "#b": "instance-2"}; !maps.Equal(got, want) {
 		t.Errorf("first tick labels = %v, want %v", got, want)
 	}
 	if got, want := labels(second), map[string]string{"#a": "instance-1", "#c": "instance-3"}; !maps.Equal(got, want) {
-		t.Errorf("second tick labels = %v, want %v (instance-2 is never reused)", got, want)
+		t.Errorf("second tick labels = %v, want %v (instance-2 is not reused within a day)", got, want)
 	}
 
 	t.Run("static list numbers in URL order", func(t *testing.T) {
@@ -792,7 +799,7 @@ func TestLabelsNeverReused(t *testing.T) {
 	})
 	t.Run("kubernetes leaves labels alone", func(t *testing.T) {
 		pods := []PodSnapshot{{Key: "#a", Label: "varmq-0"}, {Key: "http://h:1", Label: "varmq-1"}}
-		newTracker(time.Second, true).label(pods)
+		newTracker(time.Second, true).label(pods, labelT0)
 		if got, want := labels(pods), map[string]string{"#a": "varmq-0", "http://h:1": "varmq-1"}; !maps.Equal(got, want) {
 			t.Errorf("labels = %v, want %v", got, want)
 		}
@@ -878,7 +885,7 @@ func TestLabelsOfDownUnits(t *testing.T) {
 	run := func(t *testing.T, steps ...step) {
 		tr := newTracker(time.Second, false)
 		for i, s := range steps {
-			tr.label(s.pods)
+			tr.label(s.pods, labelT0)
 			if got := labels(s.pods); !maps.Equal(got, s.want) {
 				t.Errorf("step %d: labels = %v, want %v", i, got, s.want)
 			}
@@ -922,6 +929,160 @@ func TestLabelsOfDownUnits(t *testing.T) {
 			step{[]PodSnapshot{{Key: "http://x"}, {Key: "http://y"}}, map[string]string{"http://x": "instance-1", "http://y": "instance-2"}},
 		)
 	})
+}
+
+// numbersOf is the number of every unit key of pods, from its label.
+func numbersOf(t *testing.T, pods []PodSnapshot) map[string]int {
+	t.Helper()
+	m := make(map[string]int, len(pods))
+	for _, p := range pods {
+		n, err := strconv.Atoi(strings.TrimPrefix(p.Label, "instance-"))
+		if err != nil {
+			t.Fatalf("%s: label %q is not instance-N", p.Key, p.Label)
+		}
+		m[p.Key] = n
+	}
+	return m
+}
+
+// TestLabelStateRoundTrip: a tracker loaded with another's label state
+// numbers the same units as that one would, through hand-overs, down units
+// and new ones.
+func TestLabelStateRoundTrip(t *testing.T) {
+	ticks := [][]PodSnapshot{
+		{{Key: "http://x"}, {Key: "#a", Instance: "a", Balanced: true}},                                   // x down from the start
+		{{Key: "http://x", Instance: "b"}, {Key: "#a", Instance: "a", Balanced: true}},                    // b takes x's number
+		{{Key: "http://y", Instance: "b"}, {Key: "http://x"}, {Key: "#c", Instance: "c", Balanced: true}}, // b moved to y, x down
+	}
+	next := []PodSnapshot{
+		{Key: "http://x", Instance: "b"}, {Key: "http://y"}, {Key: "#d", Instance: "d", Balanced: true}, {Key: "#a", Instance: "a", Balanced: true},
+	}
+	clone := func(pods []PodSnapshot) []PodSnapshot { return slices.Clone(pods) }
+
+	tr := newTracker(time.Second, false)
+	for i, pods := range ticks {
+		tr.label(clone(pods), labelT0.Add(time.Duration(i)*time.Second))
+	}
+	state, changed := tr.labels()
+	if !changed || len(state.Numbers) == 0 || len(state.Followed) == 0 {
+		t.Fatalf("labels() = %+v, %v; want the numbers given, changed", state, changed)
+	}
+
+	loaded := newTracker(time.Second, false)
+	loaded.loadLabels(state)
+	if again, changed := loaded.labels(); changed || !reflect.DeepEqual(again, state) {
+		t.Errorf("after loadLabels, labels() = %+v, %v; want the state loaded, unchanged", again, changed)
+	}
+	at := labelT0.Add(time.Minute)
+	want, got := clone(next), clone(next)
+	tr.label(want, at)
+	loaded.label(got, at)
+	if g, w := numbersOf(t, got), numbersOf(t, want); !maps.Equal(g, w) {
+		t.Errorf("loaded tracker numbers %v, want %v as the tracker it was saved from", g, w)
+	}
+
+	// The state is a copy both ways: changing it changes no tracker.
+	state.Numbers["#a"] = LabelNumber{N: 99}
+	clear(state.Followed)
+	for name, tr := range map[string]*tracker{"saved": tr, "loaded": loaded} {
+		if again, _ := tr.labels(); again.Numbers["#a"].N == 99 || len(again.Followed) == 0 {
+			t.Errorf("changing the state changed the %s tracker", name)
+		}
+	}
+}
+
+// TestLabelsChanged: labels() reports a change only when a number or what a
+// unit follows changed, or a number was seen in a later minute.
+func TestLabelsChanged(t *testing.T) {
+	tr := newTracker(time.Second, false)
+	if _, changed := tr.labels(); changed {
+		t.Error("a new tracker's labels changed")
+	}
+	pods := func() []PodSnapshot { return []PodSnapshot{{Key: "#a", Instance: "a", Balanced: true}} }
+	for _, step := range []struct {
+		at      time.Time
+		pods    []PodSnapshot
+		changed bool
+	}{
+		{labelT0, pods(), true},                                                            // a new number
+		{labelT0.Add(10 * time.Second), pods(), false},                                     // same minute, same units
+		{labelT0.Add(time.Minute), pods(), true},                                           // seen in a later minute
+		{labelT0.Add(time.Minute + time.Second), nil, false},                               // no unit: nothing seen
+		{labelT0.Add(2 * time.Minute), append(pods(), PodSnapshot{Key: "http://x"}), true}, // a new unit
+	} {
+		tr.label(step.pods, step.at)
+		state, changed := tr.labels()
+		if changed != step.changed {
+			t.Errorf("at %v: changed = %v, want %v", step.at, changed, step.changed)
+		}
+		for key, n := range state.Numbers {
+			if n.Seen != n.Seen.Truncate(time.Minute) {
+				t.Errorf("at %v: %s seen at %v, want a whole minute", step.at, key, n.Seen)
+			}
+		}
+	}
+	if _, changed := tr.labels(); changed {
+		t.Error("labels() reported one change twice")
+	}
+}
+
+// TestLabelNumberFreedAfter24h: a number no unit has shown for over a day
+// is free, and a new unit takes the lowest free number.
+func TestLabelNumberFreedAfter24h(t *testing.T) {
+	now := labelT0
+	state := LabelState{
+		Numbers: map[string]LabelNumber{
+			"#a": {N: 1, Seen: now.Add(-time.Hour).Truncate(time.Minute)},
+			"#b": {N: 2, Seen: now.Add(-25 * time.Hour).Truncate(time.Minute)},
+			"#c": {N: 3, Seen: now.Add(-time.Hour).Truncate(time.Minute)},
+			"#e": {N: 4, Seen: now.Add(-23 * time.Hour).Truncate(time.Minute)},
+		},
+		Followed: map[string]string{"#a": "#a", "#b": "#b", "#c": "#c", "#e": "#e"},
+	}
+	tr := newTracker(time.Second, false)
+	tr.loadLabels(state)
+
+	pods := []PodSnapshot{
+		{Key: "#a", Instance: "a", Balanced: true},
+		{Key: "#c", Instance: "c", Balanced: true},
+		{Key: "#d", Instance: "d", Balanced: true},
+		{Key: "#f", Instance: "f", Balanced: true},
+	}
+	tr.label(pods, now)
+
+	want := map[string]int{"#a": 1, "#c": 3, "#d": 2, "#f": 5}
+	if got := numbersOf(t, pods); !maps.Equal(got, want) {
+		t.Errorf("numbers = %v, want %v: b's 2 is free after 25h, e's 4 is not after 23h", got, want)
+	}
+	got, changed := tr.labels()
+	if _, ok := got.Numbers["#b"]; ok || !changed {
+		t.Errorf("labels() = %+v, %v; want #b's number gone, changed", got, changed)
+	}
+	if _, ok := got.Followed["#b"]; ok {
+		t.Errorf("Followed still has #b, whose number was freed: %v", got.Followed)
+	}
+	if n := got.Numbers["#e"]; n.N != 4 || !n.Seen.Equal(state.Numbers["#e"].Seen) {
+		t.Errorf("#e = %+v, want number 4 still seen 23h ago", n)
+	}
+}
+
+// TestLiveNumberNotFreedAfterSleep: after the machine slept for longer than
+// a day, the units still there keep their numbers; only the number of one
+// that is gone is free.
+func TestLiveNumberNotFreedAfterSleep(t *testing.T) {
+	tr := newTracker(time.Second, false)
+	before := []PodSnapshot{{Key: "http://x", Instance: "x"}, {Key: "http://y", Instance: "y"}, {Key: "http://z", Instance: "z"}}
+	tr.label(before, labelT0)
+
+	after := []PodSnapshot{{Key: "http://x", Instance: "x"}, {Key: "http://z", Instance: "z"}, {Key: "http://w", Instance: "w"}}
+	tr.label(after, labelT0.Add(30*time.Hour))
+
+	if got, want := numbersOf(t, before), map[string]int{"http://x": 1, "http://y": 2, "http://z": 3}; !maps.Equal(got, want) {
+		t.Fatalf("before the sleep: numbers = %v, want %v", got, want)
+	}
+	if got, want := numbersOf(t, after), map[string]int{"http://x": 1, "http://z": 3, "http://w": 2}; !maps.Equal(got, want) {
+		t.Errorf("after 30h asleep: numbers = %v, want %v: x and z keep theirs, w takes y's", got, want)
+	}
 }
 
 func TestBalancerEndpointDown(t *testing.T) {

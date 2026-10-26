@@ -16,7 +16,8 @@ import (
 
 // Tick is what a collector hands its sink after each poll.
 type Tick struct {
-	Snap *Snapshot // rated; immutable once handed over
+	Snap   *Snapshot   // rated; the collector never touches it again
+	Labels *LabelState // the label state if this tick changed it, else nil; the sink's to keep
 }
 
 // Collector polls one server: a single background goroutine fans out to
@@ -27,11 +28,11 @@ type Collector struct {
 	interval time.Duration
 	pool     *api.Pool
 	sink     func(Tick) error
-	tracker  *tracker        // the poller goroutine's
+	tracker  *tracker        // the poller goroutine's, but for its label state (see LoadLabels)
 	rater    *Rater          // the poller goroutine's
 	ctx      context.Context // cancelled by Close
 	cancel   context.CancelFunc
-	pollNow  chan chan struct{} // the poller closes each received channel once its snapshot is sunk
+	pollNow  chan chan struct{} // the poller closes each received channel once its snapshot has reached the sink
 	stopped  chan struct{}      // closed when the poller goroutine returns
 }
 
@@ -86,6 +87,13 @@ func (c *Collector) PollNow(ctx context.Context) bool {
 	}
 }
 
+// LoadLabels replaces the state the collector numbers units by with s, one
+// kept from an earlier run (see Tick.Labels). A tick numbers its units once
+// its polls are done: every tick started after the call numbers them from
+// s, and so does the first tick when LoadLabels comes right after
+// NewCollector, unless that tick's polls are done first.
+func (c *Collector) LoadLabels(s LabelState) { c.tracker.loadLabels(s) }
+
 // Close stops polling and closes the pool. It does not wait for the poller:
 // a tick in flight has its requests cancelled and reaches no sink.
 func (c *Collector) Close() error {
@@ -128,7 +136,11 @@ func (c *Collector) tick() bool {
 		return false
 	}
 	c.rater.Rate(snap)
-	return c.sink(Tick{Snap: snap}) == nil
+	tick := Tick{Snap: snap}
+	if labels, changed := c.tracker.labels(); changed {
+		tick.Labels = &labels
+	}
+	return c.sink(tick) == nil
 }
 
 // pollOnce polls every unit of the pool within ctx, tracking instances
@@ -229,7 +241,7 @@ func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Sna
 		dedupeLabels(snap.Pods)
 		slices.SortFunc(snap.Pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
 	} else {
-		t.label(snap.Pods) // and lists them by number
+		t.label(snap.Pods, now) // and lists them by number
 	}
 	t.prune(now)
 	return snap
