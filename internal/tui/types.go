@@ -4,57 +4,61 @@ import (
 	"fmt"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 // Message types for Bubble Tea
 
-// tickMsg is sent periodically to trigger data refresh
+// tickMsg comes every syncEvery: the model syncs the feed of the server it
+// shows, and reads the config again.
 type tickMsg time.Time
 
-// workersMsg carries the list of workers from the API
-type workersMsg []api.WorkerSummary
-
-// workerDetailsMsg carries detailed information about a single worker
-type workerDetailsMsg *api.WorkerDetails
-
-// healthMsg carries the health check result
-type healthMsg struct {
-	ok     bool
-	status map[string]bool // per-endpoint health status
+// syncedMsg is a sync of the feed of the server keyed server ended, for the
+// model's generation gen; Update drops it unless both are still current
+// (see Model.gen). It also says what control.db said at the sync: whether
+// no daemon holds a fresh lease (down), and the server's collection error.
+type syncedMsg struct {
+	server string
+	gen    int
+	err    error
+	down   bool
+	srvErr string
 }
 
-// errMsg carries an error that should be displayed to the user
-type errMsg struct{ err error }
+// configMsg carries the config read again.
+type configMsg struct{ cfg *config.Config }
 
-// serverSwitchMsg carries the result of building a pool for a newly selected
-// server: either a ready pool, or the construction error.
-type serverSwitchMsg struct {
-	seq  int // matches Model.switchSeq for the latest requested build
-	srv  *config.Server
-	pool *api.Pool
-	err  error
+// switcherMsg carries the newest stored snapshot of each configured
+// server, by key (nil: none yet), for the switcher.
+type switcherMsg struct{ latest map[string]*fleet.Snapshot }
+
+// actedMsg is an action or a refresh (r) on the server keyed server ended,
+// for generation gen; err says why it failed or was refused.
+type actedMsg struct {
+	server string
+	gen    int
+	err    error
 }
 
-// scopedMsg tags a result with the pool that produced it; Update drops it if
-// that pool is no longer active.
-type scopedMsg struct {
-	pool *api.Pool
-	msg  tea.Msg
+// resyncMsg asks for a sync of the server keyed server, generation gen,
+// shortly after an action.
+type resyncMsg struct {
+	server string
+	gen    int
 }
 
 // List item types
 
-// switchServerItem represents a server (merged pods view) in the switcher
+// switchServerItem represents a server (merged view of its units) in the
+// switcher: units and healthy count its newest snapshot's units.
 type switchServerItem struct {
-	name        string
-	podCount    int
-	healthyPods int
-	expanded    bool
+	name           string
+	noun           fleet.Noun
+	units, healthy int
+	expanded       bool
 }
 
 func (i switchServerItem) Title() string {
@@ -63,26 +67,26 @@ func (i switchServerItem) Title() string {
 		indicator = "▼"
 	}
 
-	if i.podCount <= 1 {
+	if i.units <= 1 {
 		return fmt.Sprintf("%s %s", indicator, i.name)
 	}
 
 	dot := StatusStyleRunning.Render("●")
-	if i.healthyPods == 0 {
+	if i.healthy == 0 {
 		dot = StatusStyleStopped.Render("○")
-	} else if i.healthyPods < i.podCount {
+	} else if i.healthy < i.units {
 		dot = StatusStyleWarning.Render("◐")
 	}
-	return fmt.Sprintf("%s %s %s (%d pods, %d healthy)", indicator, dot, i.name, i.podCount, i.healthyPods)
+	return fmt.Sprintf("%s %s %s (%d %s, %d healthy)", indicator, dot, i.name, i.units, i.noun.Many, i.healthy)
 }
 func (i switchServerItem) Description() string { return "" }
 func (i switchServerItem) FilterValue() string { return i.name }
 
-// switchPodItem represents an individual pod under a server in the switcher
+// switchPodItem represents one unit, by its label, under a server in the
+// switcher.
 type switchPodItem struct {
-	name    string
+	label   string
 	server  string
-	origin  string
 	healthy bool
 }
 
@@ -93,10 +97,10 @@ func (i switchPodItem) Title() string {
 	} else {
 		dot = StatusStyleStopped.Render("○")
 	}
-	return fmt.Sprintf("  └─ %s %s", dot, i.name)
+	return fmt.Sprintf("  └─ %s %s", dot, i.label)
 }
 func (i switchPodItem) Description() string { return "" }
-func (i switchPodItem) FilterValue() string { return i.name }
+func (i switchPodItem) FilterValue() string { return i.label }
 
 // Helper functions
 

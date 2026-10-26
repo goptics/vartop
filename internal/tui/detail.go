@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -10,15 +11,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/goptics/vartop/internal/api"
-	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
-// detailScreen is the worker detail overlay. It owns the fetched details and
-// the scroll/action state for the worker it was opened for.
+// detailScreen is the worker detail overlay: one worker on one unit, named
+// by its label. It shows the worker's sample in the newest snapshot of the
+// server shown, and owns the scroll/action state.
 type detailScreen struct {
-	details    *api.WorkerDetails
 	workerName string
-	origin     string
+	label      string // the unit's
 
 	inAction bool // action mode
 	vp       viewport.Model
@@ -26,8 +27,29 @@ type detailScreen struct {
 	keys detailKeyMap
 }
 
-func newDetailScreen(workerName, origin string) *detailScreen {
-	return &detailScreen{workerName: workerName, origin: origin, keys: newDetailKeyMap()}
+func newDetailScreen(workerName, label string) *detailScreen {
+	return &detailScreen{workerName: workerName, label: label, keys: newDetailKeyMap()}
+}
+
+// sample is the worker's sample on the screen's unit in latest, with the
+// unit; or, when there is none, why: the unit answered nothing (its
+// error), did not answer for the worker, lacks it, or is no longer
+// reported.
+func (d *detailScreen) sample(latest *fleet.Snapshot) (sm *fleet.Sample, u fleet.PodSnapshot, missing string) {
+	units := fleet.PodsOf(latest, d.label)
+	if len(units) == 0 {
+		return nil, u, "no longer reported"
+	}
+	u = units[0]
+	switch sm = u.Workers[d.workerName]; {
+	case u.Err != "":
+		return nil, u, u.Err
+	case sm != nil:
+		return sm, u, ""
+	case u.IsUnreached(d.workerName):
+		return nil, u, "not reached"
+	}
+	return nil, u, "no worker " + d.workerName
 }
 
 func (d *detailScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
@@ -50,16 +72,16 @@ func (d *detailScreen) handleActionKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 		d.inAction = false
 	case key.Matches(msg, d.keys.Pause):
 		d.inAction = false
-		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "pause")
+		return m.actCmd(d.workerName, d.label, "pause")
 	case key.Matches(msg, d.keys.Resume):
 		d.inAction = false
-		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "resume")
+		return m.actCmd(d.workerName, d.label, "resume")
 	case key.Matches(msg, d.keys.Stop):
 		d.inAction = false
-		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "stop")
+		return m.actCmd(d.workerName, d.label, "stop")
 	case key.Matches(msg, d.keys.Restart):
 		d.inAction = false
-		return m.actionCurrentWorkerCmd(d.workerName, d.origin, "restart")
+		return m.actCmd(d.workerName, d.label, "restart")
 	}
 	return nil
 }
@@ -71,22 +93,16 @@ func (d *detailScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 		return tea.Quit
 	case key.Matches(msg, d.keys.Back):
 		m.popScreen()
-		d.details = nil
 		d.workerName = ""
-		d.origin = ""
+		d.label = ""
 		d.inAction = false
 		d.vp.GotoTop()
-		return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
 	case key.Matches(msg, d.keys.Actions):
 		if d.workerName != "" {
 			d.inAction = !d.inAction
 		}
 	case key.Matches(msg, d.keys.Refresh):
-		if d.workerName != "" {
-			d.details = nil // Clear to show loading state
-			d.vp.GotoTop()
-			return m.fetchWorkerDetailsCmd(d.workerName, d.origin)
-		}
+		return m.refreshCmd()
 	case key.Matches(msg, d.keys.Up):
 		d.vp.LineUp(1)
 	case key.Matches(msg, d.keys.Down):
@@ -108,28 +124,33 @@ func (d *detailScreen) View(m *Model) string {
 	footer := d.renderFooter(m, d.vp.YOffset)
 	footerHeight := lipgloss.Height(footer)
 
-	if d.details == nil {
-		loadingMsg := lipgloss.NewStyle().
+	latest := m.latest()
+	sm, u, missing := d.sample(latest)
+	if text, bad := d.notice(m, latest, missing); text != "" {
+		box := lipgloss.NewStyle().
 			Foreground(ColorSubtle).
 			Padding(2, 2).
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorHighlight).
-			Render(fmt.Sprintf("Loading worker details for %s...", d.workerName))
+			BorderForeground(ColorHighlight)
+		if bad {
+			box = box.BorderForeground(ColorError)
+		}
 
-		bodyView := lipgloss.Place(m.width, m.height-footerHeight-2, lipgloss.Center, lipgloss.Center, loadingMsg)
+		bodyView := lipgloss.Place(m.width, m.height-footerHeight-2, lipgloss.Center, lipgloss.Center, box.Render(text))
 		spacing := createSpacing(m.height, lipgloss.Height(bodyView), footerHeight, 0)
 		fullContent := lipgloss.JoinVertical(lipgloss.Left, bodyView, strings.Repeat("\n", spacing), footer)
 		return BaseStyle.Render(fullContent)
 	}
 
-	w := *d.details
+	w := sm.WorkerDetails
+	stale := m.stale(time.Now())
 
 	// Header
-	header := d.renderHeader(m)
+	header := d.renderHeader(m, latest, u, stale)
 
 	// Content sections
-	configSection := d.renderModernConfigSection(w)
-	metricsSection := d.renderModernMetricsSection(w)
+	configSection := d.renderModernConfigSection(w, stale)
+	metricsSection := d.renderModernMetricsSection(w, stale)
 
 	// Responsive layout
 	minWidthForHorizontal := 100
@@ -147,7 +168,7 @@ func (d *detailScreen) View(m *Model) string {
 	}
 
 	bodyContent = lipgloss.NewStyle().Padding(0, 1).Render(bodyContent)
-	fullBodyContent := lipgloss.JoinVertical(lipgloss.Left, "", header, "", bodyContent)
+	fullBodyContent := lipgloss.JoinVertical(lipgloss.Left, "", header, renderErrors(m), bodyContent)
 
 	// The scroll indicator can wrap the footer onto another line, so size the
 	// viewport for that case to keep its height (and the scroll limits) stable.
@@ -167,18 +188,38 @@ func (d *detailScreen) View(m *Model) string {
 	return BaseStyle.Render(fullContent)
 }
 
-// renderHeader renders the worker detail view header.
-func (d *detailScreen) renderHeader(m *Model) string {
-	if d.details == nil {
-		return ""
+// notice is what the screen shows instead of the worker's values, if
+// anything: the server is not configured (bad), has no snapshot yet, or the
+// unit has no sample of the worker ("{label}: {why}", bad), with the error
+// lines above.
+func (d *detailScreen) notice(m *Model, latest *fleet.Snapshot, missing string) (text string, bad bool) {
+	switch {
+	case m.server() == nil:
+		return notConfiguredMsg(m.key), true
+	case latest == nil:
+		return waitingMsg(m.key), false
+	case missing != "":
+		text = d.label + ": " + missing
+		if errs := m.errorLines(); len(errs) > 0 {
+			text = strings.Join(errs, "\n") + "\n\n" + text
+		}
+		return text, true
 	}
+	return "", false
+}
 
-	w := *d.details
-
-	// Updated time
-	lastUpdateStr := "Never"
-	if !m.lastUpdate.IsZero() {
-		lastUpdateStr = m.lastUpdate.Format("15:04:05")
+// renderHeader renders the worker detail view header: the worker, its
+// server and unit (label, and the instance and address behind it), and when
+// the snapshot shown was taken.
+func (d *detailScreen) renderHeader(m *Model, latest *fleet.Snapshot, u fleet.PodSnapshot, stale bool) string {
+	updatedStyle := lipgloss.NewStyle().Foreground(ColorSubtle)
+	if stale {
+		updatedStyle = lipgloss.NewStyle().Foreground(ColorWarning)
+	}
+	updatedInfo := updatedStyle.Render("updated " + fleet.PointTime(latest))
+	unitInfo := u.Label
+	if tip := u.Tip(); tip != "" && tip != u.Label {
+		unitInfo += " (" + tip + ")"
 	}
 
 	// Responsive header layout
@@ -193,22 +234,17 @@ func (d *detailScreen) renderHeader(m *Model) string {
 		workerInfo := lipgloss.NewStyle().
 			Foreground(ColorFg).
 			Bold(true).
-			Render(w.Name)
+			Render(d.workerName)
 
-		serverInfo := fmt.Sprintf("Server: %s", m.server.Name)
-		showEndpoint := w.Origin
-		if showEndpoint == "" {
-			showEndpoint = m.server.DisplayEndpoint()
-		}
-		endpointInfo := fmt.Sprintf("→ %s", config.ShortOrigin(showEndpoint))
-		updatedInfo := fmt.Sprintf("Updated: %s", lastUpdateStr)
+		serverInfo := fmt.Sprintf("Server: %s", m.key)
+		endpointInfo := fmt.Sprintf("→ %s", unitInfo)
 
 		headerContent := lipgloss.JoinVertical(lipgloss.Left,
 			title,
 			workerInfo,
 			lipgloss.NewStyle().Foreground(ColorSubtle).Render(serverInfo),
 			lipgloss.NewStyle().Foreground(ColorSubtle).Render(endpointInfo),
-			lipgloss.NewStyle().Foreground(ColorSubtle).Render(updatedInfo),
+			updatedInfo,
 		)
 
 		return lipgloss.NewStyle().
@@ -227,30 +263,28 @@ func (d *detailScreen) renderHeader(m *Model) string {
 	workerInfo := lipgloss.NewStyle().
 		Foreground(ColorFg).
 		Bold(true).
-		Render(w.Name)
+		Render(d.workerName)
 
-	// Server and endpoint info
+	// Server and unit info
 	serverLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render("Server:")
-	serverValue := lipgloss.NewStyle().Foreground(ColorFg).Render(m.server.Name)
-	endpointLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render("Endpoint:")
-	showEndpoint := w.Origin
-	if showEndpoint == "" {
-		showEndpoint = m.server.DisplayEndpoint()
-	}
-	endpointValue := lipgloss.NewStyle().Foreground(ColorSubtle).Render(config.ShortOrigin(showEndpoint))
-
-	updatedInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("Updated: %s", lastUpdateStr))
+	serverValue := lipgloss.NewStyle().Foreground(ColorFg).Render(m.key)
+	unitLabel := lipgloss.NewStyle().Foreground(ColorSubtle).Render(m.noun().Cap() + ":")
+	unitValue := lipgloss.NewStyle().Foreground(ColorSubtle).Render(unitInfo)
 
 	// Build header rows
 	row1 := lipgloss.JoinHorizontal(lipgloss.Left, title, " • ", workerInfo)
 	row2Left := lipgloss.JoinHorizontal(lipgloss.Left,
 		serverLabel, " ", serverValue, "  |  ",
-		endpointLabel, " ", endpointValue,
+		unitLabel, " ", unitValue,
 	)
 	separator := lipgloss.NewStyle().Foreground(ColorSubtle).Render(" | ")
 	row2 := lipgloss.JoinHorizontal(lipgloss.Left, row2Left, separator, updatedInfo)
 
-	headerContent := lipgloss.JoinVertical(lipgloss.Left, row1, row2)
+	rows := []string{row1, row2}
+	if stale {
+		rows = append(rows, lipgloss.NewStyle().Foreground(ColorWarning).Render(staleMsg(m.key, latest, time.Now(), m.down, m.srvErr)))
+	}
+	headerContent := lipgloss.JoinVertical(lipgloss.Left, rows...)
 
 	// Worker detail keeps border for visual separation
 	return lipgloss.NewStyle().
@@ -262,11 +296,8 @@ func (d *detailScreen) renderHeader(m *Model) string {
 
 // renderFooter renders the worker detail view footer.
 func (d *detailScreen) renderFooter(m *Model, scrollY int) string {
-	// Only polling info now (updated time moved to header)
-	interval := m.server.Interval
-	if interval <= 0 {
-		interval = 5
-	}
+	// How often the daemon polls the server (the updated time is in the header)
+	interval := int(m.interval() / time.Second)
 
 	// Add scroll indicator if scrolling is active
 	pollInfo := fmt.Sprintf("Polling: %ds", interval)
@@ -284,7 +315,7 @@ func (d *detailScreen) renderFooter(m *Model, scrollY int) string {
 }
 
 // renderModernConfigSection renders the configuration section with modern styling
-func (d *detailScreen) renderModernConfigSection(w api.WorkerDetails) string {
+func (d *detailScreen) renderModernConfigSection(w api.WorkerDetails, stale bool) string {
 	title := lipgloss.NewStyle().
 		Foreground(ColorHighlight).
 		Bold(true).
@@ -302,6 +333,11 @@ func (d *detailScreen) renderModernConfigSection(w api.WorkerDetails) string {
 		buildDataRow("Processing", fmt.Sprintf("%d jobs", w.NumProcessing)),
 		buildDataRow("Pending", fmt.Sprintf("%d jobs", w.NumPending)),
 		buildDataRow("Idle Workers", fmt.Sprintf("%d available", w.NumIdleWorkers)),
+	}
+	if stale { // not current: none shown
+		for i, label := range []string{"Status", "Concurrency", "Processing", "Pending", "Idle Workers"} {
+			rows[i] = buildDataRow(label, "—")
+		}
 	}
 
 	// Add separator
@@ -322,7 +358,7 @@ func (d *detailScreen) renderModernConfigSection(w api.WorkerDetails) string {
 }
 
 // renderModernMetricsSection renders the performance metrics section with modern styling
-func (d *detailScreen) renderModernMetricsSection(w api.WorkerDetails) string {
+func (d *detailScreen) renderModernMetricsSection(w api.WorkerDetails, stale bool) string {
 	title := lipgloss.NewStyle().
 		Foreground(ColorHighlight).
 		Bold(true).
@@ -357,6 +393,9 @@ func (d *detailScreen) renderModernMetricsSection(w api.WorkerDetails) string {
 			Bold(true).
 			Render(metric.value)
 
+		if stale { // not current
+			value = "—"
+		}
 		row := buildDataRow(metric.label, lipgloss.JoinHorizontal(lipgloss.Left, icon, " ", value))
 		rows = append(rows, row)
 	}

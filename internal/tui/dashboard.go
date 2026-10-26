@@ -5,26 +5,33 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 // dashboardScreen is the worker list view and the base of the screen stack.
 type dashboardScreen struct {
 	table             table.Model
-	origins           []string // origin endpoint per table row, same order
+	labels            []string // the label of each table row's unit, same order
 	inActionSelection bool
 	keys              dashboardKeyMap
 }
 
-// center renders v centred in a cell of the given width.
+// center renders v centred in a cell of the given width. A value as wide as
+// the cell or wider is left as it is, for the table to truncate: centring
+// would wrap it onto a second line.
 func center(width int, v any) string {
-	return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(fmt.Sprint(v))
+	s := fmt.Sprint(v)
+	if lipgloss.Width(s) >= width {
+		return s
+	}
+	return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(s)
 }
 
 // dashboardColumns returns the table columns; the name column takes whatever
@@ -80,16 +87,16 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 			return nil
 		case key.Matches(msg, d.keys.Pause):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "pause")
+			return m.actCmd(d.selectedWorkerName(), d.selectedLabel(), "pause")
 		case key.Matches(msg, d.keys.Resume):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "resume")
+			return m.actCmd(d.selectedWorkerName(), d.selectedLabel(), "resume")
 		case key.Matches(msg, d.keys.Stop):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "stop")
+			return m.actCmd(d.selectedWorkerName(), d.selectedLabel(), "stop")
 		case key.Matches(msg, d.keys.Restart):
 			d.inActionSelection = false
-			return m.actionWorkerCmd(d.selectedWorkerName(), d.selectedWorkerOrigin(), "restart")
+			return m.actCmd(d.selectedWorkerName(), d.selectedLabel(), "restart")
 		}
 		// Unhandled keys fall through so navigation still works while the
 		// action menu is open.
@@ -99,13 +106,7 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, d.keys.Quit):
 		return tea.Quit
 	case key.Matches(msg, d.keys.Refresh):
-		m.err = nil
-		m.sourceErr = false
-		if m.pool == nil {
-			// The source never came up (e.g. bad kube context): retry it.
-			return m.connect(m.server)
-		}
-		return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
+		return m.refreshCmd()
 	case key.Matches(msg, d.keys.Actions):
 		if len(d.table.Rows()) > 0 {
 			d.inActionSelection = !d.inActionSelection
@@ -113,22 +114,16 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case key.Matches(msg, d.keys.Switch):
 		m.pushScreen(m.switcher)
-		return nil
+		return m.switcherCmd()
 	case key.Matches(msg, d.keys.Detail):
-		// Navigate to worker detail view
-		if m.isHealthy && len(d.table.Rows()) > 0 {
-			selectedRow := d.table.SelectedRow()
-			if selectedRow != nil {
-				workerName := selectedRow[0]
-				origin := d.selectedWorkerOrigin()
-				m.pushScreen(newDetailScreen(workerName, origin))
-				return m.fetchWorkerDetailsCmd(workerName, origin)
-			}
+		// Navigate to the selected row's worker on its unit
+		if name := d.selectedWorkerName(); name != "" {
+			m.pushScreen(newDetailScreen(name, d.selectedLabel()))
 		}
 		return nil
 	}
 
-	if !m.isHealthy || len(d.table.Rows()) == 0 {
+	if len(d.table.Rows()) == 0 {
 		return nil
 	}
 
@@ -139,30 +134,84 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 
 // selectedWorkerName returns the name of the currently selected table row.
 func (d *dashboardScreen) selectedWorkerName() string {
-	if len(d.table.Rows()) == 0 {
+	row := d.table.SelectedRow()
+	if row == nil {
 		return ""
 	}
-	return d.table.SelectedRow()[0]
+	return row[0]
 }
 
-// selectedWorkerOrigin returns the origin endpoint for the currently selected
-// table row.
-func (d *dashboardScreen) selectedWorkerOrigin() string {
+// selectedLabel returns the label of the currently selected table row's
+// unit.
+func (d *dashboardScreen) selectedLabel() string {
 	i := d.table.Cursor()
-	if i < 0 || i >= len(d.origins) {
+	if i < 0 || i >= len(d.labels) {
 		return ""
 	}
-	return d.origins[i]
+	return d.labels[i]
 }
 
-// setRows replaces the table rows (and their origins) while retaining the
-// current selection.
-func (d *dashboardScreen) setRows(rows []table.Row, origins []string) {
+// setRows replaces the table rows (and their units' labels) while retaining
+// the current selection.
+func (d *dashboardScreen) setRows(rows []table.Row, labels []string) {
 	selected := d.table.Cursor()
-	d.origins = origins
+	d.labels = labels
 	d.table.SetRows(rows)
 	if selected < len(rows) {
 		d.table.SetCursor(selected)
+	}
+}
+
+// refresh builds the rows again from the newest snapshot of the server
+// shown: one per unit × worker, units in the snapshot's order (or only the
+// one selected), workers by name, the Node cell the unit's label. A unit
+// that answered nothing has no rows: the header lists it. A worker its unit
+// lists but did not answer for is not reached; a stale snapshot's values
+// are not current: both show —.
+func (d *dashboardScreen) refresh(m *Model) {
+	latest := m.latest()
+	stale := m.stale(time.Now())
+	var rows []table.Row
+	var labels []string
+	for _, p := range fleet.PodsOf(latest, m.selectedLabel) {
+		if p.Err != "" {
+			continue
+		}
+		for _, name := range workersOf(p) {
+			row := unitRow(p, name, stale)
+			if m.showNodeColumn {
+				row = slices.Insert(row, 1, center(12, p.Label))
+			}
+			rows = append(rows, row)
+			labels = append(labels, p.Label)
+		}
+	}
+	d.setRows(rows, labels)
+}
+
+// workersOf is the names of the workers p lists, answered or not, sorted.
+func workersOf(p fleet.PodSnapshot) []string {
+	names := append(slices.Collect(maps.Keys(p.Workers)), p.Unreached...)
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// unitRow is the row of worker name on unit p, Node cell aside.
+func unitRow(p fleet.PodSnapshot, name string, stale bool) table.Row {
+	sm := p.Workers[name]
+	switch {
+	case stale:
+		return table.Row{name, "—", center(12, "—"), center(12, "—"), center(10, "—"), center(8, "—")}
+	case sm == nil:
+		return table.Row{name, "not reached", center(12, "—"), center(12, "—"), center(10, "—"), center(8, "—")}
+	}
+	return table.Row{
+		name,
+		sm.Status,
+		center(12, sm.Concurrency),
+		center(12, sm.NumProcessing),
+		center(10, sm.NumPending),
+		center(8, sm.NumIdleWorkers),
 	}
 }
 
@@ -177,10 +226,10 @@ func (d *dashboardScreen) rebuildTable(m *Model) {
 	rows := d.table.Rows()
 
 	// If existing rows have a different cell count than new columns,
-	// clear them to avoid a panic in table.New (rows will be repopulated by the next fetch).
+	// clear them to avoid a panic in table.New (rows will be repopulated by the next sync).
 	if len(rows) > 0 && len(rows[0]) != len(columns) {
 		rows = nil
-		d.origins = nil
+		d.labels = nil
 		selected = 0
 	}
 
@@ -228,51 +277,86 @@ func (d *dashboardScreen) View(m *Model) string {
 	return BaseStyle.Render(fullContent)
 }
 
-// renderHeader renders the dashboard status bar: server name, connection
-// (kube context/namespace or endpoint), pod health and the last refresh time.
+// renderHeader renders the dashboard status bar: server name, unit health,
+// what it reaches (kube context/namespace, dns host, endpoint, or the unit
+// shown), the balancers' instance counts and when the newest snapshot was
+// taken; under it, when that snapshot is stale, how old and why, and the
+// units that answered nothing.
 func (d *dashboardScreen) renderHeader(m *Model) string {
-	var statusStyle lipgloss.Style
-	var statusText string
-	if m.isHealthy {
-		statusStyle = StatusStyleRunning
-		statusText = "● Active"
-	} else {
-		statusStyle = StatusStyleStopped
-		statusText = "○ Inactive"
+	now := time.Now()
+	latest := m.latest()
+	stale := m.stale(now)
+	subtle := lipgloss.NewStyle().Foreground(ColorSubtle)
+
+	title := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.key))
+	parts := []string{title}
+	if m.server() != nil {
+		parts = append(parts, renderHealth(latest, stale, m.noun()), "  ", d.renderConnection(m))
 	}
-
-	statusIndicator := statusStyle.Render(statusText)
-
-	title := TitleStyle.Render(fmt.Sprintf(" vartop [%s] ", m.server.Name))
-
-	leftContent := lipgloss.JoinHorizontal(lipgloss.Left,
-		title,
-		statusIndicator,
-		"  ",
-		d.renderConnection(m),
-		"  ",
-		d.renderPodHealth(m),
-	)
-
-	// Updated time in top-right
-	lastUpdateStr := "Never"
-	if !m.lastUpdate.IsZero() {
-		lastUpdateStr = m.lastUpdate.Format("15:04:05")
+	if note := fleet.BalancerNote(latest); note != "" {
+		parts = append(parts, "  ", subtle.Render(note))
 	}
-	updatedInfo := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("Updated: %s", lastUpdateStr))
+	leftContent := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+
+	// When the newest snapshot was taken, top-right
+	var updatedInfo string
+	if latest != nil {
+		style := subtle
+		if stale {
+			style = lipgloss.NewStyle().Foreground(ColorWarning)
+		}
+		updatedInfo = style.Render("updated " + fleet.PointTime(latest))
+	}
 
 	// Proper justification: calculate spacing between left and right
 	leftWidth := lipgloss.Width(leftContent)
 	rightWidth := lipgloss.Width(updatedInfo)
 	spacing := m.width - leftWidth - rightWidth - 4 // -4 for padding
 
-	headerContent := lipgloss.JoinHorizontal(lipgloss.Left,
+	lines := []string{lipgloss.JoinHorizontal(lipgloss.Left,
 		leftContent,
 		strings.Repeat(" ", max(0, spacing)),
 		updatedInfo,
-	)
+	)}
+	wrap := lipgloss.NewStyle().Width(max(1, m.width-4))
+	if stale {
+		lines = append(lines, wrap.Foreground(ColorWarning).Render(staleMsg(m.key, latest, now, m.down, m.srvErr)))
+	}
+	if down := unitErrors(latest, m.selectedLabel); down != "" {
+		lines = append(lines, wrap.Foreground(ColorError).Render(down))
+	}
 
-	return StatusBarStyle.Render(headerContent)
+	return StatusBarStyle.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+// renderHealth is the health of latest's units: healthy of all, with a
+// dot, or — when latest is stale: its health is not current.
+func renderHealth(latest *fleet.Snapshot, stale bool, n fleet.Noun) string {
+	subtle := lipgloss.NewStyle().Foreground(ColorSubtle)
+	if stale {
+		return subtle.Render("— " + n.Many)
+	}
+	h := fleet.Health(latest)
+	dot := StatusStyleStopped.Render("○")
+	switch h.Dot {
+	case "●":
+		dot = StatusStyleRunning.Render("●")
+	case "◐":
+		dot = StatusStyleWarning.Render("◐")
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, dot, " ", subtle.Render(fmt.Sprintf("%d/%d %s", h.Healthy, h.Total, n.Many)))
+}
+
+// unitErrors lists the units of latest (or only the one labelled label)
+// that answered nothing, each "{label}: {error}".
+func unitErrors(latest *fleet.Snapshot, label string) string {
+	var down []string
+	for _, p := range fleet.PodsOf(latest, label) {
+		if p.Err != "" {
+			down = append(down, p.Label+": "+p.Err)
+		}
+	}
+	return strings.Join(down, " · ")
 }
 
 // renderConnection describes how the active server is reached: kube
@@ -281,121 +365,94 @@ func (d *dashboardScreen) renderConnection(m *Model) string {
 	return lipgloss.NewStyle().Foreground(ColorSubtle).Render("→ " + m.connectionLabel())
 }
 
-// connectionLabel names what the dashboard is connected to.
+// connectionLabel names what the dashboard shows: the unit selected, else
+// how the server is reached.
 func (m *Model) connectionLabel() string {
+	srv := m.server()
 	switch {
-	case m.selectedPodOrigin != "":
-		return m.podName(m.selectedPodOrigin)
-	case m.server.Kubernetes != nil:
-		return fmt.Sprintf("%s/%s", m.server.Kubernetes.Context, m.server.Kubernetes.Namespace)
-	case m.server.DNS != nil:
-		return fmt.Sprintf("dns:%s:%d", m.server.DNS.Host, m.server.DNS.Port)
+	case m.selectedLabel != "":
+		return m.selectedLabel
+	case srv == nil:
+		return ""
+	case srv.Kubernetes != nil:
+		return fmt.Sprintf("%s/%s", srv.Kubernetes.Context, srv.Kubernetes.Namespace)
+	case srv.DNS != nil:
+		return fmt.Sprintf("dns:%s:%d", srv.DNS.Host, srv.DNS.Port)
 	default:
-		return m.server.DisplayEndpoint()
+		return srv.DisplayEndpoint()
 	}
 }
 
-// renderPodHealth summarizes healthy/total discovered pods with a status dot.
-func (d *dashboardScreen) renderPodHealth(m *Model) string {
-	endpoints := m.poolEndpoints()
-	total := len(endpoints)
-	healthy := 0
-	for _, ep := range endpoints {
-		if m.podHealth[ep] {
-			healthy++
-		}
-	}
+// daemonDownHint is the waiting notice's second line when no daemon runs.
+const daemonDownHint = "the vartop daemon is not running — press r to start it"
 
-	dot := StatusStyleStopped.Render("○")
+// notice is what the body shows instead of the table, if anything: the
+// server is not configured (bad), has no snapshot yet, or the unit selected
+// is no longer reported (bad).
+func (m *Model) notice() (text string, bad bool) {
+	latest := m.latest()
 	switch {
-	case total > 0 && healthy == total:
-		dot = StatusStyleRunning.Render("●")
-	case healthy > 0:
-		dot = StatusStyleWarning.Render("◐")
+	case m.server() == nil:
+		return notConfiguredMsg(m.key), true
+	case latest == nil:
+		text = waitingMsg(m.key)
+		switch {
+		case m.down:
+			text += "\n" + daemonDownHint
+		case m.srvErr != "":
+			text += "\n" + m.key + ": " + m.srvErr
+		}
+		return text, false
+	case m.selectedLabel != "" && len(fleet.PodsOf(latest, m.selectedLabel)) == 0:
+		return goneLabelMsg(m.selectedLabel, m.noun()), true
 	}
-
-	text := lipgloss.NewStyle().Foreground(ColorSubtle).Render(fmt.Sprintf("%d/%d pods", healthy, total))
-	return lipgloss.JoinHorizontal(lipgloss.Left, dot, " ", text)
+	return "", false
 }
 
-// poolEndpoints returns the endpoint URL of every discovered pod. The pool
-// reconciles against the active discovery source (static or kubernetes).
-func (m *Model) poolEndpoints() []string {
-	if m.pool == nil {
+// errorLines is what the error line shows: the feed could not be read, the
+// server could not be polled (its newest snapshot's error, when fresh: a
+// stale one's is in the header), and what the last refresh or action said.
+// None for a server that is not configured.
+func (m *Model) errorLines() []string {
+	if m.server() == nil {
 		return nil
 	}
-	clients := m.pool.Clients()
-	endpoints := make([]string, 0, len(clients))
-	for _, c := range clients {
-		endpoints = append(endpoints, c.PrimaryEndpoint())
+	var lines []string
+	if m.syncErr != nil {
+		lines = append(lines, syncErrMsg(m.key, m.syncErr))
 	}
-	return endpoints
+	if latest := m.latest(); latest != nil && latest.Err != "" && !m.stale(time.Now()) {
+		lines = append(lines, m.key+": "+latest.Err)
+	}
+	if m.err != nil {
+		lines = append(lines, m.err.Error())
+	}
+	return lines
 }
 
-// loadBalancedWarning explains, when an endpoint has been answered by more
-// than one varmq instance, that it is a load balancer: each refresh shows only
-// whichever instance served it. Detection is best-effort; a keep-alive
-// connection pinned to one instance never reveals the others.
-func (m *Model) loadBalancedWarning() string {
-	if m.pool == nil {
-		return ""
+// renderErrors renders the error lines, wrapped to the screen's width.
+func renderErrors(m *Model) string {
+	var view string
+	style := lipgloss.NewStyle().Foreground(ColorError).Padding(0, 1).Width(max(1, m.width-2))
+	for _, line := range m.errorLines() {
+		view += style.Render("⚠️  "+line) + "\n"
 	}
-	lb := m.pool.LoadBalanced()
-	if len(lb) == 0 {
-		return ""
-	}
-	var parts []string
-	for _, ep := range slices.Sorted(maps.Keys(lb)) {
-		parts = append(parts, fmt.Sprintf("%s (%d instances seen)", config.ShortOrigin(ep), lb[ep]))
-	}
-	return fmt.Sprintf("⚠️  Load-balanced endpoint: %s. Each refresh shows one instance; use kubernetes or dns discovery to see all.", strings.Join(parts, ", "))
-}
-
-// podName labels a pod endpoint, preferring the discovered pod name.
-func (m *Model) podName(origin string) string {
-	if m.pool == nil {
-		return config.ShortOrigin(origin)
-	}
-	return m.pool.PodName(origin)
+	return view
 }
 
 // renderBody renders the dashboard body content.
 func (d *dashboardScreen) renderBody(m *Model) string {
-	if m.pool == nil && m.err == nil {
-		connecting := lipgloss.NewStyle().
+	errorView := renderErrors(m)
+	if text, bad := m.notice(); text != "" {
+		box := lipgloss.NewStyle().
 			Foreground(ColorSubtle).
 			Padding(2, 2).
-			Border(lipgloss.RoundedBorder()).
-			Render(fmt.Sprintf("Connecting to %s...", m.connectionLabel()))
-		return lipgloss.Place(m.width, d.table.Height()+2, lipgloss.Center, lipgloss.Center, connecting)
-	}
-
-	if !m.isHealthy {
-		text := fmt.Sprintf("Server is unreachable at %s\nPolling in background...", m.connectionLabel())
-		// A source/pool construction error (e.g. a bad kube context) is more
-		// useful than the placeholder endpoint; show it instead.
-		if m.err != nil {
-			text = fmt.Sprintf("⚠️  %v\nPolling in background...", m.err)
+			Border(lipgloss.RoundedBorder())
+		if bad {
+			box = box.BorderForeground(ColorError)
 		}
-
-		offlineMsg := lipgloss.NewStyle().
-			Foreground(ColorSubtle).
-			Padding(2, 2).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorError).
-			Render(text)
-
-		return lipgloss.Place(m.width, d.table.Height()+2, lipgloss.Center, lipgloss.Center, offlineMsg)
-	}
-
-	// Display errors if any
-	var errorView string
-	if m.err != nil {
-		errorView = lipgloss.NewStyle().Foreground(ColorError).Padding(0, 1).Render(fmt.Sprintf("⚠️  Error: %v", m.err))
-		errorView += "\n"
-	}
-	if lb := m.loadBalancedWarning(); lb != "" {
-		errorView += lipgloss.NewStyle().Foreground(ColorWarning).Padding(0, 1).Render(lb) + "\n"
+		notice := lipgloss.Place(m.width, d.table.Height()+2, lipgloss.Center, lipgloss.Center, box.Render(text))
+		return lipgloss.JoinVertical(lipgloss.Left, errorView, notice)
 	}
 
 	tableView := lipgloss.NewStyle().Padding(1, 1).Render(d.table.View())
@@ -404,12 +461,8 @@ func (d *dashboardScreen) renderBody(m *Model) string {
 
 // renderFooter renders the dashboard footer.
 func (d *dashboardScreen) renderFooter(m *Model) string {
-	// Only polling info now (updated time moved to status bar)
-	interval := m.server.Interval
-	if interval <= 0 {
-		interval = 5
-	}
-	pollInfo := fmt.Sprintf("Polling: %ds", interval)
+	// How often the daemon polls the server (the updated time is in the status bar)
+	pollInfo := fmt.Sprintf("Polling: %ds", int(m.interval()/time.Second))
 
 	keysView := helpFooter(d.keyMap(), m.width-lipgloss.Width(pollInfo)-4)
 

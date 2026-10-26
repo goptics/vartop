@@ -1,212 +1,231 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
-	"sync"
+	"maps"
+	"slices"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/goptics/vartop/internal/api"
-	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/store"
 )
 
-// Command functions return tea.Cmd for Bubble Tea
+// Command functions return tea.Cmd for Bubble Tea. Everything that reads a
+// file runs in one, off the UI goroutine: the first sync of a feed loads an
+// hour of snapshots.
 
-// scoped tags cmd's result with the current pool (see scopedMsg).
-func (m Model) scoped(cmd func() tea.Msg) tea.Cmd {
-	pool := m.pool
-	return func() tea.Msg {
-		msg := cmd()
-		if msg == nil {
-			return nil
-		}
-		if _, ok := msg.(scopedMsg); ok {
-			return msg // already tagged by a nested command
-		}
-		return scopedMsg{pool: pool, msg: msg}
-	}
+const (
+	// syncEvery is how often the TUI syncs the feed it shows: the daemon
+	// polls at the server's interval, the TUI only reads what it stored.
+	syncEvery = time.Second
+	// resyncAfter is how long after an action the TUI syncs again: the poke
+	// has the daemon poll at once, so its effect shows within a second.
+	resyncAfter = 300 * time.Millisecond
+	// settlePoll is how often an action on a stale server syncs, waiting for
+	// the snapshot its poke asked for.
+	settlePoll = 100 * time.Millisecond
+)
+
+// tickCmd sends the next tickMsg in syncEvery.
+func tickCmd() tea.Cmd {
+	return tea.Tick(syncEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-// clientFor returns the pool client serving origin. An empty origin falls back
-// to the first client, mirroring the client's own primary-endpoint fallback.
-func (m Model) clientFor(origin string) (*api.Client, error) {
-	if m.pool == nil {
-		return nil, fmt.Errorf("no server connection available")
-	}
-
-	clients := m.pool.Clients()
-	if origin != "" {
-		for _, c := range clients {
-			if c.PrimaryEndpoint() == origin {
-				return c, nil
-			}
-		}
-		return nil, fmt.Errorf("no varmq pod found for endpoint %s", origin)
-	}
-
-	if len(clients) == 0 {
-		return nil, fmt.Errorf("no varmq pods discovered")
-	}
-	return clients[0], nil
-}
-
-// checkHealthCmd returns a command that checks server health across all
-// discovered pods.
-func (m Model) checkHealthCmd() tea.Cmd {
-	return m.scoped(func() tea.Msg {
-		if m.pool == nil {
-			return healthMsg{ok: false, status: map[string]bool{}}
-		}
-
-		clients := m.pool.Clients()
-		status := make(map[string]bool, len(clients))
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		for _, c := range clients {
-			wg.Add(1)
-			go func(endpoint string) {
-				defer wg.Done()
-				ok := c.GetHealth() == nil
-				mu.Lock()
-				status[endpoint] = ok
-				mu.Unlock()
-			}(c.PrimaryEndpoint())
-		}
-		wg.Wait()
-
-		ok := false
-		for _, healthy := range status {
-			if healthy {
-				ok = true
-				break
-			}
-		}
-		return healthMsg{ok: ok, status: status}
-	})
-}
-
-// fetchWorkersCmd returns a command that fetches the worker list.
-// If selectedPodOrigin is set, queries only that pod; otherwise merges all pods.
-func (m Model) fetchWorkersCmd() tea.Cmd {
-	return m.scoped(func() tea.Msg {
-		if m.pool == nil {
-			return nil // source construction failed; the error is already shown
-		}
-
-		if m.selectedPodOrigin != "" {
-			c, err := m.clientFor(m.selectedPodOrigin)
-			if err != nil {
-				return errMsg{err}
-			}
-			workers, err := c.ListWorkers()
-			if err != nil {
-				return errMsg{err}
-			}
-			return workersMsg(workers)
-		}
-
-		type result struct {
-			workers []api.WorkerSummary
-			err     error
-		}
-		clients := m.pool.Clients()
-		results := make([]result, len(clients))
-		var wg sync.WaitGroup
-		for i, c := range clients {
-			wg.Add(1)
-			go func(i int, c *api.Client) {
-				defer wg.Done()
-				workers, err := c.ListWorkers()
-				results[i] = result{workers: workers, err: err}
-			}(i, c)
-		}
-		wg.Wait()
-
-		var merged []api.WorkerSummary
-		var errs []error
-		for _, r := range results {
-			if r.err != nil {
-				errs = append(errs, r.err)
-				continue
-			}
-			merged = append(merged, r.workers...)
-		}
-		if len(merged) == 0 && len(errs) > 0 {
-			return errMsg{errs[0]}
-		}
-		return workersMsg(merged)
-	})
-}
-
-// switchServerCmd builds the discovery source and pool for a target server in
-// the background; a Kubernetes source may take seconds to start.
-func (m Model) switchServerCmd(srv *config.Server, seq int) tea.Cmd {
-	return func() tea.Msg {
-		pool, err := api.PoolFor(srv)
-		if err != nil {
-			return serverSwitchMsg{seq: seq, srv: srv, err: err}
-		}
-		return serverSwitchMsg{seq: seq, srv: srv, pool: pool}
-	}
-}
-
-// fetchWorkerDetailsCmd returns a command that fetches details for a specific worker from its origin.
-func (m Model) fetchWorkerDetailsCmd(workerName, origin string) tea.Cmd {
-	return m.scoped(func() tea.Msg {
-		c, err := m.clientFor(origin)
-		if err != nil {
-			return errMsg{err}
-		}
-		details, err := c.GetWorker(workerName)
-		if err != nil {
-			return errMsg{err}
-		}
-		return workerDetailsMsg(details)
-	})
-}
-
-// actionWorkerCmd returns a command that performs an action on a worker at the given origin.
-func (m Model) actionWorkerCmd(workerName, origin, action string) tea.Cmd {
-	return m.scoped(func() tea.Msg {
-		c, err := m.clientFor(origin)
-		if err != nil {
-			return errMsg{fmt.Errorf("failed to %s worker %s: %w", action, workerName, err)}
-		}
-		if err := c.Action(workerName, action); err != nil {
-			return errMsg{fmt.Errorf("failed to %s worker %s: %w", action, workerName, err)}
-		}
-		return m.fetchWorkersCmd()()
-	})
-}
-
-// actionCurrentWorkerCmd returns a command that performs an action on the
-// worker currently open in the detail view.
-func (m Model) actionCurrentWorkerCmd(workerName, origin, action string) tea.Cmd {
-	if workerName == "" {
+// syncCmd syncs feed, the feed of the server shown in generation gen, and
+// reads what control.db says of it. nil for no feed: nothing to sync.
+func (m Model) syncCmd(feed *store.Feed, gen int) tea.Cmd {
+	if feed == nil {
 		return nil
 	}
-
-	return m.scoped(func() tea.Msg {
-		c, err := m.clientFor(origin)
-		if err != nil {
-			return errMsg{fmt.Errorf("failed to %s worker: %w", action, err)}
-		}
-		if err := c.Action(workerName, action); err != nil {
-			return errMsg{fmt.Errorf("failed to %s worker: %w", action, err)}
-		}
-		return m.fetchWorkerDetailsCmd(workerName, origin)()
-	})
+	key, ctl := m.key, m.ctl
+	return func() tea.Msg {
+		msg := syncedMsg{server: key, gen: gen, err: feed.Sync()}
+		msg.down, msg.srvErr = controlState(ctl, key)
+		return msg
+	}
 }
 
-// tickCmd returns a command that sends a tick message after the configured interval
-func (m Model) tickCmd() tea.Cmd {
-	interval := m.server.Interval
-	if interval <= 0 {
-		interval = 5 // Default safe fallback
+// controlState is what control.db says of the server keyed key: whether no
+// daemon holds a fresh lease, and the server's collection error. A lease
+// that cannot be read counts as held: nothing says the daemon is down.
+func controlState(ctl *store.Control, key string) (down bool, srvErr string) {
+	if _, fresh, err := ctl.Lease(); err == nil && !fresh {
+		down = true
 	}
+	if errs, err := ctl.ServerErrs(); err == nil {
+		srvErr = errs[key]
+	}
+	return down, srvErr
+}
 
-	return tea.Tick(time.Duration(interval)*time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+// configCmd reads the config again. One that cannot be read (half written,
+// say) is no message: the model keeps the one it has.
+func (m Model) configCmd() tea.Cmd {
+	load := m.load
+	return func() tea.Msg {
+		cfg, err := load()
+		if err != nil || cfg == nil {
+			return nil
+		}
+		return configMsg{cfg: cfg}
+	}
+}
+
+// switcherCmd reads the newest stored snapshot of every configured server,
+// for the switcher: each file opened, read and closed again.
+func (m Model) switcherCmd() tea.Cmd {
+	keys, dataDir := slices.Sorted(maps.Keys(m.cfg.Servers)), m.dataDir
+	return func() tea.Msg {
+		latest := make(map[string]*fleet.Snapshot, len(keys))
+		for _, key := range keys {
+			latest[key] = readLatest(dataDir, key)
+		}
+		return switcherMsg{latest: latest}
+	}
+}
+
+// readLatest is the newest snapshot stored for the server keyed key; nil
+// when there is none, or it cannot be read: the switcher shows no count.
+func readLatest(dataDir, key string) *fleet.Snapshot {
+	db, err := store.OpenServer(dataDir, key, false)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	s, err := db.Latest()
+	if err != nil {
+		return nil
+	}
+	return s
+}
+
+// refreshCmd pokes the server shown, so that the daemon polls it now, and
+// starts the daemon when none holds a fresh lease. nil when the server is
+// not configured: there is nothing to poke.
+func (m *Model) refreshCmd() tea.Cmd {
+	m.err = nil
+	if m.server() == nil {
+		return nil
+	}
+	key, gen, ctl, start := m.key, m.gen, m.ctl, m.start
+	return func() tea.Msg {
+		_, err := ctl.Poke(key)
+		if _, fresh, lerr := ctl.Lease(); lerr == nil && !fresh && start != nil {
+			err = errors.Join(err, start())
+		}
+		return actedMsg{server: key, gen: gen, err: err}
+	}
+}
+
+// actCmd sends action to worker on the unit labelled label of the server
+// shown, as its newest snapshot has it: a direct unit is sent it, with the
+// server's token, and the server is poked; a unit behind a load balancer
+// is refused (fleet.OneBalancedMsg), as is a snapshot still stale after a
+// poke. nil when there is nothing to act on.
+func (m *Model) actCmd(worker, label, action string) tea.Cmd {
+	srv := m.server()
+	if srv == nil || m.feed == nil || worker == "" || label == "" {
+		return nil
+	}
+	m.err = nil
+	a := actor{feed: m.feed, ctl: m.ctl, key: m.key, interval: srv.PollInterval(), token: srv.Token, noun: m.noun()}
+	gen := m.gen
+	return func() tea.Msg {
+		return actedMsg{server: a.key, gen: gen, err: a.act(worker, label, action)}
+	}
+}
+
+// actor sends an action on one server's units.
+type actor struct {
+	feed     *store.Feed
+	ctl      *store.Control
+	key      string
+	interval time.Duration
+	token    string
+	noun     fleet.Noun
+}
+
+func (a actor) act(worker, label, action string) error {
+	latest := a.feed.Latest()
+	if latest == nil || fleet.Stale(latest, a.interval, time.Now()) {
+		a.settle()
+		latest = a.feed.Latest()
+	}
+	switch now := time.Now(); {
+	case latest == nil:
+		return errors.New(waitingMsg(a.key))
+	case fleet.Stale(latest, a.interval, now):
+		down, srvErr := controlState(a.ctl, a.key)
+		return errors.New(staleMsg(a.key, latest, now, down, srvErr))
+	}
+	units := fleet.PodsOf(latest, label)
+	switch {
+	case len(units) == 0:
+		return errors.New(goneLabelMsg(label, a.noun))
+	case units[0].Balanced:
+		return errors.New(fleet.OneBalancedMsg)
+	}
+	err := api.NewClient(units[0].Key, a.token).Action(worker, action)
+	_, _ = a.ctl.Poke(a.key) // sent, or maybe sent: the daemon polls now, to show what it did
+	if err != nil {
+		return fmt.Errorf("failed to %s worker %s on %s: %w", action, worker, label, err)
+	}
+	return nil
+}
+
+// settle pokes the server and syncs its feed until it holds a snapshot
+// taken after the poke, for up to fleet.SettleWait. With no daemon
+// running, which would answer the poke, it returns at once.
+func (a actor) settle() {
+	if down, _ := controlState(a.ctl, a.key); down {
+		return
+	}
+	at, err := a.ctl.Poke(a.key)
+	if err != nil {
+		return
+	}
+	for deadline := time.Now().Add(fleet.SettleWait); time.Now().Before(deadline); time.Sleep(settlePoll) {
+		if a.feed.Sync() == nil {
+			if l := a.feed.Latest(); l != nil && !l.At.Before(at) {
+				return
+			}
+		}
+	}
+}
+
+// The copy of what the TUI cannot show or reach; web says the same.
+
+func waitingMsg(server string) string       { return "Waiting for the first snapshot of " + server + "…" }
+func notConfiguredMsg(server string) string { return "Server " + server + " is not configured" }
+
+// goneLabelMsg is the notice of a unit label the newest snapshot lacks.
+func goneLabelMsg(label string, n fleet.Noun) string {
+	return n.Cap() + " " + label + " is no longer reported"
+}
+
+// staleMsg says how old latest, the stale newest snapshot of the server
+// keyed key, is at now, and why there is none newer: no daemon is running
+// (down), or the server's collection error (srvErr, else latest's). With
+// neither known it says only how old.
+func staleMsg(key string, latest *fleet.Snapshot, now time.Time, down bool, srvErr string) string {
+	msg := "No new data for " + now.Sub(latest.At).Round(time.Second).String()
+	if srvErr == "" {
+		srvErr = latest.Err
+	}
+	switch {
+	case down:
+		return msg + " — the vartop daemon is not running."
+	case srvErr != "":
+		return msg + " — " + key + ": " + srvErr
+	}
+	return msg + "."
+}
+
+// syncErrMsg is the notice of a feed that could not be read.
+func syncErrMsg(key string, err error) string {
+	return "cannot read the history of " + key + ": " + err.Error()
 }

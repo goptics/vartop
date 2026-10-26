@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/store"
 	"github.com/goptics/vartop/internal/tui"
 )
 
@@ -27,19 +28,34 @@ concurrencies, and metrics from varmq mux servers.`,
 			return err
 		}
 
-		server, err := cfg.GetActiveServer(serverFlag)
-		if err != nil {
+		// The store and the daemon know a server by its config key.
+		key := serverFlag
+		if key == "" {
+			key = cfg.DefaultServer
+		}
+		if _, err := cfg.GetActiveServer(key); err != nil {
 			return err
 		}
 		startCollecting(cmd.ErrOrStderr())
 
-		m := tui.NewModel(cfg, server)
+		dataDir, err := store.DataDir()
+		if err != nil {
+			return err
+		}
+		ctl, err := store.OpenControl(dataDir)
+		if err != nil {
+			return err
+		}
+		defer ctl.Close()
+
+		// The TUI reads what the daemon collects; r starts the daemon when
+		// none runs.
+		m := tui.NewModel(cfg, key, dataDir, ctl, ensureLocalDaemon)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 
 		finalModel, err := p.Run()
-		// Quit tears down the pool's discovery source (stops any informer).
-		// Bubbletea swaps in a model copy on every Update (value receivers), so
-		// only the final model holds the current pool after a server switch.
+		// Quit closes the server files the TUI's feeds opened. Every copy of
+		// the model shares them, so the final one closes them all.
 		var closeErr error
 		switch m := finalModel.(type) {
 		case tui.Model:

@@ -9,11 +9,14 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/goptics/vartop/internal/fleet"
 )
 
-// switcherScreen is the server/pod switcher overlay. It is a singleton owned by
-// the root model so its expanded-server state persists across open/close, as it
-// did before the screen split.
+// switcherScreen is the server/unit switcher overlay. It is a singleton owned
+// by the root model so its expanded-server state persists across open/close,
+// as it did before the screen split. Its units and their health come from
+// each server's newest stored snapshot, read while it is open.
 type switcherScreen struct {
 	switcher list.Model
 	expanded string
@@ -57,23 +60,17 @@ func (s *switcherScreen) Update(m *Model, msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// enter selects or expands the highlighted switcher item.
+// enter selects or expands the highlighted switcher item. Selecting shows
+// the server at once, from its feed: nothing to connect to.
 func (s *switcherScreen) enter(m *Model) tea.Cmd {
 	switch item := s.switcher.SelectedItem().(type) {
 	case switchServerItem:
-		if item.podCount <= 1 {
-			// Single pod (or kubernetes, which has no static endpoints):
-			// select immediately.
+		if item.units <= 1 || s.expanded == item.name {
+			// One unit (or none stored yet), or already expanded: select
+			// the merged view.
 			m.popScreen()
 			m.resetPodView()
-			return m.selectServer(item.name)
-		}
-
-		if s.expanded == item.name {
-			// Already expanded: select merged view
-			m.popScreen()
-			m.resetPodView()
-			return m.selectServer(item.name)
+			return m.show(item.name)
 		}
 
 		// Expand this server
@@ -84,56 +81,38 @@ func (s *switcherScreen) enter(m *Model) tea.Cmd {
 	case switchPodItem:
 		m.popScreen()
 		m.err = nil
-		m.selectedPodOrigin = item.origin
+		m.selectedLabel = item.label
 		m.showNodeColumn = false
 		m.dashboardScreen().rebuildTable(m)
-		return m.selectServer(item.server)
+		return m.show(item.server)
 	}
 	return nil
 }
 
-// rebuild reconstructs the switcher list. Servers are always shown. Pods are
-// shown only under the currently expanded server.
+// rebuild reconstructs the switcher list from the config and what the
+// switcher last read of the store (see Model.switcherCmd). Servers are
+// always shown; units only under the expanded server.
 func (s *switcherScreen) rebuild(m *Model) {
 	var items []list.Item
-	// Sorted: map order is random and rebuild runs on every health tick, so an
+	// Sorted: map order is random and rebuild runs on every tick, so an
 	// unsorted list would reshuffle under the cursor.
 	for _, name := range slices.Sorted(maps.Keys(m.cfg.Servers)) {
-		srv := m.cfg.Servers[name]
-		// The active server's pods come from live discovery; others fall back
-		// to static config (empty for kubernetes servers, so no count).
-		endpoints := srv.Endpoints
-		if srv == m.server {
-			endpoints = m.poolEndpoints()
-		}
-		podCount := len(endpoints)
-
-		// Count healthy pods
-		healthyPods := 0
-		for _, ep := range endpoints {
-			if m.podHealth[ep] {
-				healthyPods++
-			}
-		}
-
+		latest := m.switchLatest[name]
+		h := fleet.Health(latest)
 		expanded := s.expanded == name
 
 		items = append(items, switchServerItem{
-			name:        name,
-			podCount:    podCount,
-			healthyPods: healthyPods,
-			expanded:    expanded,
+			name:     name,
+			noun:     fleet.NounFor(m.cfg.Servers[name]),
+			units:    h.Total,
+			healthy:  h.Healthy,
+			expanded: expanded,
 		})
 
-		// Add pod rows only for the expanded server
-		if expanded && podCount > 1 {
-			for _, ep := range endpoints {
-				items = append(items, switchPodItem{
-					name:    m.podName(ep),
-					server:  name,
-					origin:  ep,
-					healthy: m.podHealth[ep],
-				})
+		// Add unit rows only for the expanded server
+		if expanded && h.Total > 1 {
+			for _, p := range latest.Pods {
+				items = append(items, switchPodItem{label: p.Label, server: name, healthy: p.Err == ""})
 			}
 		}
 	}

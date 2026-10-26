@@ -4,79 +4,87 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 const (
 	detailTestWorker = "email-sender"
-	detailTestOrigin = "http://localhost:9000"
+	detailTestLabel  = "instance-1"
 )
 
-func detailTestPayload() *api.WorkerDetails {
-	d := &api.WorkerDetails{}
-	d.Name = detailTestWorker
-	d.Status = "Running"
-	d.Concurrency = 7
-	d.NumProcessing = 3
-	d.NumPending = 11
-	d.NumIdleWorkers = 4
-	d.Origin = detailTestOrigin
-	d.Metrics.Submitted = 1234
-	d.Metrics.Completed = 1200
-	d.Metrics.Successful = 1100
-	d.Metrics.Failed = 100
-	return d
+// detailTestSample is what the store holds for email-sender on instance-1.
+func detailTestSample() *fleet.Sample {
+	s := smp("Running", 7, 3, 4, 11)
+	s.Metrics.Submitted = 1234
+	s.Metrics.Completed = 1200
+	s.Metrics.Successful = 1100
+	s.Metrics.Failed = 100
+	return s
 }
 
-// detailTestModel opens the detail screen for a worker (details still nil).
-func detailTestModel(t *testing.T, width, height int) *Model {
+// detailFixture stores a fresh snapshot of "local": instance-1 runs
+// email-sender, instance-2 is down, and instance-3 lists email-sender but
+// did not answer for it.
+func detailFixture(t *testing.T) *fixture {
 	t.Helper()
-	m := testModel(t)
-	next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
-	*m = next.(Model)
-	m.pushScreen(newDetailScreen(detailTestWorker, detailTestOrigin))
+	f := newFixture(t, localConfig())
+	f.claim()
+	f.write("local", fresh(
+		unit(detailTestLabel, "http://localhost:9000", map[string]*fleet.Sample{detailTestWorker: detailTestSample()}),
+		downUnit("instance-2", "http://localhost:9001", "connection refused"),
+		fleet.PodSnapshot{Key: "http://localhost:9002", Via: "http://localhost:9002", Label: "instance-3",
+			Workers: map[string]*fleet.Sample{}, Unreached: []string{detailTestWorker}},
+	))
+	return f
+}
+
+// detailModel opens the detail screen of email-sender on label, sized.
+func detailModel(t *testing.T, label string, width, height int) *Model {
+	t.Helper()
+	m := detailFixture(t).model("local")
+	deliver(m, tea.WindowSizeMsg{Width: width, Height: height})
+	m.pushScreen(newDetailScreen(detailTestWorker, label))
 	return m
 }
 
-// loadDetails delivers a workerDetailsMsg through Update.
-func loadDetails(t *testing.T, m *Model) {
-	t.Helper()
-	next, _ := m.Update(workerDetailsMsg(detailTestPayload()))
-	*m = next.(Model)
-}
-
+// loadedDetailModel opens the detail screen of email-sender on instance-1.
 func loadedDetailModel(t *testing.T, width, height int) *Model {
 	t.Helper()
-	m := detailTestModel(t, width, height)
-	loadDetails(t, m)
-	return m
+	return detailModel(t, detailTestLabel, width, height)
 }
 
-func TestDetailViewLoadingState(t *testing.T) {
-	m := detailTestModel(t, 80, 24)
-	if !m.isDetailActive() {
-		t.Fatal("detail screen not active")
-	}
-	want := "Loading worker details for " + detailTestWorker
-	if view := m.View(); !strings.Contains(view, want) {
-		t.Fatalf("view missing %q:\n%s", want, view)
+// TestDetailMissingSample: a unit that is down, did not answer for the
+// worker, or is no longer reported shows "{label}: {why}" in place of the
+// worker's values.
+func TestDetailMissingSample(t *testing.T) {
+	for label, want := range map[string]string{
+		"instance-2": "instance-2: connection refused",
+		"instance-3": "instance-3: not reached",
+		"instance-9": "instance-9: no longer reported",
+	} {
+		m := detailModel(t, label, 80, 24)
+		view := m.View()
+		if !strings.Contains(view, want) {
+			t.Errorf("view lacks %q:\n%s", want, view)
+		}
+		if strings.Contains(view, "Performance Metrics") {
+			t.Errorf("%s: values shown for a missing sample:\n%s", label, view)
+		}
 	}
 }
 
 func TestDetailViewShowsWorkerAndMetrics(t *testing.T) {
 	m := loadedDetailModel(t, 120, 60)
 	view := m.View()
-	if strings.Contains(view, "Loading worker details") {
-		t.Fatalf("still showing loading state after details arrived:\n%s", view)
-	}
 	for _, want := range []string{
 		detailTestWorker, "Worker Details", "Submitted", "1234", "Completed", "1200",
 		"Successful", "1100", "Failed", "100", "Success Rate", "91.7%",
-		"Concurrency", "7 workers", "11 jobs",
+		"Concurrency", "7 workers", "11 jobs", "Server: local", detailTestLabel, "http://localhost:9000",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
@@ -87,7 +95,7 @@ func TestDetailViewShowsWorkerAndMetrics(t *testing.T) {
 func TestDetailViewNarrowLayoutShowsWorker(t *testing.T) {
 	m := loadedDetailModel(t, 60, 80)
 	view := m.View()
-	for _, want := range []string{detailTestWorker, "Server: local", "Submitted", "1234"} {
+	for _, want := range []string{detailTestWorker, "Server: local", "→ " + detailTestLabel, "Submitted", "1234"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("narrow view missing %q:\n%s", want, view)
 		}
@@ -207,14 +215,14 @@ func TestDetailScrollNoPanicWhenContentFits(t *testing.T) {
 	}
 }
 
-func TestDetailScrollKeysBeforeDetailsLoad(t *testing.T) {
-	m := detailTestModel(t, 80, 15)
+func TestDetailScrollKeysOnMissingSample(t *testing.T) {
+	m := detailModel(t, "instance-2", 80, 15)
 	for _, k := range []tea.KeyMsg{
 		{Type: tea.KeyDown}, {Type: tea.KeyPgDown}, runeKey('G'), {Type: tea.KeyPgUp}, {Type: tea.KeyUp}, runeKey('g'),
 	} {
 		press(m, k)
-		if view := m.View(); !strings.Contains(view, "Loading worker details") {
-			t.Fatalf("loading view lost after %q:\n%s", k.String(), view)
+		if view := m.View(); !strings.Contains(view, "instance-2: connection refused") {
+			t.Fatalf("missing-sample view lost after %q:\n%s", k.String(), view)
 		}
 	}
 }
@@ -276,20 +284,6 @@ func TestDetailActionKeysReturnCmdAndExitActionMode(t *testing.T) {
 	}
 }
 
-func TestDetailActionKeyWithoutPoolReportsError(t *testing.T) {
-	m := loadedDetailModel(t, 120, 40)
-	press(m, runeKey('a'))
-	cmd := press(m, runeKey('p'))
-	msg := cmd()
-	scoped, ok := msg.(scopedMsg)
-	if !ok {
-		t.Fatalf("command produced %T, want scopedMsg", msg)
-	}
-	if _, ok := scoped.msg.(errMsg); !ok {
-		t.Fatalf("scoped payload = %T, want errMsg (no pool connected)", scoped.msg)
-	}
-}
-
 func TestDetailActionKeysIgnoredOutsideActionMode(t *testing.T) {
 	m := loadedDetailModel(t, 120, 40)
 	if cmd := press(m, runeKey('p')); cmd != nil {
@@ -315,14 +309,11 @@ func TestDetailEscExitsActionMode(t *testing.T) {
 	}
 }
 
-func TestDetailEscPopsToDashboardWithRefresh(t *testing.T) {
+func TestDetailEscPopsToDashboard(t *testing.T) {
 	m := loadedDetailModel(t, 80, 24)
-	cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	press(m, tea.KeyMsg{Type: tea.KeyEsc})
 	if _, ok := m.activeScreen().(*dashboardScreen); !ok {
 		t.Fatalf("active screen = %T, want *dashboardScreen", m.activeScreen())
-	}
-	if cmd == nil {
-		t.Fatal("esc returned nil command, want a refresh command")
 	}
 	if len(m.screens) != 1 {
 		t.Fatalf("stack length = %d, want 1", len(m.screens))
@@ -342,14 +333,22 @@ func TestDetailQuit(t *testing.T) {
 	}
 }
 
-func TestDetailRefreshShowsLoadingAgain(t *testing.T) {
-	m := loadedDetailModel(t, 80, 24)
+// TestDetailRefreshPokes: r on the detail screen pokes its server, as on
+// the dashboard, and keeps the worker's values shown.
+func TestDetailRefreshPokes(t *testing.T) {
+	f := detailFixture(t)
+	m := f.model("local")
+	m.pushScreen(newDetailScreen(detailTestWorker, detailTestLabel))
 	cmd := press(m, runeKey('r'))
 	if cmd == nil {
-		t.Fatal("r returned nil command, want a details fetch")
+		t.Fatal("r returned no command, want a poke")
 	}
-	if view := m.View(); !strings.Contains(view, "Loading worker details") {
-		t.Fatalf("view after refresh is not the loading state:\n%s", view)
+	deliver(m, cmd())
+	if n := f.pokes("local"); n != 1 {
+		t.Fatalf("pokes = %d, want 1", n)
+	}
+	if view := m.View(); !strings.Contains(view, "1234") {
+		t.Fatalf("values gone after refresh:\n%s", view)
 	}
 }
 
@@ -357,33 +356,60 @@ func TestResizeAllScreensDoesNotPanic(t *testing.T) {
 	widths := []int{20, 80, 200}
 	heights := []int{5, 24, 60}
 
+	// The stores, made once; each subtest gets a model of its own.
+	detail, switcher, empty := detailFixture(t), switcherFixture(t), newFixture(t, localConfig())
+	stale := newFixture(t, localConfig())
+	stale.claim()
+	stale.write("local", snapAt(time.Now().Add(-time.Minute),
+		unit(detailTestLabel, "http://localhost:9000", map[string]*fleet.Sample{detailTestWorker: detailTestSample()}),
+		downUnit("instance-2", "http://localhost:9001", "a long error that does not fit on a narrow terminal at all")))
+	stale.release()
+
 	screens := []struct {
 		name  string
 		setup func(t *testing.T) *Model
 	}{
 		{"dashboard", func(t *testing.T) *Model {
-			m := testModel(t)
-			m.handleWorkers(workersMsg{
-				{Name: "orders", Status: "Running", Origin: "http://10.0.0.1:8080"},
-				{Name: "emails", Status: "Paused", Origin: "http://10.0.0.2:8080"},
-			})
+			return detail.modelFor(t, "local")
+		}},
+		{"dashboard-unit", func(t *testing.T) *Model {
+			m := detail.modelFor(t, "local")
+			m.selectedLabel, m.showNodeColumn = "instance-3", false
+			m.dashboardScreen().rebuildTable(m)
+			syncNow(t, m)
+			return m
+		}},
+		{"dashboard-stale", func(t *testing.T) *Model {
+			return stale.modelFor(t, "local")
+		}},
+		{"waiting", func(t *testing.T) *Model {
+			return empty.modelFor(t, "local")
+		}},
+		{"not-configured", func(t *testing.T) *Model {
+			m := detail.modelFor(t, "local")
+			deliver(m, configMsg{cfg: &config.Config{Servers: map[string]*config.Server{}}})
 			return m
 		}},
 		{"switcher", func(t *testing.T) *Model {
-			m := switcherTestModel(t)
+			m := switcher.modelFor(t, "local")
 			openSwitcher(t, m)
 			selectSwitcherItem(t, m, serverItem("multi"))
 			press(m, tea.KeyMsg{Type: tea.KeyEnter})
 			return m
 		}},
-		{"detail-loading", func(t *testing.T) *Model {
-			return detailTestModel(t, 80, 24)
+		{"detail-missing", func(t *testing.T) *Model {
+			m := detail.modelFor(t, "local")
+			m.pushScreen(newDetailScreen(detailTestWorker, "instance-2"))
+			return m
 		}},
 		{"detail", func(t *testing.T) *Model {
-			return loadedDetailModel(t, 80, 24)
+			m := detail.modelFor(t, "local")
+			m.pushScreen(newDetailScreen(detailTestWorker, detailTestLabel))
+			return m
 		}},
 		{"detail-action", func(t *testing.T) *Model {
-			m := loadedDetailModel(t, 80, 24)
+			m := detail.modelFor(t, "local")
+			m.pushScreen(newDetailScreen(detailTestWorker, detailTestLabel))
 			press(m, runeKey('a'))
 			return m
 		}},
@@ -394,8 +420,7 @@ func TestResizeAllScreensDoesNotPanic(t *testing.T) {
 			for _, h := range heights {
 				t.Run(fmt.Sprintf("%s/%dx%d", sc.name, w, h), func(t *testing.T) {
 					m := sc.setup(t)
-					next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
-					*m = next.(Model)
+					deliver(m, tea.WindowSizeMsg{Width: w, Height: h})
 					_ = m.View()
 
 					// Navigation after a resize must also be safe.
@@ -408,9 +433,15 @@ func TestResizeAllScreensDoesNotPanic(t *testing.T) {
 	}
 }
 
+// setServer replaces the config of the server m shows.
+func setServer(m *Model, srv *config.Server) {
+	srv.Name = m.key
+	m.cfg.Servers[m.key] = srv
+}
+
 func TestConnectionLabelDNS(t *testing.T) {
 	m := testModel(t)
-	m.server = &config.Server{Name: "d", DNS: &config.DNSRef{Host: "varmq", Port: 8080}}
+	setServer(m, &config.Server{DNS: &config.DNSRef{Host: "varmq", Port: 8080}})
 	if got := m.connectionLabel(); got != "dns:varmq:8080" {
 		t.Fatalf("connectionLabel = %q, want dns:varmq:8080", got)
 	}
@@ -421,10 +452,7 @@ func TestConnectionLabelDNS(t *testing.T) {
 
 func TestConnectionLabelKubernetes(t *testing.T) {
 	m := testModel(t)
-	m.server = &config.Server{
-		Name:       "k",
-		Kubernetes: &config.KubernetesRef{Context: "ctx", Namespace: "ns", Service: "app"},
-	}
+	setServer(m, &config.Server{Kubernetes: &config.KubernetesRef{Context: "ctx", Namespace: "ns", Service: "app"}})
 	if got := m.connectionLabel(); got != "ctx/ns" {
 		t.Fatalf("connectionLabel = %q, want ctx/ns", got)
 	}
@@ -438,12 +466,12 @@ func TestConnectionLabelStaticAndSelectedPod(t *testing.T) {
 	if got := m.connectionLabel(); got != "http://localhost:9000" {
 		t.Fatalf("static single endpoint label = %q", got)
 	}
-	m.server = &config.Server{Name: "m", Endpoints: []string{"http://a:1", "http://b:1"}}
+	setServer(m, &config.Server{Endpoints: []string{"http://a:1", "http://b:1"}})
 	if got := m.connectionLabel(); got != "2 pods" {
 		t.Fatalf("static multi endpoint label = %q, want 2 pods", got)
 	}
-	m.selectedPodOrigin = "http://b:1"
-	if got := m.connectionLabel(); got != "b" {
-		t.Fatalf("selected pod label = %q, want b", got)
+	m.selectedLabel = "instance-2"
+	if got := m.connectionLabel(); got != "instance-2" {
+		t.Fatalf("selected unit label = %q, want instance-2", got)
 	}
 }

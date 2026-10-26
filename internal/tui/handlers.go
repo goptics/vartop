@@ -1,126 +1,52 @@
 package tui
 
 import (
-	"slices"
 	"time"
 
-	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Event handlers for different message types
 // All handlers use pointer receivers to modify model state
 
-// handleHealth processes health check results
-func (m *Model) handleHealth(msg healthMsg) tea.Cmd {
-	var cmds []tea.Cmd
-
-	m.isHealthy = msg.ok
-	if msg.status != nil {
-		m.podHealth = msg.status
+// handleSynced takes in a sync of the shown server's feed: the rows are
+// built again from its newest snapshot. A sync of another server, or of
+// one shown before (an older generation), is dropped.
+func (m *Model) handleSynced(msg syncedMsg) {
+	if msg.server != m.key || msg.gen != m.gen {
+		return
 	}
-
-	// Rebuild switcher so health dots stay current
-	m.switcher.rebuild(m)
-
-	if m.isHealthy && !m.isSwitcherActive() {
-		if d, ok := m.detailScreen(); ok && d.workerName != "" {
-			cmds = append(cmds, m.fetchWorkerDetailsCmd(d.workerName, d.origin))
-		} else if !m.isDetailActive() {
-			cmds = append(cmds, m.fetchWorkersCmd())
-		}
-	}
-
-	return tea.Batch(cmds...)
+	m.synced = true
+	m.syncErr, m.down, m.srvErr = msg.err, msg.down, msg.srvErr
+	m.dashboardScreen().refresh(m)
 }
 
-// handleWorkers processes worker list updates
-func (m *Model) handleWorkers(msg workersMsg) tea.Cmd {
-	m.lastUpdate = time.Now()
-	// A pool/source construction failure stays visible until the pool is
-	// replaced (server switch or manual refresh); other errors clear on a
-	// successful fetch.
-	if !m.sourceErr {
-		m.err = nil
+// handleConfig takes in the config read again. A server shown that was
+// removed from it, or added back, or whose interval changed, is shown
+// again: not configured, or with its feed.
+func (m *Model) handleConfig(msg configMsg) tea.Cmd {
+	if msg.cfg == nil {
+		return nil
 	}
-
-	rows := make([]table.Row, 0, len(msg))
-	// One origin per row: every pod in a cluster runs the same worker names,
-	// so the name alone cannot route an action to the right pod.
-	origins := make([]string, 0, len(msg))
-
-	for _, w := range msg {
-		// Label the row with the instance that actually served it; behind a
-		// load balancer that differs from refresh to refresh.
-		origin := w.Instance
-		if origin == "" {
-			origin = m.podName(w.Origin)
-		}
-		origins = append(origins, w.Origin)
-
-		row := table.Row{
-			w.Name,
-			w.Status,
-			center(12, w.Concurrency),
-			center(12, w.NumProcessing),
-			center(10, w.NumPending),
-			center(8, w.NumIdleWorkers),
-		}
-		if m.showNodeColumn {
-			row = slices.Insert(row, 1, center(12, origin))
-		}
-		rows = append(rows, row)
-	}
-
-	// Retain selection if possible
-	m.dashboardScreen().setRows(rows, origins)
-
-	return nil
-}
-
-// handleWorkerDetails processes worker detail updates
-func (m *Model) handleWorkerDetails(msg workerDetailsMsg) tea.Cmd {
-	m.lastUpdate = time.Now()
-	m.err = nil
-	if d, ok := m.detailScreen(); ok {
-		d.details = msg
+	m.cfg = msg.cfg
+	defer m.switcher.rebuild(m)
+	srv := m.server()
+	if (srv == nil) != (m.feed == nil) || srv != nil && m.feed.Interval() != srv.PollInterval() {
+		return m.show(m.key)
 	}
 	return nil
 }
 
-// handleError processes error messages
-func (m *Model) handleError(msg errMsg) tea.Cmd {
+// handleActed takes in the end of an action or a refresh on the shown
+// server: its error goes on the error line, and the server is synced
+// again shortly, when the poke had the daemon poll it.
+func (m *Model) handleActed(msg actedMsg) tea.Cmd {
+	if msg.server != m.key || msg.gen != m.gen {
+		return nil
+	}
 	m.err = msg.err
-	return nil
-}
-
-// handleServerSwitch applies the pool built for a newly selected server.
-// Construction errors keep the current pool and surface through the error display.
-func (m *Model) handleServerSwitch(msg serverSwitchMsg) tea.Cmd {
-	// A newer switch was requested while this one was building: discard it.
-	if msg.seq != m.switchSeq {
-		if msg.pool != nil {
-			_ = msg.pool.Close()
-		}
-		return nil
-	}
-	if msg.err != nil {
-		m.err = msg.err
-		m.sourceErr = true
-		return nil
-	}
-
-	// Stop the previous server's source watcher (informer), if any.
-	if m.pool != nil {
-		_ = m.pool.Close()
-	}
-	m.server = msg.srv
-	m.pool = msg.pool
-	m.err = nil
-	m.sourceErr = false
-	m.switcher.rebuild(m)
-
-	return tea.Batch(m.checkHealthCmd(), m.fetchWorkersCmd())
+	key, gen := m.key, m.gen
+	return tea.Tick(resyncAfter, func(time.Time) tea.Msg { return resyncMsg{server: key, gen: gen} })
 }
 
 // handleWindowSize processes terminal resize events
