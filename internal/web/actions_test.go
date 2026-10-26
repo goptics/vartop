@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"fmt"
+	"html"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -810,5 +812,297 @@ func TestServerSwitchRedirects(t *testing.T) {
 		if got := resp.Header.Get("HX-Redirect"); got != "/?server=staging" {
 			t.Errorf("POST /server name=staging server=%q: HX-Redirect %q, want /?server=staging", server, got)
 		}
+	}
+}
+
+// serveBalanced serves the web UI over a Manager whose only server, "multi",
+// polls endpoints every second, once its latest snapshot has exactly the
+// unit keys want.
+func serveBalanced(t *testing.T, endpoints []string, want ...string) (*httptest.Server, *Manager) {
+	t.Helper()
+	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Name: "multi", Interval: 1, Endpoints: endpoints},
+	}}, "multi")
+	waitUntil(t, 5*time.Second, "units "+strings.Join(want, " "), func() bool {
+		return slices.Equal(unitKeys(m.Current().History.Latest()), want)
+	})
+	return serve(t, m), m
+}
+
+// resultLine is the results line of unit u reading outcome.
+func resultLine(u PodSnapshot, outcome string) string {
+	return `<span class="pod" title="` + u.Tip() + `">` + u.Label + `</span> <span class="outcome">` + outcome + `</span>`
+}
+
+// wantResults fails the test unless the results of body have exactly one
+// line per key of want, in want's order, reading its outcome.
+func wantResults(t *testing.T, body string, units map[string]PodSnapshot, want ...[2]string) {
+	t.Helper()
+	results := html.UnescapeString(resultsOf(body))
+	if n := strings.Count(results, "<li "); n != len(want) {
+		t.Errorf("%d results, want %d:\n%s", n, len(want), results)
+	}
+	last := -1
+	for _, w := range want {
+		line := html.UnescapeString(resultLine(units[w[0]], w[1]))
+		i := strings.Index(results, line)
+		switch {
+		case i < 0:
+			t.Errorf("results lack %q:\n%s", line, results)
+		case i < last:
+			t.Errorf("result %q is out of order:\n%s", line, results)
+		}
+		last = i
+	}
+}
+
+// totalPatches is how many PATCHes fakes received between them.
+func totalPatches(fakes ...*fakeVarmq) int {
+	n := 0
+	for _, f := range fakes {
+		n += len(patches(f))
+	}
+	return n
+}
+
+// wantWorker fails the test unless cond holds for worker w on each of fakes.
+func wantWorker(t *testing.T, what string, cond func(fakeWorker) bool, fakes ...*fakeVarmq) {
+	t.Helper()
+	for _, f := range fakes {
+		if w, _ := f.worker("w"); !cond(w) {
+			t.Errorf("w on %s: %+v, want %s", f.Instance, w, what)
+		}
+	}
+}
+
+func paused(w fakeWorker) bool { return w.Status == "Paused" }
+
+// TestActionMergedReachesEveryInstance: a merged action through a balancer
+// reaches every instance behind it, one result each, within the budget.
+func TestActionMergedReachesEveryInstance(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs...)
+	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := unitsOf(m.Current().History.Latest())
+
+	resp, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	wantResults(t, body, units, [2]string{"#a", "ok"}, [2]string{"#b", "ok"}, [2]string{"#c", "ok"})
+	for i, key := range []string{"#a", "#b", "#c"} {
+		if want := fmt.Sprintf("instance-%d", i+1); units[key].Label != want {
+			t.Errorf("unit %s is labelled %q, want %q", key, units[key].Label, want)
+		}
+	}
+	wantWorker(t, "paused", paused, fakes...)
+	if n := totalPatches(fakes...); n > attemptCap(3) {
+		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
+	}
+}
+
+// TestActionBalancedRepeatIsNoChange409: a balanced unit is never skipped
+// from the latest sample; varmq's 409 there is no change.
+func TestActionBalancedRepeatIsNoChange409(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	fakes[1].mu.Lock()
+	fakes[1].Workers["w"].Concurrency = 4
+	fakes[1].mu.Unlock()
+	setActionStatus(fakes[1], "w", http.StatusConflict)
+	lb := newRoundRobinLB(t, srvs...)
+	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := unitsOf(m.Current().History.Latest())
+
+	_, body := post(t, srv, "/workers/w/concurrency", multi("n", "4"), true)
+	wantResults(t, body, units,
+		[2]string{"#a", "ok"}, [2]string{"#b", "no change (worker is not running)"}, [2]string{"#c", "ok"})
+	wantWorker(t, "concurrency 4", func(w fakeWorker) bool { return w.Concurrency == 4 }, fakes[0], fakes[2])
+	if len(patches(fakes[1])) == 0 {
+		t.Error("b was skipped: a balanced unit's PATCH is always sent")
+	}
+	if n := totalPatches(fakes...); n > attemptCap(3) {
+		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
+	}
+}
+
+// TestActionBalancedUnreachableInstance: an instance that left the balancer
+// gets a failure naming the attempts, the others their outcome.
+func TestActionBalancedUnreachableInstance(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs...)
+	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := unitsOf(m.Current().History.Latest())
+	srvs[2].Close() // c leaves: the balancer answers its turns with a bare 502
+
+	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
+	wantResults(t, body, units, [2]string{"#a", "ok"}, [2]string{"#b", "ok"},
+		[2]string{"#c", "failed (not reached through the load balancer after 18 tries)"})
+	wantWorker(t, "paused", paused, fakes[0], fakes[1])
+	if n := totalPatches(fakes...); n > attemptCap(3) {
+		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
+	}
+}
+
+// TestRestartRefusedWithBalancedScope: restart never goes through a balancer.
+func TestRestartRefusedWithBalancedScope(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs[0], srvs[1])
+	srv, _ := serveBalanced(t, []string{lb.URL, srvs[2].URL}, "#a", "#b", srvs[2].URL)
+
+	resp, body := post(t, srv, "/workers/w/actions/restart", multi(), true)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(html.UnescapeString(body), "restart isn't available through a load balancer") {
+		t.Errorf("merged restart = %d %q, want 400 with the refusal", resp.StatusCode, body)
+	}
+	noPatches(t, fakes...)
+}
+
+// oneUnitCopy is the refusal of an action on one balanced unit, and the note
+// shown instead of its controls.
+const oneUnitCopy = "A load balancer picks which instance answers, so actions here would reach a random one. Use All instances (merged), or list the instances' own addresses in the server config."
+
+// TestOneBalancedUnitRefused: nothing is sent to one balanced unit, nor to a
+// balancer's own address: the balancer would pick the instance.
+func TestOneBalancedUnitRefused(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs...)
+	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+
+	for _, pod := range []string{"#a", lb.URL} {
+		for _, c := range []struct {
+			path string
+			form url.Values
+		}{
+			{"/workers/w/actions/pause", multi("pod", pod)},
+			{"/workers/w/actions/restart", multi("pod", pod)},
+			{"/workers/w/concurrency", multi("pod", pod, "n", "3")},
+			{"/bulk/pause", multi("pod", pod, "names", "w")},
+			{"/bulk/pause", multi("pod", pod, "names", "w", "confirm", "1")},
+		} {
+			resp, body := post(t, srv, c.path, c.form, true)
+			if resp.StatusCode != http.StatusBadRequest || html.UnescapeString(body) != oneUnitCopy+"\n" {
+				t.Errorf("POST %s pod=%s = %d %q, want 400 with the one-unit refusal", c.path, pod, resp.StatusCode, body)
+			}
+		}
+	}
+	noPatches(t, fakes...)
+}
+
+// TestMixedScope: an instance with its own address is sent the action
+// there, once; the instances behind the balancer through it.
+func TestMixedScope(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs[0], srvs[1])
+	srv, m := serveBalanced(t, []string{lb.URL, srvs[2].URL}, "#a", "#b", srvs[2].URL)
+	units := unitsOf(m.Current().History.Latest())
+
+	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
+	// Direct units first, then balanced ones.
+	wantResults(t, body, units, [2]string{srvs[2].URL, "ok"}, [2]string{"#a", "ok"}, [2]string{"#b", "ok"})
+	wantPatches(t, fakes[2], "PATCH /workers/w/actions/pause")
+	wantWorker(t, "paused", paused, fakes...)
+}
+
+// TestDeadBalancerUnit: a balancer endpoint no instance answered is a unit
+// that fails with its error; nothing is sent to it, not even directly.
+func TestDeadBalancerUnit(t *testing.T) {
+	fakes, srvs := newFakes(t, "a")
+	lb := newRoundRobinLB(t, srvs...)
+	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Name: "multi", Interval: 3600, Endpoints: []string{lb.URL}},
+	}}, "multi")
+	srv := serve(t, m)
+	// The first poll ran and the next is an hour away: this snapshot is the latest.
+	dead := PodSnapshot{Key: lb.URL, Via: lb.URL, Label: "instance-1", Balanced: true, Err: "x"}
+	m.Current().History.Append(snap(time.Now(), dead))
+	units := unitsOf(m.Current().History.Latest())
+
+	if resp, _ := post(t, srv, "/workers/w/actions/restart", multi(), true); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("restart with a dead balancer unit in scope = %d, want 400", resp.StatusCode)
+	}
+	_, body := post(t, srv, "/bulk/pause", multi("names", "w"), true)
+	if want := `<th title="` + lb.URL + `">instance-1<small class="err">x</small></th>`; !strings.Contains(body, want) {
+		t.Errorf("confirm panel lacks the dead unit's column %q:\n%s", want, body)
+	}
+	// Last: its response polls, and the next snapshot finds the endpoint direct.
+	_, body = post(t, srv, "/workers/w/actions/pause", multi(), true)
+	wantResults(t, body, units, [2]string{lb.URL, "failed (x)"})
+	noPatches(t, fakes...)
+}
+
+// TestBulkConfirmColumnsAreUnits: behind a balancer, the confirm panel's
+// columns are the instances, and the bulk action reaches each one per worker.
+func TestBulkConfirmColumnsAreUnits(t *testing.T) {
+	fakes, srvs := newFakes(t, "a", "b", "c")
+	fakes[0].mu.Lock()
+	fakes[0].Workers["v"] = &fakeWorker{Status: "Running", Concurrency: 1}
+	fakes[0].mu.Unlock()
+	lb := newRoundRobinLB(t, srvs...)
+	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := unitsOf(m.Current().History.Latest())
+
+	_, body := post(t, srv, "/bulk/pause", multi("names", "w", "names", "v"), true)
+	var head strings.Builder
+	head.WriteString(`<th>Worker</th>`)
+	for _, key := range []string{"#a", "#b", "#c"} {
+		head.WriteString(`<th title="` + units[key].Tip() + `">` + units[key].Label + `</th>`)
+	}
+	if !strings.Contains(body, head.String()) {
+		t.Errorf("confirm panel lacks the columns %q:\n%s", head.String(), body)
+	}
+	// v is on a only.
+	if _, v, _ := strings.Cut(body, `<th scope="row" class="name">v</th>`); !strings.HasPrefix(v, `<td>pause</td><td><span class="na">not on this instance</span></td><td><span class="na">not on this instance</span></td>`) {
+		t.Errorf("v's row should read pause on a only:\n%s", body)
+	}
+	noPatches(t, fakes...)
+
+	_, body = post(t, srv, "/bulk/pause", multi("names", "w", "names", "v", "confirm", "1"), true)
+	results := html.UnescapeString(resultsOf(body))
+	if n := strings.Count(results, "<li "); n != 6 {
+		t.Errorf("%d results, want one per worker × instance:\n%s", n, results)
+	}
+	for _, c := range []struct{ worker, key, outcome string }{
+		{"v", "#a", "ok"}, {"v", "#b", "no change (not on this instance)"}, {"v", "#c", "no change (not on this instance)"},
+		{"w", "#a", "ok"}, {"w", "#b", "ok"}, {"w", "#c", "ok"},
+	} {
+		if line := `<span class="worker">` + c.worker + `</span> on ` + resultLine(units[c.key], c.outcome); !strings.Contains(results, line) {
+			t.Errorf("results lack %q:\n%s", line, results)
+		}
+	}
+	wantWorker(t, "paused", paused, fakes...)
+	if w, _ := fakes[0].worker("v"); w.Status != "Paused" {
+		t.Errorf("v on a: %+v, want paused", w)
+	}
+}
+
+// TestActionResponsesUseNoun: an action's results and the page it refreshes
+// out of band name the server's units by its noun.
+func TestActionResponsesUseNoun(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		server     config.Server
+		one, other string
+		live       map[string]string // page the action came from → copy its #live carries
+	}{
+		{"static", config.Server{}, "instance", "pod", map[string]string{"/workers/emails": "Instances reporting:", "/": "Pending (max/instance)"}},
+		{"kubernetes", kubernetesServer, "pod", "instance", map[string]string{"/workers/emails": "Pods reporting:", "/": "Pending (max/pod)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := serveUnits(t, tc.server, threeFakes(t)...)
+			for from, want := range tc.live {
+				// emails lives on one unit; the others answer 404.
+				req := postRequest(t, srv, "/workers/emails/actions/resume", multi())
+				req.Header.Set("HX-Current-URL", srv.URL+from)
+				_, body := send(t, srv, req)
+				if want := "no change (not on this " + tc.one + ")"; !strings.Contains(resultsOf(body), want) {
+					t.Errorf("from %s: results lack %q:\n%s", from, want, resultsOf(body))
+				}
+				if !strings.Contains(liveOOB(body), want) {
+					t.Errorf("from %s: oob #live lacks %q:\n%s", from, want, liveOOB(body))
+				}
+				if text := strings.ToLower(visibleText(body)); strings.Contains(text, tc.other) {
+					t.Errorf("from %s: response says %q:\n%s", from, tc.other, text)
+				}
+			}
+		})
 	}
 }

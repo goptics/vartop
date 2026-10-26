@@ -38,7 +38,7 @@
 - **Multi-Server & Multi-Pod Support** — configure multiple varmq servers, each with a static list of pod endpoints. View merged worker stats across all pods, or drill into a single pod via the Switch view
 - **Kubernetes Discovery** — point a server at a Service or label selector and vartop watches its EndpointSlices, following pods as they scale, restart, or roll out; pods are labelled by pod name
 - **DNS Discovery** — point a server at a hostname that resolves to every instance (headless Service, Docker Compose service, Consul) and vartop re-resolves it every few seconds
-- **Load-Balancer Detection** — varmq names the instance behind every response; if one URL is answered by several instances, vartop warns that it is a load balancer and labels each row with the instance that served it
+- **Load-Balancer Detection** — varmq names the instance behind every response; if one URL is answered by several instances, the TUI warns that it is a load balancer and labels each row with the instance that served it, and the web UI shows every instance behind it
 - **Worker Control** — pause, resume, restart, and stop workers directly from the TUI or CLI
 - **Concurrency Tuning** — adjust worker pool size in real time without restarting, via `vartop concurrency` (CLI)
 - **Interactive Onboarding** — guided first-run wizard to configure your first server connection
@@ -160,6 +160,8 @@ vartop web --no-open                # print the URL, don't launch a browser
 - **Loopback only.** vartop refuses any other `--addr`, and the server only answers requests addressed to its own loopback host name.
 - **The token stays on the server.** vartop calls varmq on the page's behalf; the bearer token is never sent to the browser.
 - **History lives in memory.** Charts cover what vartop has seen since `vartop web` started (up to the last hour) and are gone when it stops.
+
+**Behind a load balancer**, each instance that answers through the balancer URL gets its own entry (instance-1, instance-2, …; hover one for its instance ID), and actions on **All instances (merged)** go through the balancer until every instance has answered, one result line each. Restart and actions on a single instance aren't offered there, since the balancer picks which instance answers: list the instances' own addresses in `endpoints`, or use [`kubernetes`](#kubernetes) or [`dns`](#dns) discovery.
 
 Press <kbd>Ctrl+C</kbd> to stop.
 
@@ -322,19 +324,19 @@ An unresolvable host fails at connect time with the lookup error; a failed refre
 
 ## Load balancers
 
-If a server is configured with a single **load-balancer URL** (an ingress, nginx, a cloud LB, or a normal ClusterIP Service), every request reaches *one* instance chosen by the balancer:
+If a server is configured with a single **load-balancer URL** (an ingress, nginx, a cloud LB, or a normal ClusterIP Service), every request reaches *one* instance chosen by the balancer. In the TUI and the CLI:
 
 - the dashboard shows only that instance's workers, and it can change on every refresh
 - an action (pause, stop, …) reaches one random instance, not all of them; a `pause` and the following `resume` can land on different instances
 
-vartop can't aggregate through a balancer, so instead it makes the situation visible. varmq (with this feature) adds an `X-Varmq-Instance` header naming the process that answered every API request, defaulting to the hostname (the pod name on Kubernetes) and settable via `varmq.InstanceID`. vartop uses it to:
+The TUI and the CLI can't aggregate through a balancer, so instead they make the situation visible. varmq (with this feature) adds an `X-Varmq-Instance` header naming the process that answered every API request, defaulting to the hostname (the pod name on Kubernetes) and settable via `varmq.InstanceID`. vartop uses it to:
 
 - label each worker row, and each CLI result line (`ok (instance pod-c)`), with the instance that served it
-- show a **Load-balanced endpoint** warning once one URL has been answered by more than one instance
+- show a **Load-balanced endpoint** warning in the TUI once one URL has been answered by more than one instance
 
-Detection is best-effort: a balancer that keeps a client on one backend per connection (most L4 balancers, kube-proxy) may never reveal a second instance.
+Detection is best-effort: a balancer that keeps a client on one backend per connection (most L4 balancers, kube-proxy) may never reveal a second instance to the TUI. The [web UI](#web-ui) opens a new connection to every URL on each refresh, so it notices those balancers too, and shows each instance behind a balancer instead of warning.
 
-**To see every instance, skip the balancer:** use [`kubernetes`](#kubernetes) discovery, [`dns`](#dns) with a headless Service or service-discovery name, or list the instance URLs in `endpoints`. A cloud load balancer's own hostname resolves to the balancer's nodes, not your instances, so `dns` doesn't help there.
+**To see every instance in the TUI, or to restart or act on one instance from the web UI, skip the balancer:** use [`kubernetes`](#kubernetes) discovery, [`dns`](#dns) with a headless Service or service-discovery name, or list the instance URLs in `endpoints`. A cloud load balancer's own hostname resolves to the balancer's nodes, not your instances, so `dns` doesn't help there.
 
 > **Distributed queues:** with a shared (e.g. Redis) queue, every instance reports the same queue length as *Pending*, so don't add Pending up across rows.
 
@@ -375,6 +377,7 @@ vartop
 │       ├── server.go       # Loopback listener, Host/CSRF guards, page handlers
 │       ├── session.go      # Switches the active server in the background
 │       ├── poller.go       # Polls every pod each interval into the history
+│       ├── balancer.go     # Reaches every instance behind a load balancer
 │       ├── history.go      # In-memory ring of snapshots (last hour) and rates
 │       ├── view.go         # Snapshots → dashboard, grid and detail view models
 │       ├── actions.go      # Worker action, concurrency and bulk POST routes

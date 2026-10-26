@@ -879,3 +879,76 @@ func TestFillCarriesNoteAndTips(t *testing.T) {
 		t.Errorf("Pods = %+v, want %+v", p.Pods, want)
 	}
 }
+
+// TestControlsBehindBalancer: one balanced unit's pages offer no controls,
+// only the note saying why; a scope holding one offers no restart.
+func TestControlsBehindBalancer(t *testing.T) {
+	_, srvs := newFakes(t, "a", "b", "c")
+	lb := newRoundRobinLB(t, srvs...)
+	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	note := `<p class="note">` + oneUnitCopy + `</p>`
+
+	_, body := fetch(t, srv, "/workers/w?server=multi&pod=%23a", false)
+	if body = html.UnescapeString(body); !strings.Contains(body, note) {
+		t.Errorf("detail of one balanced unit lacks the note %q", note)
+	}
+	for _, control := range []string{">Pause</button>", ">Restart</button>", "/concurrency"} {
+		if strings.Contains(body, control) {
+			t.Errorf("detail of one balanced unit has %q", control)
+		}
+	}
+
+	_, body = fetch(t, srv, "/workers/w?server=multi", false)
+	if !strings.Contains(body, ">Pause</button>") || !strings.Contains(body, "/concurrency") || strings.Contains(body, ">Restart</button>") {
+		t.Errorf("merged detail behind a balancer should have controls but no Restart:\n%s", body)
+	}
+	if strings.Contains(html.UnescapeString(body), note) {
+		t.Error("merged detail carries the one-unit note")
+	}
+
+	_, body = fetch(t, srv, "/?server=multi&pod=%23a", false)
+	if body = html.UnescapeString(body); !strings.Contains(body, note) || strings.Contains(body, `id="bulk"`) {
+		t.Errorf("dashboard of one balanced unit should have the note and no bulk form:\n%s", body)
+	}
+	if _, body = fetch(t, srv, "/?server=multi", false); !strings.Contains(body, `id="bulk"`) {
+		t.Error("merged dashboard behind a balancer lacks the bulk form")
+	}
+
+	// Without balancers nothing changes.
+	_, _, aSrv, bSrv := twoFakes(t)
+	plain, _ := newTestServer(t, aSrv, bSrv)
+	for _, path := range []string{"/workers/orders?server=multi", "/workers/orders?server=multi&pod=" + url.QueryEscape(aSrv.URL)} {
+		if _, body := fetch(t, plain, path, false); !strings.Contains(body, ">Restart</button>") {
+			t.Errorf("GET %s on a server without balancers lacks Restart", path)
+		}
+	}
+}
+
+// TestFillMarksBalancedScope: a page's scope holds a balanced unit when it
+// is merged over one, or is one.
+func TestFillMarksBalancedScope(t *testing.T) {
+	h := NewHistory(time.Second)
+	h.Append(snap(time.Unix(1000, 0),
+		PodSnapshot{Key: "#a", Via: "http://lb:1", Instance: "a", Balanced: true},
+		PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"},
+	))
+	plain := NewHistory(time.Second)
+	plain.Append(snap(time.Unix(1000, 0), PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"}))
+
+	for _, tc := range []struct {
+		hist          *History
+		pod           string
+		scope, oneBal bool
+	}{
+		{h, "", true, false},
+		{h, "#a", true, true},
+		{h, "http://c:1", false, false},
+		{plain, "", false, false},
+	} {
+		p := Page{Pod: tc.pod}
+		fill(&p, tc.hist)
+		if p.ScopeBalanced != tc.scope || p.OneBalanced != tc.oneBal {
+			t.Errorf("pod %q: ScopeBalanced %v OneBalanced %v, want %v %v", tc.pod, p.ScopeBalanced, p.OneBalanced, tc.scope, tc.oneBal)
+		}
+	}
+}

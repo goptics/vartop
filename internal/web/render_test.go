@@ -692,3 +692,29 @@ func TestCSSLeavesCopyVerbatim(t *testing.T) {
 		t.Error("app.css uppercases text; headers must render exactly as templated")
 	}
 }
+
+// TestControlsFollowBalancedScope: one balanced unit gets the note instead of
+// controls; a scope holding one gets every control but Restart.
+func TestControlsFollowBalancedScope(t *testing.T) {
+	note := `<p class="note">` + template.HTMLEscapeString(oneUnitCopy) + `</p>`
+
+	p := detailPage()
+	p.ScopeBalanced = true
+	body := run(t, "detail", "layout", p)
+	if strings.Contains(body, "/actions/restart") || !strings.Contains(body, "/actions/stop") || !strings.Contains(body, "/concurrency") {
+		t.Errorf("detail over a balanced scope should have every control but Restart:\n%s", body)
+	}
+
+	p.OneBalanced = true
+	body = run(t, "detail", "layout", p)
+	if !strings.Contains(body, note) || strings.Contains(body, "<form class=\"conc\"") || strings.Contains(body, "/actions/") {
+		t.Errorf("detail of one balanced unit should have the note and no controls:\n%s", body)
+	}
+
+	d := dashboardPage()
+	d.ScopeBalanced, d.OneBalanced = true, true
+	body = run(t, "dashboard", "layout", d)
+	if !strings.Contains(body, note) || strings.Contains(body, `id="bulk"`) {
+		t.Errorf("dashboard of one balanced unit should have the note and no bulk form:\n%s", body)
+	}
+}

@@ -272,8 +272,9 @@ func (h *handler) failure(p *Page, want string) {
 	}
 }
 
-// fill sets p's header from hist and returns hist's snapshots, oldest first.
-// It keeps p.Pod even when the newest snapshot lacks it: see podGone.
+// fill sets p's header, and whether its pod scope holds a balanced unit,
+// from hist and returns hist's snapshots, oldest first. It keeps p.Pod even
+// when the newest snapshot lacks it: see podGone.
 func fill(p *Page, hist *History) []*Snapshot {
 	snaps := hist.Snapshots()
 	latest := latestOf(snaps)
@@ -288,6 +289,8 @@ func fill(p *Page, hist *History) []*Snapshot {
 			p.Pods = append(p.Pods, PodOption{Key: ps.Key, Label: ps.Label, Tip: ps.Tip()})
 		}
 	}
+	p.ScopeBalanced = slices.ContainsFunc(podsOf(latest, p.Pod), func(ps PodSnapshot) bool { return ps.Balanced })
+	p.OneBalanced = p.Pod != "" && p.ScopeBalanced
 	return snaps
 }
 

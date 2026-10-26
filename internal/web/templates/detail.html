@@ -27,7 +27,8 @@
 {{define "content"}}{{with .Detail}}<p class="back"><a href="{{pageURL "/" $.Server $.Pod}}">← Dashboard</a></p>{{end}}
 {{template "live" .}}
 {{with .Detail}}{{$name := pathEscape .Name}}
-<section class="controls" aria-label="Controls">
+{{if $.OneBalanced}}<p class="note">{{oneBalanced}}</p>
+{{else}}<section class="controls" aria-label="Controls">
   <h3>Concurrency <span class="sub">per {{$.Noun.One}}, on {{$.Scope}}</span></h3>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
@@ -47,9 +48,9 @@
     <input type="hidden" name="pod" value="{{$.Pod}}">
     <button type="button" hx-post="/workers/{{$name}}/actions/pause">Pause</button>
     <button type="button" hx-post="/workers/{{$name}}/actions/resume">Resume</button>
-    <button type="button" class="warn" hx-post="/workers/{{$name}}/actions/restart" hx-confirm="Restart {{.Name}} on {{$.Scope}} ({{$.Server}})?">Restart</button>
-    <button type="button" class="danger" hx-post="/workers/{{$name}}/actions/stop" hx-confirm="Stop {{.Name}} on {{$.Scope}} ({{$.Server}})?">Stop</button>
+    {{if not $.ScopeBalanced}}<button type="button" class="warn" hx-post="/workers/{{$name}}/actions/restart" hx-confirm="Restart {{.Name}} on {{$.Scope}} ({{$.Server}})?">Restart</button>
+    {{end}}<button type="button" class="danger" hx-post="/workers/{{$name}}/actions/stop" hx-confirm="Stop {{.Name}} on {{$.Scope}} ({{$.Server}})?">Stop</button>
   </form>
-</section>{{end}}
+</section>{{end}}{{end}}
 <div id="results" aria-live="polite"></div>
 {{end}}

@@ -54,11 +54,12 @@
 
 {{define "content"}}{{template "live" .}}
 <div id="results" aria-live="polite"></div>
-{{if .Dashboard}}<form id="bulk" class="bulk" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+{{if .Dashboard}}{{if .OneBalanced}}<p class="note">{{oneBalanced}}</p>
+{{else}}<form id="bulk" class="bulk" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
   {{template "server_field" .}}
   <input type="hidden" name="pod" value="{{.Pod}}">
   <span>Selected workers on {{.Scope}}:</span>
   <button type="button" hx-post="/bulk/pause">Pause selected</button>
   <button type="button" hx-post="/bulk/resume">Resume selected</button>
-</form>{{end}}
+</form>{{end}}{{end}}
 {{end}}

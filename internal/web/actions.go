@@ -30,47 +30,197 @@ var (
 // shows its effect.
 const settleWait = 2 * time.Second
 
-// noChange is what a fanOut fn returns for a pod it skipped, sending
+// The refusals of what a load balancer cannot carry. oneBalancedMsg is also
+// the note shown in place of one balanced unit's controls.
+const (
+	restartRefused = "restart isn't available through a load balancer"
+	oneBalancedMsg = "A load balancer picks which instance answers, so actions here would reach a random one. Use All instances (merged), or list the instances' own addresses in the server config."
+)
+
+// noChange is what a fanOut fn returns for a unit it skipped, sending
 // nothing; it becomes a "no change" result with the error text as Msg.
 type noChange string
 
 func (e noChange) Error() string { return string(e) }
 
-// fanOut calls fn concurrently on every client of clients, or only on the
-// one whose endpoint is pod when pod is set, and returns one result per
-// pod, sorted by endpoint and labelled from units (see unitsOf). It calls
-// nothing and errors when pod is not one of clients' endpoints. n words the
-// error and the results' messages.
-func fanOut(ctx context.Context, clients []*api.Client, pod string, units map[string]PodSnapshot, n Noun,
-	fn func(context.Context, *api.Client) error) ([]ActionResult, error) {
-	targets, err := podScope(clients, pod, n)
-	if err != nil {
-		return nil, err
+// actScope is what an action reaches: the direct units, whose clients are
+// each sent the action, sorted by endpoint; the balanced units, reached
+// through the balancers' clients; and the dead ones, balancer endpoints no
+// instance answered, which are sent nothing. Units are sorted by key.
+type actScope struct {
+	direct    []*api.Client
+	balanced  []PodSnapshot
+	dead      []PodSnapshot
+	balancers []*api.Client
+}
+
+// viaBalancer reports whether sc holds a unit behind a load balancer.
+func (sc actScope) viaBalancer() bool { return len(sc.balanced) > 0 || len(sc.dead) > 0 }
+
+// scopeOf is what an action on pod reaches, as latest shows the server:
+// every unit when pod is "", else the direct unit whose endpoint is pod. An
+// endpoint is a balancer, never a direct unit, when it is a key of
+// latest.Behind or the endpoint a balanced unit was reached through, dead
+// ones included. A pod naming a balanced unit or a balancer is refused with
+// oneBalancedMsg: the balancer would pick the instance. n words the error
+// for a pod that is no unit of the server.
+func scopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (actScope, error) {
+	var sc actScope
+	balancer := make(map[string]bool) // endpoint → it is a balancer
+	one := false                      // pod is a balanced unit
+	if latest != nil {
+		for ep := range latest.Behind {
+			balancer[ep] = true
+		}
+		for _, u := range latest.Pods {
+			if !u.Balanced {
+				continue
+			}
+			balancer[u.Via] = true
+			one = one || u.Key == pod
+			if u.Instance != "" {
+				sc.balanced = append(sc.balanced, u)
+			} else {
+				sc.dead = append(sc.dead, u)
+			}
+		}
 	}
+	if pod != "" {
+		if one || balancer[pod] {
+			return actScope{}, errors.New(oneBalancedMsg)
+		}
+		for _, c := range clients {
+			if c.PrimaryEndpoint() == pod {
+				return actScope{direct: []*api.Client{c}}, nil
+			}
+		}
+		return actScope{}, fmt.Errorf("the selected %s is not %s %s of this server; reload", n.One, n.Article, n.One)
+	}
+	for _, c := range slices.SortedFunc(slices.Values(clients), func(a, b *api.Client) int {
+		return strings.Compare(a.PrimaryEndpoint(), b.PrimaryEndpoint())
+	}) {
+		if balancer[c.PrimaryEndpoint()] {
+			sc.balancers = append(sc.balancers, c)
+		} else {
+			sc.direct = append(sc.direct, c)
+		}
+	}
+	return sc, nil
+}
+
+// sender is one request act sends about a worker, given its name
+// path-escaped: direct on a direct unit's own client, fresh through a
+// balancer, on a new connection, reporting the instance that answered.
+type sender struct {
+	direct func(ctx context.Context, c *api.Client, name string) error
+	fresh  func(ctx context.Context, c *api.Client, name string) (string, error)
+}
+
+// actionSender sends action (pause, resume, restart or stop).
+func actionSender(action string) sender {
+	return sender{
+		direct: func(ctx context.Context, c *api.Client, name string) error { return c.ActionCtx(ctx, name, action) },
+		fresh: func(ctx context.Context, c *api.Client, name string) (string, error) {
+			return c.ActionFresh(ctx, name, action)
+		},
+	}
+}
+
+// act sends send's request about each worker of names to every unit of sc
+// and returns, per name, one result per unit: the direct units' first, then the
+// balanced units' (see reachUnits), then the dead units', failed with their
+// error. Results are labelled from units (see unitsOf); n words their
+// messages.
+func act(ctx context.Context, sc actScope, units map[string]PodSnapshot, n Noun, names []string, send sender) [][]ActionResult {
+	results := make([][]ActionResult, len(names))
+	var reached [][]ActionResult
+	var wg sync.WaitGroup
+	for i, name := range names {
+		escaped := url.PathEscape(name)
+		wg.Go(func() {
+			results[i] = fanOut(ctx, sc.direct, units, n, func(ctx context.Context, c *api.Client) error {
+				return send.direct(ctx, c, escaped)
+			})
+		})
+	}
+	if len(sc.balanced) > 0 {
+		wg.Go(func() { reached = reachUnits(ctx, sc, units, n, names, send.fresh) })
+	}
+	wg.Wait()
+	for i := range results {
+		if reached != nil {
+			results[i] = append(results[i], reached[i]...)
+		}
+		for _, u := range sc.dead {
+			results[i] = append(results[i], outcome(u.Key, units, n, errors.New(u.Err)))
+		}
+	}
+	return results
+}
+
+// fanOut calls fn concurrently on every client of targets and returns one
+// result per client, in targets' order, labelled from units (see unitsOf).
+// n words the results' messages.
+func fanOut(ctx context.Context, targets []*api.Client, units map[string]PodSnapshot, n Noun,
+	fn func(context.Context, *api.Client) error) []ActionResult {
 	results := make([]ActionResult, len(targets))
 	var wg sync.WaitGroup
 	for i, c := range targets {
 		wg.Go(func() { results[i] = outcome(c.PrimaryEndpoint(), units, n, fn(ctx, c)) })
 	}
 	wg.Wait()
-	return results, nil
+	return results
 }
 
-// podScope is the clients an action on pod reaches, sorted by endpoint: all
-// of them when pod is "", else the one whose endpoint is pod. n words the
-// error for a pod that is none.
-func podScope(clients []*api.Client, pod string, n Noun) ([]*api.Client, error) {
-	if pod == "" {
-		return slices.SortedFunc(slices.Values(clients), func(a, b *api.Client) int {
-			return strings.Compare(a.PrimaryEndpoint(), b.PrimaryEndpoint())
-		}), nil
+// reachUnits sends fresh about each of names through sc's balancers, a
+// reacher job per name, until the job has a definitive answer (a 2xx, a 409
+// or a 404) from the instance of every balanced unit of sc or has spent its
+// budget of attemptCap(max(units, balancers)) attempts. It returns, per
+// name, one result per balanced unit: the outcome of its instance's
+// definitive answer, else of its latest other answer, else a failure saying
+// it was not reached. Answers from other instances are not results; an
+// instance sent the request twice is unchanged by the repeat. One reacher
+// carries every name, so jobs side by side do not fall into step behind a
+// round-robin balancer.
+func reachUnits(ctx context.Context, sc actScope, units map[string]PodSnapshot, n Noun, names []string,
+	fresh func(context.Context, *api.Client, string) (string, error)) [][]ActionResult {
+	ids := make([]string, len(sc.balanced))
+	for i, u := range sc.balanced {
+		ids[i] = u.Instance
 	}
-	for _, c := range clients {
-		if c.PrimaryEndpoint() == pod {
-			return []*api.Client{c}, nil
+	r := newReacher(sc.balancers, attemptCap(max(len(ids), len(sc.balancers))))
+	jobs := make([]*job[struct{}], len(names))
+	for i, name := range names {
+		escaped := url.PathEscape(name)
+		jobs[i] = addJob(r, func(ctx context.Context, c *api.Client) (struct{}, string, error) {
+			instance, err := fresh(ctx, c, escaped)
+			return struct{}{}, instance, err
+		}, isUnchanged)
+		jobs[i].want(ids...)
+	}
+	r.run(ctx)
+
+	results := make([][]ActionResult, len(names))
+	for i, j := range jobs {
+		for _, u := range sc.balanced {
+			a, ok := j.got[u.Instance]
+			if !ok {
+				a, ok = j.failed[u.Instance]
+			}
+			if !ok {
+				a.Err = fmt.Errorf("not reached through the load balancer after %d tries", j.sent)
+			}
+			results[i] = append(results[i], outcome(u.Key, units, n, a.Err))
 		}
 	}
-	return nil, fmt.Errorf("the selected %s is not %s %s of this server; reload", n.One, n.Article, n.One)
+	return results
+}
+
+// isUnchanged reports whether err is varmq saying an action changes nothing
+// on that instance: a 409 (already so) or a 404 (it lacks the worker).
+func isUnchanged(err error) bool {
+	var apiErr *api.APIError
+	return errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusConflict || apiErr.StatusCode == http.StatusNotFound)
 }
 
 // outcome is the result of err on the unit key: varmq's 409 ("already in that
@@ -145,7 +295,8 @@ func badRequest(w http.ResponseWriter, msg string) {
 }
 
 // action runs pause, resume, restart or stop on one worker across the pod
-// scope of the form.
+// scope of the form. Restart is refused when the scope holds a unit behind
+// a load balancer: it would reach whichever instance the balancer picks.
 func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 	name, action := r.PathValue("name"), r.PathValue("action")
 	if !slices.Contains(workerActions, action) {
@@ -156,19 +307,26 @@ func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 	if s == nil {
 		return
 	}
+	noun := NounFor(s.Server)
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(s.History.Latest()), NounFor(s.Server), func(ctx context.Context, c *api.Client) error {
-		return c.ActionCtx(ctx, url.PathEscape(name), action)
-	})
+	latest := s.History.Latest()
+	sc, err := scopeOf(s.Clients(), latest, pod, noun)
 	if err != nil {
 		badRequest(w, err.Error())
 		return
 	}
-	h.respond(w, r, key, s, pod, name, results)
+	if action == "restart" && sc.viaBalancer() {
+		badRequest(w, restartRefused)
+		return
+	}
+	results := act(mutationCtx(r), sc, unitsOf(latest), noun, []string{name}, actionSender(action))
+	h.respond(w, r, key, s, pod, name, results[0])
 }
 
 // concurrency sets one worker's per-pod concurrency to n across the pod
-// scope of the form, skipping pods whose latest sample already has n.
+// scope of the form, skipping direct units whose latest sample already has
+// n. Units behind a load balancer are always sent it: varmq answers 409 on
+// one already at n, which is no change.
 func (h *handler) concurrency(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	n, err := strconv.Atoi(r.PostFormValue("n"))
@@ -180,32 +338,39 @@ func (h *handler) concurrency(w http.ResponseWriter, r *http.Request) {
 	if s == nil {
 		return
 	}
-	latest := s.History.Latest()
-	current := make(map[string]int) // endpoint → the worker's concurrency there
-	if latest != nil {
-		for _, p := range latest.Pods {
-			if smp := p.Workers[name]; smp != nil {
-				current[p.Key] = smp.Concurrency
-			}
-		}
-	}
+	noun := NounFor(s.Server)
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(latest), NounFor(s.Server), func(ctx context.Context, c *api.Client) error {
-		if cur, ok := current[c.PrimaryEndpoint()]; ok && cur == n {
-			return noChange(fmt.Sprintf("already %d", n))
-		}
-		return c.TuneConcurrencyCtx(ctx, url.PathEscape(name), n)
-	})
+	latest := s.History.Latest()
+	sc, err := scopeOf(s.Clients(), latest, pod, noun)
 	if err != nil {
 		badRequest(w, err.Error())
 		return
 	}
-	h.respond(w, r, key, s, pod, name, results)
+	current := make(map[string]int) // direct unit's endpoint (its key) → the worker's concurrency there
+	if latest != nil {
+		for _, p := range latest.Pods {
+			if smp := p.Workers[name]; smp != nil && !p.Balanced {
+				current[p.Key] = smp.Concurrency
+			}
+		}
+	}
+	results := act(mutationCtx(r), sc, unitsOf(latest), noun, []string{name}, sender{
+		direct: func(ctx context.Context, c *api.Client, name string) error {
+			if cur, ok := current[c.PrimaryEndpoint()]; ok && cur == n {
+				return noChange(fmt.Sprintf("already %d", n))
+			}
+			return c.TuneConcurrencyCtx(ctx, name, n)
+		},
+		fresh: func(ctx context.Context, c *api.Client, name string) (string, error) {
+			return c.TuneConcurrencyFresh(ctx, name, n)
+		},
+	})
+	h.respond(w, r, key, s, pod, name, results[0])
 }
 
 // bulk pauses or resumes the workers named in the form across its pod
 // scope. Without confirm=1 it only answers the confirmation panel, names ×
-// pods on the server, and calls nothing.
+// units in scope, and calls nothing.
 func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
 	if !slices.Contains(bulkActions, action) {
@@ -229,7 +394,7 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	pod := r.PostFormValue("pod")
 	latest := s.History.Latest()
 	units := unitsOf(latest)
-	targets, err := podScope(s.Clients(), pod, noun)
+	sc, err := scopeOf(s.Clients(), latest, pod, noun)
 	if err != nil {
 		badRequest(w, err.Error())
 		return
@@ -240,37 +405,33 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 		for i, name := range names {
 			cv.Rows[i].Name = name
 		}
-		for _, c := range targets {
-			ep := c.PrimaryEndpoint()
-			u, seen := units[ep] // not seen when latest lacks the pod
-			u.Key = ep
-			cv.Pods = append(cv.Pods, PodColumn{Key: ep, Label: cmp.Or(u.Label, config.ShortOrigin(ep)), Err: u.Err, Tip: u.Tip()})
+		column := func(u PodSnapshot, seen bool) {
+			cv.Pods = append(cv.Pods, PodColumn{Key: u.Key, Label: cmp.Or(u.Label, config.ShortOrigin(u.Key)), Err: u.Err, Tip: u.Tip()})
 			for i := range cv.Rows {
 				name := cv.Rows[i].Name
 				absent := seen && u.Err == "" && u.Workers[name] == nil && !u.unreached(name)
 				cv.Rows[i].Absent = append(cv.Rows[i].Absent, absent)
 			}
 		}
+		for _, c := range sc.direct {
+			ep := c.PrimaryEndpoint()
+			u, seen := units[ep] // not seen when latest lacks the pod
+			u.Key = ep
+			column(u, seen)
+		}
+		for _, u := range slices.Concat(sc.balanced, sc.dead) {
+			column(u, true)
+		}
 		h.fragments(w, fragment{"confirm", "confirm", cv})
 		return
 	}
 
-	ctx := mutationCtx(r)
-	perName := make([][]ActionResult, len(names))
-	var wg sync.WaitGroup
-	for i, name := range names {
-		wg.Go(func() {
-			// targets is already scoped, so this cannot fail.
-			res, _ := fanOut(ctx, targets, "", units, noun, func(ctx context.Context, c *api.Client) error {
-				return c.ActionCtx(ctx, url.PathEscape(name), action)
-			})
-			for j := range res {
-				res[j].Worker = name
-			}
-			perName[i] = res
-		})
+	perName := act(mutationCtx(r), sc, units, noun, names, actionSender(action))
+	for i, res := range perName {
+		for j := range res {
+			res[j].Worker = names[i]
+		}
 	}
-	wg.Wait()
 	h.respond(w, r, key, s, pod, "", slices.Concat(perName...))
 }
 

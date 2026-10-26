@@ -59,6 +59,11 @@ type Page struct {
 	Health                      HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
+	// ScopeBalanced: what the page's actions reach holds a unit behind a
+	// load balancer, so there is no Restart. OneBalanced: it is one such
+	// unit, so there are no controls at all, only a note saying why.
+	ScopeBalanced, OneBalanced bool
+
 	// Note is the quiet line about the balancers behind the server (see
 	// BalancerNote). Banner is a notice about what this tab shows: its server
 	// changed, its pod is gone, or its worker is not found.
@@ -129,6 +134,7 @@ var funcs = template.FuncMap{
 	"noData":        noData,
 	"peak":          peak,
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
+	"oneBalanced":   func() string { return oneBalancedMsg },
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",
