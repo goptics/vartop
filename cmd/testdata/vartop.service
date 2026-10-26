@@ -1,0 +1,13 @@
+[Unit]
+Description=vartop daemon: collects the configured varmq servers into vartop's history
+
+[Service]
+ExecStart="/opt/vartop dir/vartop" daemon run
+Environment="HOME=/home/u"
+Environment="KUBECONFIG=/home/u/.kube/a \"b\"%%c$d<e>&f"
+Environment="PATH=/opt/my tools/bin:/usr/bin"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

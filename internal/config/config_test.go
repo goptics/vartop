@@ -266,9 +266,9 @@ func TestLoadNullServer(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
-		t.Fatalf("configPath() error: %v", err)
+		t.Fatalf("Path() error: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)

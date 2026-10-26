@@ -31,6 +31,7 @@ concurrencies, and metrics from varmq mux servers.`,
 		if err != nil {
 			return err
 		}
+		startCollecting(cmd.ErrOrStderr())
 
 		m := tui.NewModel(cfg, server)
 		p := tea.NewProgram(m, tea.WithAltScreen())
@@ -55,24 +56,41 @@ concurrencies, and metrics from varmq mux servers.`,
 
 // loadOrOnboard loads the configuration, starting the interactive onboarding
 // when there is none yet (or it lists no servers). Any other load error is
-// returned.
+// returned. Onboarding without any config (the first run) also offers the
+// daemon's login service, when there is a terminal to ask on.
 func loadOrOnboard() (*config.Config, error) {
 	cfg, err := config.Load()
 	switch {
 	case err == nil && len(cfg.Servers) > 0:
 		return cfg, nil
 	case err == nil || errors.Is(err, config.ErrConfigNotFound):
-		return config.PromptOnboarding()
+		firstRun := err != nil
+		cfg, err := config.PromptOnboarding()
+		if err == nil && firstRun && isTerminal(os.Stdin) {
+			offerLoginService(config.PromptDaemonAtLogin)
+		}
+		return cfg, err
 	default:
 		return nil, err
 	}
 }
 
+// Execute runs vartop and exits non-zero on an error: with the code of an
+// exitError, else 1.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	err := rootCmd.Execute()
+	if err == nil {
+		return
 	}
+	code := 1
+	var exit exitError
+	if errors.As(err, &exit) {
+		code, err = exit.code, exit.err
+	}
+	if err != nil {
+		fmt.Println(err)
+	}
+	os.Exit(code)
 }
 
 func init() {

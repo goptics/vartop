@@ -47,9 +47,21 @@ func PromptOnboarding() (*Config, error) {
 		return nil, fmt.Errorf("failed to save initial config: %w", err)
 	}
 
-	path, _ := configPath()
+	path, _ := Path()
 	fmt.Printf("\n✓ Configuration saved to %s\n\n", path)
 	return cfg, nil
+}
+
+// daemonOffer is the onboarding's question about the vartop daemon's
+// login service.
+const daemonOffer = "Start the vartop daemon at login? It keeps collecting history in the background."
+
+// PromptDaemonAtLogin asks whether the vartop daemon should start at login.
+// Onboarding asks it once, after saving the first config.
+func PromptDaemonAtLogin() (bool, error) {
+	yes := true
+	err := huh.NewConfirm().Title(daemonOffer).Value(&yes).Run()
+	return yes, err
 }
 
 // PromptServer interactively asks the user for a single server configuration.

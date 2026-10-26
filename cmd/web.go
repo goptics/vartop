@@ -113,6 +113,7 @@ var webCmd = &cobra.Command{
 		}
 		// The key GetActiveServer resolved: the web session follows keys.
 		key := cmp.Or(serverFlag, cfg.DefaultServer)
+		startCollecting(cmd.ErrOrStderr())
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

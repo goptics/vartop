@@ -133,8 +133,8 @@ type Config struct {
 	Servers       map[string]*Server `json:"servers"`
 }
 
-// configPath returns the absolute path to the vartop config file.
-func configPath() (string, error) {
+// Path returns the absolute path to the vartop config file.
+func Path() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("could not determine user config directory: %w", err)
@@ -146,7 +146,7 @@ func configPath() (string, error) {
 // Load reads the configuration from os.UserConfigDir()/vartop/config.json.
 // If the file does not exist, it returns ErrConfigNotFound.
 func Load() (*Config, error) {
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +184,7 @@ func Load() (*Config, error) {
 // writes config.json.tmp beside it and renames that over it, so a reader
 // never sees a half-written file.
 func Save(cfg *Config) error {
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
 		return err
 	}
