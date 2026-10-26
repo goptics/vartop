@@ -5,6 +5,7 @@ import (
 	"context"
 	"maps"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,24 @@ import (
 type Tick struct {
 	Snap   *Snapshot   // rated; the collector never touches it again
 	Labels *LabelState // the label state if this tick changed it, else nil; the sink's to keep
+	// Panic is what the tick panicked with, nil when it did not. Snap is
+	// then an error snapshot ("internal error") dated when the tick
+	// panicked, and the collector polls on.
+	Panic *TickPanic
+}
+
+// TickPanic is a panic recovered from a tick, and the stack it was raised
+// on.
+type TickPanic struct {
+	Value any
+	Stack []byte
+}
+
+// CollectorInit is the state a collector starts from, kept from an earlier
+// run: the zero value starts afresh.
+type CollectorInit struct {
+	Labels *LabelState // what units are numbered by (see Tick.Labels)
+	Last   *Snapshot   // the last snapshot stored, to rate the first tick against (see Rater.Seed)
 }
 
 // Collector polls one server: a single background goroutine fans out to
@@ -28,7 +47,7 @@ type Collector struct {
 	interval time.Duration
 	pool     *api.Pool
 	sink     func(Tick) error
-	tracker  *tracker        // the poller goroutine's, but for its label state (see LoadLabels)
+	tracker  *tracker        // the poller goroutine's
 	rater    *Rater          // the poller goroutine's
 	ctx      context.Context // cancelled by Close
 	cancel   context.CancelFunc
@@ -37,11 +56,12 @@ type Collector struct {
 }
 
 // NewCollector starts polling srv through pool, which the collector now
-// owns, and hands every snapshot to sink. The first poll starts
-// immediately; each next one starts srv's poll interval after the previous
-// one ended. A sink error ends the polling: the sink is not called again,
-// and the caller, which saw the error, still has to Close the collector.
-func NewCollector(srv *config.Server, pool *api.Pool, sink func(Tick) error) *Collector {
+// owns, from the state in init, and hands every snapshot to sink. The first
+// poll starts immediately; each next one starts srv's poll interval after
+// the previous one ended. A sink error ends the polling: the sink is not
+// called again, and the caller, which saw the error, still has to Close
+// the collector.
+func NewCollector(srv *config.Server, pool *api.Pool, init CollectorInit, sink func(Tick) error) *Collector {
 	ctx, cancel := context.WithCancel(context.Background())
 	interval := srv.PollInterval()
 	c := &Collector{
@@ -54,6 +74,12 @@ func NewCollector(srv *config.Server, pool *api.Pool, sink func(Tick) error) *Co
 		cancel:   cancel,
 		pollNow:  make(chan chan struct{}),
 		stopped:  make(chan struct{}),
+	}
+	if init.Labels != nil {
+		c.tracker.loadLabels(*init.Labels)
+	}
+	if init.Last != nil {
+		c.rater.Seed(init.Last)
 	}
 	go c.run()
 	return c
@@ -87,15 +113,9 @@ func (c *Collector) PollNow(ctx context.Context) bool {
 	}
 }
 
-// LoadLabels replaces the state the collector numbers units by with s, one
-// kept from an earlier run (see Tick.Labels). A tick numbers its units once
-// its polls are done: every tick started after the call numbers them from
-// s, and so does the first tick when LoadLabels comes right after
-// NewCollector, unless that tick's polls are done first.
-func (c *Collector) LoadLabels(s LabelState) { c.tracker.loadLabels(s) }
-
 // Close stops polling and closes the pool. It does not wait for the poller:
-// a tick in flight has its requests cancelled and reaches no sink.
+// a tick in flight has its requests cancelled, but one whose polls were
+// already done may still reach the sink, once, after Close returns.
 func (c *Collector) Close() error {
 	c.cancel()
 	return c.pool.Close()
@@ -127,10 +147,19 @@ func (c *Collector) run() {
 
 // tick polls every unit with a deadline of 0.8 × the interval, rates the
 // snapshot and hands it to the sink. It reports false, handing over
-// nothing, once the collector is closed, and false when the sink fails.
-func (c *Collector) tick() bool {
+// nothing, once the collector is closed, and false when the sink fails. A
+// panic on the poller goroutine is recovered into an error snapshot (see
+// Tick.Panic); one on a goroutine a poll starts is not.
+func (c *Collector) tick() (ok bool) {
 	ctx, cancel := context.WithTimeout(c.ctx, c.interval*8/10)
 	defer cancel()
+	defer func() {
+		if v := recover(); v != nil {
+			p := &TickPanic{Value: v, Stack: debug.Stack()}
+			ok = c.ctx.Err() == nil &&
+				c.sink(Tick{Snap: &Snapshot{At: time.Now().Round(0), Err: "internal error"}, Panic: p}) == nil
+		}
+	}()
 	snap := pollOnce(ctx, c.pool, c.tracker)
 	if c.ctx.Err() != nil {
 		return false

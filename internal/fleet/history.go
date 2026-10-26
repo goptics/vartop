@@ -102,6 +102,11 @@ func (r *Rater) Rate(s *Snapshot) {
 // Seed makes the samples of s, a snapshot rated before (the latest one
 // stored, after a restart), the ones the next Rate rates against, without
 // rating them. Its samples are only read.
+//
+// s becomes the base even when it came early (see early), which an
+// unbroken run would have rated against the regular tick before it: the
+// first rate after a restart within 3 intervals of an early snapshot can
+// then be over a slightly different window than the unbroken run's.
 func (r *Rater) Seed(s *Snapshot) {
 	for _, pod := range s.Pods {
 		for name, sm := range pod.Workers {

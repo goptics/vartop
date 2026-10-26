@@ -29,7 +29,7 @@ func newTestCollector(t *testing.T, endpoints ...string) (*Collector, *History) 
 		t.Fatal(err)
 	}
 	hist := NewHistory(srv.PollInterval())
-	c := NewCollector(srv, pool, func(tick Tick) error {
+	c := NewCollector(srv, pool, CollectorInit{}, func(tick Tick) error {
 		hist.Append(tick.Snap)
 		return nil
 	})
@@ -318,7 +318,7 @@ func TestCollectorStopsOnSinkError(t *testing.T) {
 	f, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running"}})
 	pool := fleettest.StaticPool(t, srv.URL)
 	var sunk atomic.Int32
-	c := NewCollector(&config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}}, pool, func(Tick) error {
+	c := NewCollector(&config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}}, pool, CollectorInit{}, func(Tick) error {
 		sunk.Add(1)
 		return errors.New("disk full")
 	})
@@ -350,7 +350,7 @@ func TestCollectorRatesSnapshots(t *testing.T) {
 	f, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running", Completed: 10}})
 	ticks := make(chan Tick, 4)
 	c := NewCollector(&config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}},
-		fleettest.StaticPool(t, srv.URL), func(tick Tick) error {
+		fleettest.StaticPool(t, srv.URL), CollectorInit{}, func(tick Tick) error {
 			select {
 			case ticks <- tick:
 			default:
@@ -380,51 +380,131 @@ func TestCollectorRatesSnapshots(t *testing.T) {
 	}
 }
 
+// firstTick starts a collector polling srv every second from init and
+// returns its first tick; the collector is closed before it returns.
+func firstTick(t *testing.T, srv *config.Server, pool *api.Pool, init CollectorInit) Tick {
+	t.Helper()
+	ticks := make(chan Tick, 1)
+	c := NewCollector(srv, pool, init, func(tick Tick) error {
+		select {
+		case ticks <- tick:
+		default:
+		}
+		return nil
+	})
+	defer func() { _ = c.Close() }()
+	select {
+	case tick := <-ticks:
+		return tick
+	case <-time.After(3 * time.Second):
+		t.Fatal("no tick within 3s")
+		return Tick{}
+	}
+}
+
 // TestCollectorLabels: a collector hands its sink the label state with the
-// tick that changed it, and numbers units by the state LoadLabels gives it.
+// tick that changed it, and numbers units by the state it starts from.
 func TestCollectorLabels(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", nil)
+	cfg := &config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}}
+
+	first := firstTick(t, cfg, fleettest.StaticPool(t, srv.URL), CollectorInit{})
+	if l := first.Snap.Pods[0].Label; l != "instance-1" {
+		t.Errorf("first tick labels the unit %q, want instance-1", l)
+	}
+	if first.Labels == nil || first.Labels.Numbers["#i"].N != 1 {
+		t.Errorf("first tick's Labels = %+v, want #i numbered 1", first.Labels)
+	}
+
+	saved := LabelState{
+		Numbers:  map[string]LabelNumber{"#i": {N: 7, Seen: time.Now().Truncate(time.Minute)}},
+		Followed: map[string]string{srv.URL: "#i"},
+	}
+	resumed := firstTick(t, cfg, fleettest.StaticPool(t, srv.URL), CollectorInit{Labels: &saved})
+	if l := resumed.Snap.Pods[0].Label; l != "instance-7" {
+		t.Errorf("started from saved labels, the first tick labels the unit %q, want instance-7", l)
+	}
+}
+
+// TestCollectorSeedsRates: a collector started from the last snapshot of an
+// earlier run rates its first tick against it.
+func TestCollectorSeedsRates(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running", Completed: 50}})
+	at := time.Now().Add(-time.Second).Round(0)
+	prev := &Sample{At: at, RateOK: true}
+	prev.Name, prev.Instance, prev.Metrics.Completed = "orders", "i", 40
+	last := &Snapshot{At: at, Pods: []PodSnapshot{{Key: srv.URL, Via: srv.URL, Instance: "i",
+		Workers: map[string]*Sample{"orders": prev}}}}
+
+	tick := firstTick(t, &config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}},
+		fleettest.StaticPool(t, srv.URL), CollectorInit{Last: last})
+	if sm := podByEndpoint(t, tick.Snap, srv.URL).Workers["orders"]; !sm.RateOK || sm.CompletedRate <= 0 {
+		t.Errorf("first sample: RateOK = %v, CompletedRate = %v; want a positive rate against the seed", sm.RateOK, sm.CompletedRate)
+	}
+	if prev.Metrics.Completed != 40 || !prev.RateOK {
+		t.Errorf("seed sample changed: %+v", prev)
+	}
+}
+
+// panicSource is a discovery source of endpoints that panics while
+// panicking is set.
+type panicSource struct {
+	endpoints []string
+	panicking atomic.Bool
+}
+
+func (s *panicSource) Endpoints() []string {
+	if s.panicking.Load() {
+		panic("source broke")
+	}
+	return s.endpoints
+}
+
+func (*panicSource) Close() error { return nil }
+
+// TestCollectorRecoversPanic: a tick that panics hands its sink an error
+// snapshot with the panic, and the collector polls on.
+func TestCollectorRecoversPanic(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"orders": {Status: "Running"}})
+	src := &panicSource{endpoints: []string{srv.URL}}
+	src.panicking.Store(true)
 	ticks := make(chan Tick, 8)
-	c := NewCollector(&config.Server{Name: "test", Interval: 1, Endpoints: []string{srv.URL}},
-		fleettest.StaticPool(t, srv.URL), func(tick Tick) error {
-			select {
-			case ticks <- tick:
-			default:
-			}
-			return nil
-		})
+	c := NewCollector(&config.Server{Name: "test", Interval: 1}, api.NewPool(src, ""), CollectorInit{}, func(tick Tick) error {
+		select {
+		case ticks <- tick:
+		default:
+		}
+		return nil
+	})
 	t.Cleanup(func() { _ = c.Close() })
 
+	var tick Tick
 	select {
-	case first := <-ticks:
-		if l := first.Snap.Pods[0].Label; l != "instance-1" {
-			t.Errorf("first tick labels the unit %q, want instance-1", l)
-		}
-		if first.Labels == nil || first.Labels.Numbers["#i"].N != 1 {
-			t.Errorf("first tick's Labels = %+v, want #i numbered 1", first.Labels)
-		}
+	case tick = <-ticks:
 	case <-time.After(3 * time.Second):
 		t.Fatal("no tick within 3s")
 	}
+	if tick.Panic == nil || tick.Panic.Value != "source broke" || !strings.Contains(string(tick.Panic.Stack), "Endpoints") {
+		t.Fatalf("Panic = %+v, want the source's panic and its stack", tick.Panic)
+	}
+	if s := tick.Snap; s == nil || s.Err != "internal error" || len(s.Pods) != 0 || s.At.IsZero() {
+		t.Errorf("Snap = %+v, want a dated error snapshot with no units", s)
+	}
 
-	c.LoadLabels(LabelState{
-		Numbers:  map[string]LabelNumber{"#i": {N: 7, Seen: time.Now().Truncate(time.Minute)}},
-		Followed: map[string]string{srv.URL: "#i"},
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if !c.PollNow(ctx) {
-		t.Fatal("PollNow = false, want true")
+	src.panicking.Store(false)
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case tick = <-ticks:
+		case <-deadline:
+			t.Fatal("no clean tick within 3s of the source mending")
+		}
+		if tick.Panic == nil {
+			break
+		}
 	}
-	var last Tick
-	for len(ticks) > 0 {
-		last = <-ticks
-	}
-	if last.Snap == nil {
-		t.Fatal("no tick after PollNow")
-	}
-	if l := last.Snap.Pods[0].Label; l != "instance-7" {
-		t.Errorf("after LoadLabels the unit is labelled %q, want instance-7", l)
+	if tick.Snap.Err != "" || len(tick.Snap.Pods) != 1 {
+		t.Errorf("after the panic: Snap = %+v, want a clean poll", tick.Snap)
 	}
 }
 

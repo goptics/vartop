@@ -414,15 +414,13 @@ const freeAfter = 24 * time.Hour
 // tracker remembers, across a collector's ticks, which instances answered
 // through which endpoint and when, and the numbers units were given. It
 // belongs to the poller goroutine, which lends it to the balancer pass while
-// it waits for the direct endpoints; only its label state is also read and
-// replaced from other goroutines, under mu.
+// it waits for the direct endpoints.
 type tracker struct {
 	window     time.Duration                   // how long a sighting counts: max(1 minute, 3 × interval)
 	kubernetes bool                            // labels are pod names, not instance-N
 	seen       map[string]map[string]time.Time // endpoint → instance → last answer through it
 	direct     map[string]bool                 // instances shown as a direct unit by the latest tick
 
-	mu       sync.Mutex             // guards the label state below
 	numbers  map[string]LabelNumber // what a unit's number follows (see label) → its instance-N; handed from a key to an instance, freed after freeAfter unshown
 	followed map[string]string      // unit key → what its number followed when last labelled
 	changed  bool                   // numbers or followed changed since labels last reported them
@@ -442,8 +440,6 @@ func newTracker(interval time.Duration, kubernetes bool) *tracker {
 // labels returns a copy of the label state and whether it changed since the
 // last call.
 func (t *tracker) labels() (LabelState, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	changed := t.changed
 	t.changed = false
 	return LabelState{Numbers: maps.Clone(t.numbers), Followed: maps.Clone(t.followed)}, changed
@@ -452,8 +448,6 @@ func (t *tracker) labels() (LabelState, bool) {
 // loadLabels replaces the label state with a copy of s, which counts as no
 // change: s is where it came from.
 func (t *tracker) loadLabels(s LabelState) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.numbers = maps.Clone(s.Numbers)
 	if t.numbers == nil {
 		t.numbers = make(map[string]LabelNumber)
@@ -576,8 +570,6 @@ func (t *tracker) label(pods []PodSnapshot, now time.Time) {
 	if t.kubernetes {
 		return
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	units := make(map[string]int, len(pods)) // instance → units of pods it answered for
 	held := make(map[string]bool, len(pods)) // "#"+instance of pods' instances, then what down units follow
 	for _, p := range pods {
@@ -633,14 +625,14 @@ func (t *tracker) label(pods []PodSnapshot, now time.Time) {
 }
 
 // handsOn reports whether the unit key holds a number of its own, which it
-// hands to the first instance it shows that has none. t.mu must be held.
+// hands to the first instance it shows that has none.
 func (t *tracker) handsOn(key string) bool {
 	_, ok := t.numbers[key]
 	return ok && t.followed[key] == key
 }
 
 // see records that a unit showed the number following f at at, a whole
-// minute. t.mu must be held.
+// minute.
 func (t *tracker) see(f string, at time.Time) {
 	if n := t.numbers[f]; at.After(n.Seen) {
 		n.Seen = at
@@ -650,8 +642,7 @@ func (t *tracker) see(f string, at time.Time) {
 }
 
 // free forgets the numbers no unit has shown for over freeAfter (and a
-// minute: see freeAfter) at now, and that unit keys followed them. t.mu must
-// be held.
+// minute: see freeAfter) at now, and that unit keys followed them.
 func (t *tracker) free(now time.Time) {
 	for f, n := range t.numbers {
 		if now.Sub(n.Seen) > freeAfter+time.Minute {
@@ -667,7 +658,7 @@ func (t *tracker) free(now time.Time) {
 	}
 }
 
-// lowestFree is the lowest number no unit holds. t.mu must be held.
+// lowestFree is the lowest number no unit holds.
 func (t *tracker) lowestFree() int {
 	held := make(map[int]bool, len(t.numbers))
 	for _, n := range t.numbers {
