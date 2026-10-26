@@ -211,9 +211,8 @@ func recoverPanics(logf func(format string, args ...any), next http.Handler) htt
 
 func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" }
 
-// The copy of what a page or an action cannot show or reach.
-func waitingMsg(server string) string       { return "Waiting for the first snapshot of " + server + "…" }
-func notConfiguredMsg(server string) string { return "Server " + server + " is not configured" }
+// The copy of what a page or an action cannot show or reach, beyond what
+// fleet words for both UIs (fleet.WaitingMsg and the rest).
 
 // noServersMsg is the notice of a config with no server at all.
 const noServersMsg = "No servers are configured"
@@ -223,9 +222,10 @@ func unknownLabelMsg(label, server string, n fleet.Noun) string {
 	return label + " is not " + n.Article + " " + n.One + " of " + server
 }
 
-// goneLabelMsg is the notice of a label only older snapshots have.
+// goneLabelMsg is the notice of a label only older snapshots have: the
+// page offers the merged view.
 func goneLabelMsg(label string, n fleet.Noun) string {
-	return n.Cap() + " " + label + " is no longer reported — reload"
+	return fleet.GoneLabelMsg(label, n) + " — reload"
 }
 
 func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -311,7 +311,7 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	srv := cfg.Servers[p.Server]
 	if srv == nil {
 		p.Unconfigured = p.Server != ""
-		p.Banner = notConfiguredMsg(p.Server)
+		p.Banner = fleet.NotConfiguredMsg(p.Server)
 		if p.Server == "" {
 			p.Banner = noServersMsg
 		}
@@ -327,14 +327,14 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 
 	feed := h.feeds.get(p.Server, interval, time.Now())
 	if err := feed.Sync(); err != nil {
-		p.Banner = "cannot read the history of " + p.Server + ": " + err.Error()
+		p.Banner = fleet.SyncErrMsg(p.Server, err)
 	}
 	snaps = feed.Snapshots()
 	latest := latestOf(snaps)
 	fill(&p, snaps)
 	switch now := time.Now(); {
 	case latest == nil:
-		p.Waiting = waitingMsg(p.Server)
+		p.Waiting = fleet.WaitingMsg(p.Server)
 		p.DaemonDown = !h.daemonRunning()
 		if msg := h.serverErr(p.Server, nil); msg != "" && !p.DaemonDown {
 			p.Banner = p.Server + ": " + msg
@@ -424,20 +424,15 @@ func (h *handler) serverErr(key string, latest *fleet.Snapshot) string {
 }
 
 // staleMsg says how old latest, the stale newest snapshot of the server
-// keyed key, is at now, and why there is none newer: the daemon is not
-// running (down), or the server's collection error. With neither known it
-// says only how old.
+// keyed key, is at now, and why there is none newer (see fleet.StaleMsg):
+// the daemon is not running (down), or the server's collection error.
 func (h *handler) staleMsg(key string, latest *fleet.Snapshot, now time.Time) (msg string, down bool) {
-	msg = "No new data for " + now.Sub(latest.At).Round(time.Second).String()
-	switch {
-	case !h.daemonRunning():
-		return msg + " — the vartop daemon is not running.", true
-	default:
-		if err := h.serverErr(key, latest); err != "" {
-			return msg + " — " + key + ": " + err, false
-		}
+	down = !h.daemonRunning()
+	var srvErr string
+	if !down {
+		srvErr = h.serverErr(key, latest)
 	}
-	return msg + ".", false
+	return fleet.StaleMsg(key, latest, now, down, srvErr), down
 }
 
 // fill sets p's header, its unit options and whether its scope holds a

@@ -157,15 +157,15 @@ func (a actor) act(worker, label, action string) error {
 	}
 	switch now := time.Now(); {
 	case latest == nil:
-		return errors.New(waitingMsg(a.key))
+		return errors.New(fleet.WaitingMsg(a.key))
 	case fleet.Stale(latest, a.interval, now):
 		down, srvErr := controlState(a.ctl, a.key)
-		return errors.New(staleMsg(a.key, latest, now, down, srvErr))
+		return errors.New(fleet.StaleMsg(a.key, latest, now, down, srvErr))
 	}
 	units := fleet.PodsOf(latest, label)
 	switch {
 	case len(units) == 0:
-		return errors.New(goneLabelMsg(label, a.noun))
+		return errors.New(fleet.GoneLabelMsg(label, a.noun))
 	case units[0].Balanced:
 		return errors.New(fleet.OneBalancedMsg)
 	}
@@ -195,37 +195,4 @@ func (a actor) settle() {
 			}
 		}
 	}
-}
-
-// The copy of what the TUI cannot show or reach; web says the same.
-
-func waitingMsg(server string) string       { return "Waiting for the first snapshot of " + server + "…" }
-func notConfiguredMsg(server string) string { return "Server " + server + " is not configured" }
-
-// goneLabelMsg is the notice of a unit label the newest snapshot lacks.
-func goneLabelMsg(label string, n fleet.Noun) string {
-	return n.Cap() + " " + label + " is no longer reported"
-}
-
-// staleMsg says how old latest, the stale newest snapshot of the server
-// keyed key, is at now, and why there is none newer: no daemon is running
-// (down), or the server's collection error (srvErr, else latest's). With
-// neither known it says only how old.
-func staleMsg(key string, latest *fleet.Snapshot, now time.Time, down bool, srvErr string) string {
-	msg := "No new data for " + now.Sub(latest.At).Round(time.Second).String()
-	if srvErr == "" {
-		srvErr = latest.Err
-	}
-	switch {
-	case down:
-		return msg + " — the vartop daemon is not running."
-	case srvErr != "":
-		return msg + " — " + key + ": " + srvErr
-	}
-	return msg + "."
-}
-
-// syncErrMsg is the notice of a feed that could not be read.
-func syncErrMsg(key string, err error) string {
-	return "cannot read the history of " + key + ": " + err.Error()
 }

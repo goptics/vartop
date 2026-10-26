@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -153,5 +154,31 @@ func TestScopeOfByLabel(t *testing.T) {
 	sc, err = ScopeOf(clients, latest, "", instanceNoun)
 	if err != nil || len(sc.Direct) != 1 || len(sc.Balanced) != 1 || len(sc.balancers) != 1 {
 		t.Errorf("ScopeOf(merged) = %+v, %v; want a direct, b balanced through lb", sc, err)
+	}
+}
+
+// TestReaderCopy: the notices both UIs show, in the words the global
+// constraints fix; a stale notice without a recorded error falls back to
+// the snapshot's own.
+func TestReaderCopy(t *testing.T) {
+	inst := Noun{One: "instance", Many: "instances", Article: "an", Param: "instance"}
+	at := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	now := at.Add(61*time.Second + 400*time.Millisecond)
+	latest := &Snapshot{At: at}
+	failed := &Snapshot{At: at, Err: "discovery failed: boom"}
+	for _, c := range []struct{ got, want string }{
+		{WaitingMsg("multi"), "Waiting for the first snapshot of multi…"},
+		{NotConfiguredMsg("multi"), "Server multi is not configured"},
+		{SyncErrMsg("multi", errors.New("disk I/O error")), "cannot read the history of multi: disk I/O error"},
+		{GoneLabelMsg("instance-2", inst), "Instance instance-2 is no longer reported"},
+		{StaleMsg("multi", latest, now, true, "connecting…"), "No new data for 1m1s — the vartop daemon is not running."},
+		{StaleMsg("multi", latest, now, false, "connecting…"), "No new data for 1m1s — multi: connecting…"},
+		{StaleMsg("multi", failed, now, false, ""), "No new data for 1m1s — multi: discovery failed: boom"},
+		{StaleMsg("multi", failed, now, false, "connecting…"), "No new data for 1m1s — multi: connecting…"},
+		{StaleMsg("multi", latest, now, false, ""), "No new data for 1m1s."},
+	} {
+		if c.got != c.want {
+			t.Errorf("got %q, want %q", c.got, c.want)
+		}
 	}
 }

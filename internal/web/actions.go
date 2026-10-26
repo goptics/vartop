@@ -63,14 +63,14 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	}
 	t := &target{key: serverOf(cfg, r.PostFormValue("server"))}
 	if t.srv = cfg.Servers[t.key]; t.srv == nil {
-		conflict(w, notConfiguredMsg(t.key))
+		conflict(w, fleet.NotConfiguredMsg(t.key))
 		return nil, false
 	}
 	t.noun = fleet.NounFor(t.srv)
 	interval := t.srv.PollInterval()
 	t.feed = h.feeds.get(t.key, interval, time.Now())
 	if err := t.feed.Sync(); err != nil {
-		conflict(w, "cannot read the history of "+t.key+": "+err.Error())
+		conflict(w, fleet.SyncErrMsg(t.key, err))
 		return nil, false
 	}
 	if latest := t.feed.Latest(); latest == nil || fleet.Stale(latest, interval, time.Now()) {
@@ -80,7 +80,7 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	latest := latestOf(snaps)
 	switch now := time.Now(); {
 	case latest == nil:
-		conflict(w, waitingMsg(t.key))
+		conflict(w, fleet.WaitingMsg(t.key))
 		return nil, false
 	case fleet.Stale(latest, interval, now):
 		msg, _ := h.staleMsg(t.key, latest, now)

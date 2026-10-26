@@ -195,9 +195,9 @@ func (d *detailScreen) View(m *Model) string {
 func (d *detailScreen) notice(m *Model, latest *fleet.Snapshot, missing string) (text string, bad bool) {
 	switch {
 	case m.server() == nil:
-		return notConfiguredMsg(m.key), true
+		return fleet.NotConfiguredMsg(m.key), true
 	case latest == nil:
-		return waitingMsg(m.key), false
+		return fleet.WaitingMsg(m.key), false
 	case missing != "":
 		text = d.label + ": " + missing
 		if errs := m.errorLines(); len(errs) > 0 {
@@ -282,7 +282,7 @@ func (d *detailScreen) renderHeader(m *Model, latest *fleet.Snapshot, u fleet.Po
 
 	rows := []string{row1, row2}
 	if stale {
-		rows = append(rows, lipgloss.NewStyle().Foreground(ColorWarning).Render(staleMsg(m.key, latest, time.Now(), m.down, m.srvErr)))
+		rows = append(rows, lipgloss.NewStyle().Foreground(ColorWarning).Render(fleet.StaleMsg(m.key, latest, time.Now(), m.down, m.srvErr)))
 	}
 	headerContent := lipgloss.JoinVertical(lipgloss.Left, rows...)
 

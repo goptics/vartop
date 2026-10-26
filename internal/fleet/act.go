@@ -32,6 +32,43 @@ const (
 	OneBalancedMsg    = "A load balancer picks which instance answers, so actions here would reach a random one. Use All instances (merged), or list the instances' own addresses in the server config."
 )
 
+// The notices of what a reader of the store — vartop web or the TUI —
+// cannot show or reach, in the same words in both.
+
+// WaitingMsg is the notice of a server with no snapshot stored yet.
+func WaitingMsg(server string) string { return "Waiting for the first snapshot of " + server + "…" }
+
+// NotConfiguredMsg is the notice of a server the config does not list.
+func NotConfiguredMsg(server string) string { return "Server " + server + " is not configured" }
+
+// SyncErrMsg is the notice of a server whose stored history cannot be read.
+func SyncErrMsg(server string, err error) string {
+	return "cannot read the history of " + server + ": " + err.Error()
+}
+
+// GoneLabelMsg is the notice of a unit label the newest snapshot lacks.
+func GoneLabelMsg(label string, n Noun) string {
+	return n.Cap() + " " + label + " is no longer reported"
+}
+
+// StaleMsg says how old latest, the stale newest snapshot of the server
+// keyed key, is at now, and why there is none newer: no daemon is running
+// (down), or the server's collection error — srvErr, the one the daemon
+// recorded, else latest's own. With neither known it says only how old.
+func StaleMsg(key string, latest *Snapshot, now time.Time, down bool, srvErr string) string {
+	msg := "No new data for " + now.Sub(latest.At).Round(time.Second).String()
+	if srvErr == "" {
+		srvErr = latest.Err
+	}
+	switch {
+	case down:
+		return msg + " — the vartop daemon is not running."
+	case srvErr != "":
+		return msg + " — " + key + ": " + srvErr
+	}
+	return msg + "."
+}
+
 // ActionResult is one pod's outcome of an action. Key is the unit's key and
 // Tip the hover text of its label (Pod). Outcome is "ok", "no change" or
 // "failed"; Msg, when set, is shown in parentheses after it. Worker names the

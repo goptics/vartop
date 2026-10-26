@@ -320,7 +320,7 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 	)}
 	wrap := lipgloss.NewStyle().Width(max(1, m.width-4))
 	if stale {
-		lines = append(lines, wrap.Foreground(ColorWarning).Render(staleMsg(m.key, latest, now, m.down, m.srvErr)))
+		lines = append(lines, wrap.Foreground(ColorWarning).Render(fleet.StaleMsg(m.key, latest, now, m.down, m.srvErr)))
 	}
 	if down := unitErrors(latest, m.selectedLabel); down != "" {
 		lines = append(lines, wrap.Foreground(ColorError).Render(down))
@@ -393,9 +393,9 @@ func (m *Model) notice() (text string, bad bool) {
 	latest := m.latest()
 	switch {
 	case m.server() == nil:
-		return notConfiguredMsg(m.key), true
+		return fleet.NotConfiguredMsg(m.key), true
 	case latest == nil:
-		text = waitingMsg(m.key)
+		text = fleet.WaitingMsg(m.key)
 		switch {
 		case m.down:
 			text += "\n" + daemonDownHint
@@ -404,7 +404,7 @@ func (m *Model) notice() (text string, bad bool) {
 		}
 		return text, false
 	case m.selectedLabel != "" && len(fleet.PodsOf(latest, m.selectedLabel)) == 0:
-		return goneLabelMsg(m.selectedLabel, m.noun()), true
+		return fleet.GoneLabelMsg(m.selectedLabel, m.noun()), true
 	}
 	return "", false
 }
@@ -419,7 +419,7 @@ func (m *Model) errorLines() []string {
 	}
 	var lines []string
 	if m.syncErr != nil {
-		lines = append(lines, syncErrMsg(m.key, m.syncErr))
+		lines = append(lines, fleet.SyncErrMsg(m.key, m.syncErr))
 	}
 	if latest := m.latest(); latest != nil && latest.Err != "" && !m.stale(time.Now()) {
 		lines = append(lines, m.key+": "+latest.Err)
