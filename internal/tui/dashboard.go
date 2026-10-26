@@ -162,9 +162,14 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 		m.pushScreen(m.switcher)
 		return m.switcherCmd()
 	case key.Matches(msg, d.keys.Detail):
-		// Navigate to the selected row's worker on its unit
+		// Navigate to the selected row's worker on its unit, its (blank) charts
+		// drawn for the width; the command syncs, and builds the series of the
+		// charts, so that they do not wait for the next tick.
 		if name := d.selectedWorkerName(); name != "" {
-			m.pushScreen(newDetailScreen(name, d.selectedLabel()))
+			detail := newDetailScreen(name, d.selectedLabel())
+			m.pushScreen(detail)
+			detail.redraw(m)
+			return m.syncCmd(m.feed, m.gen)
 		}
 		return nil
 	}

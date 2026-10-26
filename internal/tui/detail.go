@@ -12,17 +12,24 @@ import (
 
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/store"
 )
 
 // detailScreen is the worker detail overlay: one worker on one unit, named
 // by its label. It shows the worker's sample in the newest snapshot of the
-// server shown, and owns the scroll/action state.
+// server shown, and charts of its last hour (see detailSeries), and owns the
+// scroll/action state.
 type detailScreen struct {
 	workerName string
 	label      string // the unit's
 
 	inAction bool // action mode
 	vp       viewport.Model
+
+	// series are those of the charts, built by the sync command (see detailFor)
+	// and taken in by install; drawn is what they were last drawn as.
+	series detailSeries
+	drawn  drawnCharts
 
 	keys detailKeyMap
 }
@@ -151,6 +158,7 @@ func (d *detailScreen) View(m *Model) string {
 	// Content sections
 	configSection := d.renderModernConfigSection(w, stale)
 	metricsSection := d.renderModernMetricsSection(w, stale)
+	charts := d.renderCharts(m, stale)
 
 	// Responsive layout
 	minWidthForHorizontal := 100
@@ -165,6 +173,9 @@ func (d *detailScreen) View(m *Model) string {
 	} else {
 		// Vertical layout
 		bodyContent = lipgloss.JoinVertical(lipgloss.Left, configSection, "", metricsSection)
+	}
+	if charts != "" { // under the metrics, as wide as the screen has room for
+		bodyContent = lipgloss.JoinVertical(lipgloss.Left, bodyContent, charts)
 	}
 
 	bodyContent = lipgloss.NewStyle().Padding(0, 1).Render(bodyContent)
@@ -426,4 +437,172 @@ func (d *detailScreen) renderModernMetricsSection(w api.WorkerDetails, stale boo
 		BorderForeground(ColorHighlight).
 		Padding(1, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left, title, content))
+}
+
+// detailRows is the height of each of the detail screen's charts, its axis
+// aside; chartMargin how much narrower than the screen they are: the body's
+// padding, and as much again. Under blockMin columns there are none.
+const (
+	detailRows  = 5
+	chartMargin = 4
+)
+
+// detailKey says what a detail screen's series were built from: the feed, its
+// newest snapshot, and the unit and worker the screen shows.
+type detailKey struct {
+	feed          *store.Feed
+	latest        *fleet.Snapshot
+	label, worker string
+}
+
+// detailSeries is what the detail screen's charts draw, of the hour of
+// snapshots a feed holds: the completed/s and failed/s of its worker on its
+// unit, one point to a snapshot, so the times are those of the snapshots.
+// The zero value has none.
+type detailSeries struct {
+	key               detailKey
+	at                []time.Time // when the snapshots of the series were taken, oldest first
+	completed, failed []fleet.Point
+}
+
+// newDetailSeries builds the series of snaps, the snapshots of a server
+// (oldest first), for the worker on the unit labelled label. fleet builds
+// them, as it does the web charts', without their tooltips: nothing here
+// draws one.
+func newDetailSeries(snaps []*fleet.Snapshot, label, worker string) detailSeries {
+	s := detailSeries{
+		at:        make([]time.Time, len(snaps)),
+		completed: fleet.CompletedRates1h(snaps, label, worker),
+		failed:    fleet.FailedRates1h(snaps, label, worker),
+	}
+	for i, snap := range snaps {
+		s.at[i] = snap.At
+	}
+	return s
+}
+
+// install takes in series built by a sync command, if they are of what the
+// screen shows now: its feed, its newest snapshot, its unit and worker. Those
+// of another unit, another feed or an older snapshot — a sync that was under
+// way when the view changed, or another sync's — are left out, and the ones
+// the screen has stay.
+func (d *detailScreen) install(m *Model, s detailSeries) {
+	if s.key.feed != nil && s.key == (detailKey{m.feed, m.latest(), d.label, d.workerName}) {
+		d.series = s
+		d.redraw(m)
+	}
+}
+
+// drawnKey says what a drawing of the charts is of: the series, the width
+// of the chart, the poll interval (it cuts the hour into columns) and the
+// levels it is drawn in.
+type drawnKey struct {
+	series   detailKey
+	width    int
+	interval time.Duration
+	levels   string
+}
+
+// plot is a chart drawn, plain: its lines (see chart.block), and which
+// columns of its plot are partial.
+type plot struct {
+	lines   []string
+	partial []bool
+}
+
+// drawnCharts is the Completed and the Failed chart, drawn for key.
+type drawnCharts struct {
+	key   drawnKey
+	plots [2]plot
+}
+
+// charts is the drawing of the charts of the series the screen holds, for
+// width columns: the one it has when it is of that, else drawn again. A drawing
+// is cheap — the series are built; this only cuts them into columns — and
+// Update makes it (see install, handleWindowSize, and enter, which opens the
+// screen) whenever the series or the width change, so View, which prints it,
+// finds it made; View draws only where nothing has, as in a test that pushes a
+// screen.
+func (d *detailScreen) charts(m *Model, width int) [2]plot {
+	held := d.series
+	if held.key.feed != m.feed || held.key.label != d.label || held.key.worker != d.workerName {
+		held = detailSeries{} // another view's: not drawn
+	}
+	c := newChart(m.interval())
+	key := drawnKey{held.key, width, m.interval(), string(c.levels)}
+	if d.drawn.key == key {
+		return d.drawn.plots
+	}
+	d.drawn.key = key
+	for i, pts := range [][]fleet.Point{held.completed, held.failed} {
+		lines, partial := c.history(series{held.at, pts}, width, detailRows)
+		d.drawn.plots[i] = plot{lines, partial}
+	}
+	return d.drawn.plots
+}
+
+// redraw makes the drawing of the charts, if there are any at this width.
+func (d *detailScreen) redraw(m *Model) {
+	if width := m.width - chartMargin; width >= blockMin {
+		d.charts(m, width)
+	}
+}
+
+// renderCharts renders the Completed /s (1h) and Failed /s (1h) charts, under
+// the metrics: each its title and 5 rows over the axis, m.width − 4 columns
+// wide, the hour up to the newest snapshot; blank until the series of the
+// charts arrive, the history stays drawn (dimmed) while the snapshot is
+// stale. "" where the screen is under 20 columns wide for them.
+func (d *detailScreen) renderCharts(m *Model, stale bool) string {
+	width := m.width - chartMargin
+	if width < blockMin {
+		return ""
+	}
+	plots := d.charts(m, width)
+
+	title := lipgloss.NewStyle().Foreground(ColorHighlight).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(ColorSubtle)
+	var parts []string
+	for i, c := range []struct {
+		title string
+		color lipgloss.Color
+	}{{"Completed /s (1h)", ColorSuccess}, {"Failed /s (1h)", ColorError}} {
+		solid := lipgloss.NewStyle().Foreground(c.color)
+		if stale {
+			solid = dim // the history is shown, but dimmed
+		}
+		parts = append(parts, "", title.Render(c.title), plots[i].paint(solid, dim))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// paint colours a chart: its gutter and axis dim, its plot solid, but dim
+// where its columns are partial. Runs of columns are painted at once.
+func (p plot) paint(solid, dim lipgloss.Style) string {
+	axis := len(p.lines) - 1
+	out := make([]string, len(p.lines))
+	for r, line := range p.lines {
+		if r == axis {
+			out[r] = dim.Render(line)
+			continue
+		}
+		runes := []rune(line)
+		var b strings.Builder
+		b.WriteString(dim.Render(string(runes[:gutterW])))
+		cells := runes[gutterW:]
+		for from := 0; from < len(cells); {
+			to := from
+			for to < len(cells) && p.partial[to] == p.partial[from] {
+				to++
+			}
+			style := solid
+			if p.partial[from] {
+				style = dim
+			}
+			b.WriteString(style.Render(string(cells[from:to])))
+			from = to
+		}
+		out[r] = b.String()
+	}
+	return strings.Join(out, "\n")
 }

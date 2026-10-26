@@ -47,17 +47,20 @@ func hasData(p fleet.Point) bool {
 // bucketed folds pts into width points: the mean of the data points that
 // column puts in each — column gives the index of a point's column, and
 // false when it has none — and a gap where it puts none. Partial points are
-// data. It returns nothing for a width under 1.
+// data, and make the point of their column partial. It returns nothing for a
+// width under 1.
 func bucketed(pts []fleet.Point, width int, column func(i int) (int, bool)) []fleet.Point {
 	if width < 1 {
 		return nil
 	}
 	sum := make([]float64, width)
 	n := make([]int, width)
+	partial := make([]bool, width)
 	for i, p := range pts {
 		if c, ok := column(i); ok && hasData(p) {
 			sum[c] += p.V
 			n[c]++
+			partial[c] = partial[c] || p.Partial
 		}
 	}
 	out := make([]fleet.Point, width)
@@ -66,7 +69,7 @@ func bucketed(pts []fleet.Point, width int, column func(i int) (int, bool)) []fl
 		if mean := sum[c] / float64(max(n[c], 1)); n[c] == 0 || math.IsInf(mean, 0) {
 			out[c].Gap = true
 		} else {
-			out[c].V = mean
+			out[c].V, out[c].Partial = mean, partial[c]
 		}
 	}
 	return out
@@ -152,9 +155,9 @@ type series struct {
 	pts []fleet.Point
 }
 
-// chart draws sparklines of series polled every interval. Its levels are
-// picked when it is made, so that the many sparklines of one build ask the
-// terminal's width rules once.
+// chart draws sparklines, and block charts of the history, of series polled
+// every interval. Its levels are picked when it is made, so that the many
+// sparklines of one build ask the terminal's width rules once.
 type chart struct {
 	levels   []rune
 	interval time.Duration
@@ -165,20 +168,26 @@ func newChart(interval time.Duration) chart {
 }
 
 // spark draws s over the trend window, up to its newest time, in a cell
-// width columns wide. The window is cut into as many slices as fit, but
-// each at least two polls long, so that polls a little late still leave one
-// in every slice and no hole reads as no data — only polls missed leave one.
-// Where the polls are minutes apart that is fewer slices than columns, and
-// the drawing is right-aligned in the cell.
+// width columns wide: the window is cut into slices (see columns), a column
+// each, and the drawing is right-aligned in the cell.
 func (c chart) spark(s series, width int) string {
 	if width < 1 {
 		return ""
 	}
-	cols := width
-	if c.interval > 0 {
-		cols = min(width, max(1, int(fleet.TrendWindow/(2*c.interval))))
-	}
+	cols := c.columns(fleet.TrendWindow, width)
 	return strings.Repeat(" ", width-cols) + draw(byTime(s.at, s.pts, fleet.TrendWindow, cols), c.levels)
+}
+
+// columns is how many columns of a plot width wide a window of history is
+// cut into: as many as fit, but each at least two polls long, so that polls
+// a little late still leave one in every column and no hole reads as no data
+// — only polls missed do. Where the polls are minutes apart that is fewer
+// columns than the plot has, and the drawing is right-aligned in it.
+func (c chart) columns(window time.Duration, width int) int {
+	if c.interval <= 0 {
+		return width
+	}
+	return min(width, max(1, int(window/(2*c.interval))))
 }
 
 // kpiValueW is the width of the field each KPI's value is in, right-aligned:
@@ -240,4 +249,180 @@ func (c chart) kpiLine(width int, k fleet.KPIView, at []time.Time, stale bool) s
 		}
 	}
 	return lipgloss.NewStyle().MaxWidth(width).Render("  " + strings.Join(parts, "  "))
+}
+
+const (
+	// gutterW is the width of the gutter a block chart's rows start with: the
+	// peak is printed in it, right-aligned, on the top row, and its last
+	// column is left blank, between the label and the plot.
+	gutterW = 8
+	// axisMin is the width of the axis' text, -60m … now.
+	axisMin = 10
+	// blockMin is the width under which there is no block chart: the gutter and
+	// a plot of 12 columns, room for the axis' text.
+	blockMin = 20
+	// historyWindow is how far back a block chart of the history reaches, up to
+	// the newest snapshot.
+	historyWindow = time.Hour
+)
+
+// rateLabel is a rate in at most 7 columns, for the gutter of a block chart:
+// 12.3/s, with the digits that tell it from its neighbours — under 100 one
+// decimal, under 1000 none — then 1.2k/s and 1.2M/s; a rate of nothing is
+// 0/s, one under a hundredth <0.01/s, one past 999M/s >999M/s.
+func rateLabel(v float64) string {
+	switch {
+	case !(v > 0): // zero, negative, or no number
+		return "0/s"
+	case v < 0.01:
+		return "<0.01/s"
+	case v < 0.1:
+		return fmt.Sprintf("%.2f/s", v)
+	}
+	for _, unit := range []string{"", "k", "M"} {
+		switch {
+		case v < 99.95: // 99.95 would round to 100.0: too wide with a unit
+			return fmt.Sprintf("%.1f%s/s", v, unit)
+		case v < 999.5:
+			return fmt.Sprintf("%.0f%s/s", v, unit)
+		}
+		v /= 1000
+	}
+	return ">999M/s"
+}
+
+// axisLine is the axis of a chart whose columns are span wide: -60m under the
+// oldest, now under the newest, and … between them, in the middle.
+func axisLine(span int, ascii bool) string {
+	mid := "…"
+	if ascii {
+		mid = "." // an ellipsis is as wide as a block rune: 2, where those are
+	}
+	inner := span - axisMin + 3 // the blanks around the …, at least 3
+	left := (inner - 1) / 2
+	return "-60m" + strings.Repeat(" ", left) + mid + strings.Repeat(" ", inner-1-left) + "now"
+}
+
+// ascii reports whether c draws in asciiLevels.
+func (c chart) ascii() bool { return len(c.levels) == len(asciiLevels) }
+
+// plotColumns is pts as the columns of a plot of width plot: folded into them
+// by their mean when there are more points than columns (see bucketed), else
+// a column each, the points evenly spaced and the last one the newest. A
+// value that is not a number is a gap.
+func plotColumns(pts []fleet.Point, plot int) []fleet.Point {
+	if len(pts) > plot {
+		return bucketed(pts, plot, func(i int) (int, bool) { return i * plot / len(pts), true })
+	}
+	cols := make([]fleet.Point, len(pts))
+	for i, p := range pts {
+		if hasData(p) {
+			cols[i] = fleet.Point{V: p.V, Partial: p.Partial}
+		} else {
+			cols[i].Gap = true
+		}
+	}
+	return cols
+}
+
+// block draws pts as a chart width columns wide and rows tall, with the
+// axis under it: rows lines of the plot and then the axis line, each width
+// columns wide; and which columns of the plot — not of the line — are partial
+// (see fleet.Point), for the caller to dim. It returns nothing under blockMin
+// columns or for no rows.
+//
+// A line starts with the gutter (gutterW columns), the peak in it on the top
+// row, blank on the others; the plot is the rest. The points, taken to be
+// evenly spaced, are folded into the plot's columns (see plotColumns); fewer
+// than it has take a column each, at its right, the axis under them. Each
+// column is drawn from the bottom in cells of the levels of c, rows of them
+// high in all, scaled so that the highest column — the peak, of the columns
+// drawn — fills the top row. A column of data is never blank, whatever its
+// value: zero is the lowest level on the bottom row, a baseline. A gap is
+// blank in every row.
+func (c chart) block(pts []fleet.Point, width, rows int) (lines []string, partial []bool) {
+	if width < blockMin || rows < 1 {
+		return nil, nil
+	}
+	plot := width - gutterW
+	cols := plotColumns(pts, plot)
+	per := len(c.levels)
+
+	var peak float64
+	data := false
+	for _, p := range cols {
+		if !p.Gap {
+			peak, data = max(peak, p.V), true
+		}
+	}
+	// height is a column's in levels; 0 is blank.
+	height := make([]int, len(cols))
+	for i, p := range cols {
+		switch {
+		case p.Gap:
+		case peak > 0 && p.V > 0:
+			height[i] = min(max(int(math.Round(p.V/peak*float64(rows*per))), 1), rows*per)
+		default:
+			height[i] = 1
+		}
+	}
+
+	off := plot - len(cols)
+	lines = make([]string, 0, rows+1)
+	for r := range rows {
+		var b strings.Builder
+		if r == 0 && data {
+			fmt.Fprintf(&b, "%*s ", gutterW-1, rateLabel(peak))
+		} else {
+			b.WriteString(strings.Repeat(" ", gutterW))
+		}
+		b.WriteString(strings.Repeat(" ", off))
+		below := (rows - 1 - r) * per // the levels of the cells under this row
+		for _, h := range height {
+			switch fill := h - below; {
+			case fill <= 0:
+				b.WriteByte(' ')
+			case fill >= per:
+				b.WriteRune(c.levels[per-1])
+			default:
+				b.WriteRune(c.levels[fill-1])
+			}
+		}
+		lines = append(lines, b.String())
+	}
+	span := min(plot, max(len(cols), axisMin))
+	lines = append(lines, strings.Repeat(" ", gutterW+plot-span)+axisLine(span, c.ascii()))
+
+	partial = make([]bool, plot)
+	for i, p := range cols {
+		partial[off+i] = p.Partial && !p.Gap
+	}
+	return lines, partial
+}
+
+// blockPlot is block of a chart of the levels the terminal draws now: what
+// blockChart is, and which columns of its plot are partial.
+func blockPlot(pts []fleet.Point, width, rows int) (lines []string, partial []bool) {
+	return newChart(0).block(pts, width, rows)
+}
+
+// blockChart draws pts as rows lines of width columns, and the axis under
+// them (see chart.block): a block chart of 8 levels to a cell — fewer where
+// block runes are wide. The caller dims the partial points' columns (see
+// blockPlot).
+func blockChart(pts []fleet.Point, width, rows int) []string {
+	lines, _ := blockPlot(pts, width, rows)
+	return lines
+}
+
+// history draws s, the series of the history of a worker a feed holds, over
+// the last hour up to its newest time, as a block chart width columns wide
+// and rows tall (see block): the hour is cut into slices (see columns) — a
+// stretch with no snapshots, say while no daemon ran, comes out blank, not
+// squeezed away by the polls around it.
+func (c chart) history(s series, width, rows int) ([]string, []bool) {
+	if width < blockMin {
+		return nil, nil
+	}
+	return c.block(byTime(s.at, s.pts, historyWindow, c.columns(historyWindow, width-gutterW)), width, rows)
 }

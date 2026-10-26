@@ -479,6 +479,19 @@ func CompletedRates(snaps []*Snapshot, pod, name string) []Point {
 	return workerRates(newest(snaps, TrendWindow), pod, name, completedRate, nil)
 }
 
+// CompletedRates1h and FailedRates1h are the completed/s and failed/s of one
+// worker over the whole of snaps (the hour a feed holds), merged or of the
+// pod labelled pod: the points of Completed1h and Failed1h of BuildDetail,
+// without their tooltips — for a UI that draws none (see CompletedRates).
+func CompletedRates1h(snaps []*Snapshot, pod, name string) []Point {
+	return workerRates(snaps, pod, name, completedRate, nil)
+}
+
+// FailedRates1h is CompletedRates1h for the failed/s.
+func FailedRates1h(snaps []*Snapshot, pod, name string) []Point {
+	return workerRates(snaps, pod, name, failedRate, nil)
+}
+
 // workerRates is WorkerRates; with n nil the points have no Title.
 func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n *Noun) []Point {
 	out := make([]Point, len(snaps))

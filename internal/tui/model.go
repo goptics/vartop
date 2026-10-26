@@ -49,6 +49,9 @@ type Model struct {
 	// buildTrends builds the series of the sparklines (see trendsFor); newTrends,
 	// but counted in tests.
 	buildTrends func([]*fleet.Snapshot, string, time.Duration, fleet.Noun) trendSet
+	// buildDetail builds the series of the detail screen's charts (see
+	// detailFor); newDetailSeries, but counted in tests.
+	buildDetail func([]*fleet.Snapshot, string, string) detailSeries
 
 	width  int
 	height int
@@ -88,6 +91,7 @@ func NewModel(cfg *config.Config, serverKey string, dataDir string, ctl *store.C
 		settleWait:     fleet.SettleWait,
 		closeFeed:      (*store.Feed).Close,
 		buildTrends:    newTrends,
+		buildDetail:    newDetailSeries,
 		showNodeColumn: true,
 		width:          80, // Default width, will be updated by WindowSizeMsg
 		height:         24, // Default height, will be updated by WindowSizeMsg

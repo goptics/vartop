@@ -21,7 +21,9 @@ type tickMsg time.Time
 // (see Model.gen). It also says what control.db said at the sync: whether
 // no daemon holds a fresh lease (down), and the server's collection error;
 // and carries the series of the sparklines the command built from the
-// snapshots it synced, unless the model had them already (see trendsFor).
+// snapshots it synced, unless the model had them already (see trendsFor), and
+// those of the charts of the detail screen it was made for, if there was one
+// (see detailFor).
 type syncedMsg struct {
 	server string
 	gen    int
@@ -29,6 +31,7 @@ type syncedMsg struct {
 	down   bool
 	srvErr string
 	trends trendSet
+	detail detailSeries
 }
 
 // configMsg carries the config read again.

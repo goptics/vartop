@@ -1026,3 +1026,64 @@ func TestCompletedRatesMatchRowSpark(t *testing.T) {
 		t.Errorf("CompletedRates of no snapshots = %v, want none", got)
 	}
 }
+
+// TestRates1hMatchDetail: CompletedRates1h and FailedRates1h are the series
+// BuildDetail charts — the same points over the whole of the snapshots,
+// merged or of one unit, per second — without their tooltips, which a UI
+// that draws none does not pay to format.
+func TestRates1hMatchDetail(t *testing.T) {
+	var snaps []*Snapshot
+	for n := range 400 { // 33 minutes of 5s polls: longer than the 10-minute window
+		var pods []PodSnapshot
+		switch {
+		case n%7 == 3: // p1 down
+			pods = []PodSnapshot{
+				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 2)}),
+				{Key: "p1", Via: "p1", Label: "p1", Err: "connection refused"},
+				notReached("p2", map[string]*Sample{}, "orders"),
+			}
+		case n%11 == 5: // nothing rated yet
+			pods = []PodSnapshot{
+				okPod("p0", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 0)}),
+				okPod("p1", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 0)}),
+			}
+		default:
+			pods = []PodSnapshot{
+				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 1)}),
+				okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 0.5, float64(n%5))}),
+			}
+		}
+		snaps = append(snaps, snap(atTick(n), pods...))
+	}
+
+	same := func(what string, got, want []Point) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s: %d points, want %d", what, len(got), len(want))
+		}
+		for i := range got {
+			if got[i].V != want[i].V || got[i].Gap != want[i].Gap || got[i].Partial != want[i].Partial {
+				t.Fatalf("%s: point %d = %+v, want %+v without the Title", what, i, got[i], want[i])
+			}
+			if got[i].Title != "" {
+				t.Fatalf("%s: point %d has a Title %q", what, i, got[i].Title)
+			}
+		}
+	}
+	for _, pod := range []string{"", "p0", "p1"} { // p2 is in no newest snapshot: BuildDetail has no detail of it
+		d, ok := BuildDetail(snaps, pod, "orders", 5*time.Second, podNoun)
+		if !ok {
+			t.Fatalf("pod %q: orders reported absent", pod)
+		}
+		same("completed, pod "+pod, CompletedRates1h(snaps, pod, "orders"), d.Completed1h)
+		same("failed, pod "+pod, FailedRates1h(snaps, pod, "orders"), d.Failed1h)
+	}
+	if got := CompletedRates1h(snaps, "", "orders"); len(got) != 400 {
+		t.Errorf("CompletedRates1h covers %d of 400 polls, want them all: the history, not the 10-minute window", len(got))
+	}
+	for _, got := range [][]Point{CompletedRates1h(nil, "", "orders"), FailedRates1h(nil, "", "orders")} {
+		if len(got) != 0 {
+			t.Errorf("the rates of no snapshots = %v, want none", got)
+		}
+	}
+}

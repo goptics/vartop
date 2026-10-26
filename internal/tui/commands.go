@@ -37,8 +37,9 @@ func tickCmd() tea.Cmd {
 
 // syncCmd syncs feed, the feed of the server shown in generation gen, and
 // reads what control.db says of it; and builds the series of the sparklines
-// of the view shown, unless the model has them (see trendsFor). nil for no
-// feed: nothing to sync.
+// of the view shown, unless the model has them (see trendsFor), and those of
+// the charts of the detail screen, when it is the one shown (see detailFor).
+// nil for no feed: nothing to sync.
 func (m Model) syncCmd(feed *store.Feed, gen int) tea.Cmd {
 	if feed == nil {
 		return nil
@@ -46,10 +47,19 @@ func (m Model) syncCmd(feed *store.Feed, gen int) tea.Cmd {
 	key, ctl := m.key, m.ctl
 	label, interval, noun, build := m.selectedLabel, m.interval(), m.noun(), m.buildTrends
 	have := m.dashboardScreen().trends.key
+	var open unitWorker // what the detail screen shows; none if it is not
+	var haveDetail detailKey
+	buildDetail := m.buildDetail
+	if d, ok := m.activeScreen().(*detailScreen); ok && d.workerName != "" {
+		open, haveDetail = unitWorker{d.label, d.workerName}, d.series.key
+	}
 	return func() tea.Msg {
 		msg := syncedMsg{server: key, gen: gen, err: feed.Sync()}
 		msg.down, msg.srvErr = controlState(ctl, key)
 		msg.trends = trendsFor(feed, label, interval, noun, build, have)
+		if open.worker != "" {
+			msg.detail = detailFor(feed, open.label, open.worker, buildDetail, haveDetail)
+		}
 		return msg
 	}
 }
@@ -73,6 +83,26 @@ func trendsFor(feed *store.Feed, label string, interval time.Duration, noun flee
 	ts := build(snaps, label, interval, noun)
 	ts.key = key
 	return ts
+}
+
+// detailFor builds, with build, the series of the charts of feed's snapshots
+// for the worker on the unit labelled label. They come keyed by what they are
+// built from, and none are built, and none sent, when have, the key of those
+// the screen holds, is that already: a sync of the snapshots it has costs
+// nothing. As with trendsFor, Update only takes them in, it never builds
+// them.
+func detailFor(feed *store.Feed, label, worker string, build func([]*fleet.Snapshot, string, string) detailSeries, have detailKey) detailSeries {
+	snaps := feed.Snapshots() // read once: the key's newest snapshot is the series'
+	key := detailKey{feed: feed, label: label, worker: worker}
+	if len(snaps) > 0 {
+		key.latest = snaps[len(snaps)-1]
+	}
+	if key == have {
+		return detailSeries{}
+	}
+	s := build(snaps, label, worker)
+	s.key = key
+	return s
 }
 
 // controlState is what control.db says of the server keyed key: whether no
