@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/goptics/vartop/internal/config"
 )
 
 // This file turns snapshots into the view models the templates render. All
@@ -17,17 +15,17 @@ import (
 // snapshots and their samples are shared and read concurrently, so nothing here
 // writes to them.
 //
-// Terms used throughout:
+// Terms used throughout (a "pod" is a unit, one varmq instance):
 //   - healthy pod: PodSnapshot.Err == "". Errored pods contribute nothing, not
 //     even workers they may still carry.
-//   - load-balanced pod: LoadBalanced > 1. One endpoint answered by several
-//     instances, so its per-worker rates are meaningless and are excluded.
 //   - reporting pod (for a worker): healthy and has that worker.
-//   - expected pod (for a rate point, "k/N pods"): a non-load-balanced pod that
-//     should contribute a rate. Errored non-LB pods are expected too (their data
-//     is unknown, so they count in N and contribute 0), which makes the point
-//     partial instead of plotting a solid dip. Load-balanced pods are outside
-//     both k and N.
+//   - unreached pod (for a worker): healthy and lists the worker but got no
+//     answer for it (PodSnapshot.Unreached). It is neither reporting nor
+//     absent: it adds no values and is shown as "not reached".
+//   - expected pod (for a rate point, "k/N pods"): a pod that should contribute
+//     a rate. Errored pods are expected too (their data is unknown, so they
+//     count in N and contribute 0), and so are unreached ones, which makes the
+//     point partial instead of plotting a solid dip.
 
 const (
 	// trendWindow is how far back row and KPI sparklines reach.
@@ -69,7 +67,6 @@ type RowView struct {
 	Busy, Idle, PendingMax   int
 	PendingTip               string // one "label: n" line per pod
 	AbsentOn                 int    // healthy pods that lack this worker
-	RateNA                   bool   // every pod reporting this worker is load-balanced
 	Spark                    []Point
 }
 
@@ -79,12 +76,14 @@ type DashboardView struct {
 	Rows []RowView // sorted by Name
 }
 
-// PodColumn is one pod column of the grid, also the pod list of the detail view.
-type PodColumn struct{ Endpoint, Label, Err string }
+// PodColumn is one pod column of the grid, also the pod list of the detail
+// view. Tip is the hover text of Label.
+type PodColumn struct{ Key, Label, Err, Tip string }
 
-// GridCell is one worker on one pod.
+// GridCell is one worker on one pod. Unreached: the pod lists the worker but
+// did not answer for it this poll, which is not the same as lacking it.
 type GridCell struct {
-	Present                    bool
+	Present, Unreached         bool
 	Status, Class              string
 	Busy, Concurrency, Pending int
 }
@@ -150,32 +149,22 @@ func Health(latest *Snapshot) HealthView {
 	return h
 }
 
-// LBWarning explains, when any pod is a load-balanced endpoint, that each
-// refresh shows only one instance. It mirrors the TUI's loadBalancedWarning
-// (internal/tui/dashboard.go) and returns "" when no pod is load-balanced.
-func LBWarning(latest *Snapshot) string {
+// BalancerNote says how many instances answered behind each balancer endpoint
+// in the newest poll, endpoints sorted, and is "" when none did.
+func BalancerNote(latest *Snapshot) string {
 	if latest == nil {
 		return ""
 	}
-	lb := make(map[string]int)
-	for _, p := range latest.Pods {
-		if p.LoadBalanced > 1 {
-			lb[p.Endpoint] = p.LoadBalanced
-		}
-	}
-	if len(lb) == 0 {
-		return ""
-	}
 	var parts []string
-	for _, ep := range slices.Sorted(maps.Keys(lb)) {
-		parts = append(parts, fmt.Sprintf("%s (%d instances seen)", config.ShortOrigin(ep), lb[ep]))
+	for _, ep := range slices.Sorted(maps.Keys(latest.Behind)) {
+		parts = append(parts, fmt.Sprintf("%d instances behind %s", latest.Behind[ep], hostPort(ep)))
 	}
-	return fmt.Sprintf("⚠️  Load-balanced endpoint: %s. Each refresh shows one instance; use kubernetes or dns discovery to see all.", strings.Join(parts, ", "))
+	return strings.Join(parts, " · ")
 }
 
 // BuildDashboard aggregates the newest snapshot into one row per worker and the
 // KPI cards, with sparklines over the newest 10 minutes of snaps (oldest first).
-// pod "" merges every pod; otherwise only that endpoint is considered.
+// pod "" merges every pod; otherwise only the one with that key is considered.
 func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration) DashboardView {
 	v := DashboardView{KPIs: KPIView{StatusCounts: map[string]int{}}}
 	if len(snaps) == 0 {
@@ -198,7 +187,6 @@ func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration) Dashb
 			PendingMax:  m.pendingMax,
 			PendingTip:  strings.Join(m.pendingTips, tipSep),
 			AbsentOn:    m.absent,
-			RateNA:      m.allLB,
 			Spark:       workerRates(window, pod, name, completedRate),
 		})
 	}
@@ -222,20 +210,25 @@ func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration) Dashb
 }
 
 // BuildGrid lays the latest snapshot out as workers × pods. Every pod keeps its
-// column (errored ones with their error); cells of an errored pod are absent.
+// column (errored ones with their error); cells of an errored pod are absent,
+// and a worker a pod lists but did not answer for is an unreached cell.
 func BuildGrid(latest *Snapshot) GridView {
 	if latest == nil {
 		return GridView{}
 	}
 	g := GridView{Pods: make([]PodColumn, len(latest.Pods))}
 	for i, p := range latest.Pods {
-		g.Pods[i] = PodColumn{Endpoint: p.Endpoint, Label: p.Label, Err: p.Err}
+		g.Pods[i] = PodColumn{Key: p.Key, Label: p.Label, Err: p.Err, Tip: p.Tip()}
 	}
 	for _, name := range workerNames(latest.Pods) {
 		cells := make([]GridCell, len(latest.Pods))
 		for i, p := range latest.Pods {
 			sm := p.Workers[name]
-			if p.Err != "" || sm == nil {
+			if p.Err != "" {
+				continue
+			}
+			if sm == nil {
+				cells[i].Unreached = p.unreached(name)
 				continue
 			}
 			cells[i] = GridCell{
@@ -285,7 +278,7 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration) (Detail
 		d.Completed += sm.Metrics.Completed
 		d.Successful += sm.Metrics.Successful
 		d.Failed += sm.Metrics.Failed
-		d.Pods = append(d.Pods, PodColumn{Endpoint: p.Endpoint, Label: p.Label, Err: p.Err})
+		d.Pods = append(d.Pods, PodColumn{Key: p.Key, Label: p.Label, Err: p.Err, Tip: p.Tip()})
 	}
 	d.SuccessRate = "—"
 	if total := d.Successful + d.Failed; total > 0 {
@@ -295,7 +288,7 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration) (Detail
 }
 
 // podsOf returns the pods of s a view covers: all of them, or only the one with
-// endpoint pod. The result aliases s.Pods and must not be modified.
+// key pod. The result aliases s.Pods and must not be modified.
 func podsOf(s *Snapshot, pod string) []PodSnapshot {
 	if s == nil {
 		return nil
@@ -304,14 +297,18 @@ func podsOf(s *Snapshot, pod string) []PodSnapshot {
 		return s.Pods
 	}
 	for i := range s.Pods {
-		if s.Pods[i].Endpoint == pod {
+		if s.Pods[i].Key == pod {
 			return s.Pods[i : i+1]
 		}
 	}
 	return nil
 }
 
-// workerNames is the sorted union of worker names over the healthy pods.
+// unreached reports whether p lists the worker but got no answer for it.
+func (p PodSnapshot) unreached(name string) bool { return slices.Contains(p.Unreached, name) }
+
+// workerNames is the sorted union of worker names over the healthy pods,
+// unreached ones included.
 func workerNames(pods []PodSnapshot) []string {
 	names := make(map[string]struct{})
 	for _, p := range pods {
@@ -319,6 +316,9 @@ func workerNames(pods []PodSnapshot) []string {
 			continue
 		}
 		for name := range p.Workers {
+			names[name] = struct{}{}
+		}
+		for _, name := range p.Unreached {
 			names[name] = struct{}{}
 		}
 	}
@@ -333,22 +333,27 @@ type merged struct {
 	busy, idle    int   // summed over reporting pods
 	pendingMax    int   // max over reporting pods, never summed
 	pendingTips   []string
-	reporting     int  // pods reporting the worker
-	absent        int  // healthy pods lacking it
-	allLB         bool // every reporting pod is load-balanced
+	reporting     int // pods reporting the worker
+	absent        int // healthy pods lacking it, not counting unreached ones
+	unreached     int // healthy pods listing it without an answer
 }
 
 // mergeWorker folds name across the healthy pods. status and class are only
-// meaningful when reporting > 0.
+// meaningful when reporting > 0. An unreached pod adds only its tip.
 func mergeWorker(pods []PodSnapshot, name string) merged {
-	m := merged{allLB: true}
+	var m merged
 	var statuses []string
 	for _, p := range pods {
 		if p.Err != "" {
 			continue
 		}
 		sm := p.Workers[name]
-		if sm == nil {
+		switch {
+		case sm == nil && p.unreached(name):
+			m.unreached++
+			m.statusTips = append(m.statusTips, p.Label+": not reached")
+			continue
+		case sm == nil:
 			m.absent++
 			continue
 		}
@@ -360,12 +365,13 @@ func mergeWorker(pods []PodSnapshot, name string) merged {
 		m.idle += sm.NumIdleWorkers
 		m.pendingMax = max(m.pendingMax, sm.NumPending)
 		m.pendingTips = append(m.pendingTips, p.Label+": "+strconv.Itoa(sm.NumPending))
-		m.allLB = m.allLB && p.LoadBalanced > 1
 	}
-	if m.reporting > 0 {
+	switch {
+	case m.reporting > 0:
 		m.status, m.class = mergeStatus(statuses)
-	} else {
-		m.allLB = false
+	case m.unreached > 0:
+		m.status = "not reached"
+		m.class = StatusClass(m.status)
 	}
 	return m
 }
@@ -384,8 +390,12 @@ func mergeStatus(statuses []string) (status, class string) {
 	return class, class
 }
 
-// concurrencyLabel shows the per-pod concurrency, never a sum.
+// concurrencyLabel shows the per-pod concurrency, never a sum, and "—" when no
+// pod has any.
 func concurrencyLabel(perPod []int) string {
+	if len(perPod) == 0 {
+		return "—"
+	}
 	lo, hi := slices.Min(perPod), slices.Max(perPod)
 	switch {
 	case lo != hi:
@@ -429,24 +439,25 @@ func newest(snaps []*Snapshot, span, interval time.Duration) []*Snapshot {
 }
 
 // workerRates charts one worker's rate (pick) per snapshot: the sum over the
-// non-load-balanced pods with a valid rate. Expected pods (see the file comment)
-// are the healthy ones reporting the worker plus every errored one; a healthy
-// pod lacking the worker is not expected.
+// pods with a valid rate. Expected pods (see the file comment) are the healthy
+// ones reporting the worker or listing it unreached, plus every errored one; a
+// healthy pod lacking the worker is not expected. With no contributing pod the
+// point is a gap.
 func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
 		var contributing, expected int
 		for _, p := range podsOf(s, pod) {
-			if p.LoadBalanced > 1 {
-				continue
-			}
 			if p.Err != "" {
 				expected++
 				continue
 			}
 			sm := p.Workers[name]
 			if sm == nil {
+				if p.unreached(name) {
+					expected++
+				}
 				continue
 			}
 			expected++
@@ -456,29 +467,33 @@ func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 			contributing++
 			sum += pick(sm)
 		}
+		if contributing == 0 {
+			out[i] = noDataPoint(s)
+			continue
+		}
 		out[i] = ratePoint(s, sum, contributing, expected, 1, "/s")
 	}
 	return out
 }
 
 // fleetRates charts a rate summed over every worker per snapshot, scaled by
-// scale (60 for /min). Every non-load-balanced pod is expected, errored or
-// healthy, except a healthy one running no workers, which has no rate to
-// give; one contributes when it has a worker with a valid rate.
+// scale (60 for /min). Every pod is expected, errored or healthy, except a
+// healthy one whose list is empty, which has no rate to give. A pod adds the
+// valid rates of its workers but contributes only when it has one and none of
+// its workers is unreached, so the point is partial then. It is a gap only when
+// nothing contributed and no rate was summed.
 func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale float64, unit string) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
 		var contributing, expected int
+		var summed bool
 		for _, p := range podsOf(s, pod) {
-			if p.LoadBalanced > 1 {
-				continue
-			}
 			if p.Err != "" {
 				expected++
 				continue
 			}
-			if len(p.Workers) == 0 {
+			if len(p.Workers) == 0 && len(p.Unreached) == 0 {
 				continue
 			}
 			expected++
@@ -489,9 +504,14 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 					got = true
 				}
 			}
-			if got {
+			summed = summed || got
+			if got && len(p.Unreached) == 0 {
 				contributing++
 			}
+		}
+		if contributing == 0 && !summed {
+			out[i] = noDataPoint(s)
+			continue
 		}
 		out[i] = ratePoint(s, sum, contributing, expected, scale, unit)
 	}
@@ -505,7 +525,7 @@ func pendingSeries(snaps []*Snapshot, pod string) []Point {
 	for i, s := range snaps {
 		total, healthy := peakPending(podsOf(s, pod))
 		if healthy == 0 {
-			out[i] = Point{Gap: true, Title: pointTime(s) + " · no data"}
+			out[i] = noDataPoint(s)
 			continue
 		}
 		out[i] = Point{V: float64(total), Title: fmt.Sprintf("%s · %d pending (max/pod)", pointTime(s), total)}
@@ -513,18 +533,20 @@ func pendingSeries(snaps []*Snapshot, pod string) []Point {
 	return out
 }
 
-// ratePoint builds one rate point. With no contributing pod it is a gap; with
-// fewer contributing than expected pods it is partial.
+// ratePoint builds one rate point from contributing of the expected pods; it
+// is partial when fewer contributed than were expected.
 func ratePoint(s *Snapshot, sum float64, contributing, expected int, scale float64, unit string) Point {
-	if contributing == 0 {
-		return Point{Gap: true, Title: pointTime(s) + " · no data"}
-	}
 	v := sum * scale
 	return Point{
 		V:       v,
 		Partial: contributing < expected,
 		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d pods", pointTime(s), v, unit, contributing, expected),
 	}
+}
+
+// noDataPoint is the gap of a snapshot that has nothing to chart.
+func noDataPoint(s *Snapshot) Point {
+	return Point{Gap: true, Title: pointTime(s) + " · no data"}
 }
 
 // pointTime is the clock time a point's tooltip starts with.

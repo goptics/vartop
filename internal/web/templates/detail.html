@@ -18,7 +18,7 @@
   <figcaption>Failed /s <span class="peak">peak {{printf "%.1f" (peak .Failed1h)}}/s</span></figcaption>
   {{template "spark" (sparkline .Failed1h 720 120)}}
 </figure>
-<p class="pods">Pods reporting: {{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Endpoint}}">{{$p.Label}}</span>{{end}}</p>
+<p class="pods">Pods reporting: {{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}</p>
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}

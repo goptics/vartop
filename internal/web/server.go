@@ -277,13 +277,13 @@ func fill(p *Page, hist *History) []*Snapshot {
 	latest := latestOf(snaps)
 	p.IntervalSec = int(hist.Interval() / time.Second)
 	p.Health = Health(latest)
-	p.LBWarning = LBWarning(latest)
+	p.Note = BalancerNote(latest)
 
 	p.Pods, p.Updated = nil, ""
 	if latest != nil {
 		p.Updated = pointTime(latest)
 		for _, ps := range latest.Pods {
-			p.Pods = append(p.Pods, PodOption{Endpoint: ps.Endpoint, Label: ps.Label})
+			p.Pods = append(p.Pods, PodOption{Key: ps.Key, Label: ps.Label, Tip: ps.Tip()})
 		}
 	}
 	return snaps

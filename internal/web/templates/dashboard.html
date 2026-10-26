@@ -42,7 +42,7 @@
     <td class="num">{{.Busy}}</td>
     <td class="num">{{.Idle}}</td>
     <td class="num"{{with .PendingTip}} title="{{.}}"{{end}}>{{.PendingMax}}</td>
-    <td class="trend">{{if .RateNA}}<span class="na">n/a: load-balanced</span>{{else}}{{template "spark" (sparkline .Spark 120 24)}}{{end}}</td>
+    <td class="trend">{{template "spark" (sparkline .Spark 120 24)}}</td>
   </tr>{{end}}
   </tbody>
 </table>

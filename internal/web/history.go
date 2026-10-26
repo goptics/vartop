@@ -19,20 +19,37 @@ type Sample struct {
 	RateOK            bool
 }
 
-// PodSnapshot is everything one pod (endpoint) reported in a single poll.
+// PodSnapshot is everything one unit reported in a single poll. A unit is one
+// varmq instance: a direct endpoint, or an instance found behind a balancer.
 type PodSnapshot struct {
-	Endpoint     string             // pod key (Client.PrimaryEndpoint())
-	Label        string             // display label captured at poll time
-	Err          string             // "" = healthy
-	LoadBalanced int                // instances seen behind this endpoint (>1 = LB)
-	Workers      map[string]*Sample // by worker name
+	Key       string             // unit key: the endpoint URL of a direct unit, "#"+instance ID of a balanced one
+	Via       string             // endpoint the unit was reached through (Client.PrimaryEndpoint())
+	Instance  string             // varmq instance ID that answered, "" when none did
+	Label     string             // display label captured at poll time
+	Balanced  bool               // an instance found behind a load balancer
+	Err       string             // "" = healthy
+	Workers   map[string]*Sample // by worker name
+	Unreached []string           // sorted names of workers on this unit's list that got no answer
 }
 
-// Snapshot is one full poll across all pods. It is immutable once passed to
+// Tip is the hover text of the unit's label: the instance and the address it
+// was reached through when both are known, else whichever is, else its key.
+func (p PodSnapshot) Tip() string {
+	switch {
+	case p.Instance != "" && p.Via != "":
+		return p.Instance + " via " + p.Via
+	case p.Via != "":
+		return p.Via
+	}
+	return p.Key
+}
+
+// Snapshot is one full poll across all units. It is immutable once passed to
 // History.Append.
 type Snapshot struct {
-	At   time.Time
-	Pods []PodSnapshot // sorted by Endpoint
+	At     time.Time
+	Pods   []PodSnapshot  // sorted by Key
+	Behind map[string]int // balancer endpoint → distinct instances that answered through it this tick
 }
 
 // History keeps the last hour of snapshots in a ring and derives per-worker
@@ -44,7 +61,7 @@ type History struct {
 	ring  []*Snapshot
 	next  int                // ring index the next snapshot is written to
 	count int                // snapshots currently held
-	last  map[string]*Sample // latest sample per endpoint+"\x00"+worker
+	last  map[string]*Sample // latest sample per unit key+"\x00"+worker
 }
 
 // NewHistory sizes the ring to hold an hour of polls: ceil(time.Hour/interval)
@@ -73,7 +90,7 @@ func (h *History) Append(s *Snapshot) {
 
 	for _, pod := range s.Pods {
 		for name, sm := range pod.Workers {
-			key := pod.Endpoint + "\x00" + name
+			key := pod.Key + "\x00" + name
 			prev := h.last[key]
 			if early(prev, sm, h.interval) {
 				sm.CompletedRate, sm.FailedRate, sm.RateOK = prev.CompletedRate, prev.FailedRate, true

@@ -30,9 +30,9 @@ func rated(s *Sample, completed, failed float64) *Sample {
 	return s
 }
 
-// okPod is a healthy, non-load-balanced pod whose label is its endpoint.
+// okPod is a healthy direct unit whose label is its endpoint.
 func okPod(endpoint string, workers map[string]*Sample) PodSnapshot {
-	return PodSnapshot{Endpoint: endpoint, Label: endpoint, LoadBalanced: 1, Workers: workers}
+	return PodSnapshot{Key: endpoint, Via: endpoint, Label: endpoint, Workers: workers}
 }
 
 func snap(at time.Time, pods ...PodSnapshot) *Snapshot { return &Snapshot{At: at, Pods: pods} }
@@ -144,7 +144,7 @@ func TestMergedRowAggregation(t *testing.T) {
 	emails := snap(atTick(0),
 		okPod("p0", map[string]*Sample{"emails": smp("Stopped", 8, 0, 8, 3)}),
 		okPod("p1", map[string]*Sample{}),
-		PodSnapshot{Endpoint: "p2", Label: "p2", Err: "timeout", LoadBalanced: 1,
+		PodSnapshot{Key: "p2", Label: "p2", Err: "timeout",
 			Workers: map[string]*Sample{"emails": smp("Running", 8, 5, 3, 99)}},
 	)
 	row := rowByName(t, BuildDashboard([]*Snapshot{emails}, "", 5*time.Second).Rows, "emails")
@@ -216,9 +216,6 @@ func TestSeriesGapsAndPartial(t *testing.T) {
 	if p.V != 0 || !p.Gap || p.Partial || p.Title != stamp(s3)+" · no data" {
 		t.Errorf("point 2 = %+v, want a gap", p)
 	}
-	if row.RateNA {
-		t.Error("RateNA set although no pod is load-balanced")
-	}
 
 	// A worker absent from a snapshot is a gap there, not a zero.
 	other := snap(atTick(3), okPod("p0", map[string]*Sample{"billing": smp("Running", 1, 0, 1, 0)}))
@@ -228,63 +225,39 @@ func TestSeriesGapsAndPartial(t *testing.T) {
 	}
 }
 
-func TestSeriesExcludesLoadBalancedPods(t *testing.T) {
+// Nothing is load-balanced as far as the views go: units that share a Via add
+// up like any others.
+func TestNoLoadBalancedExclusion(t *testing.T) {
 	iv := 5 * time.Second
-	lb := func(endpoint string, ws map[string]*Sample) PodSnapshot {
-		p := okPod(endpoint, ws)
-		p.LoadBalanced = 2
+	balanced := func(key string, completed float64) PodSnapshot {
+		p := okPod(key, map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), completed, 0)})
+		p.Via, p.Instance, p.Balanced = "http://lb", key[1:], true
 		return p
 	}
-
-	// p1 is behind a load balancer: its 6/s must not be summed in, and it is
-	// outside k/N, so the point stays solid.
-	mixed := snap(atTick(0),
-		okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 4, 0)}),
-		lb("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 6, 0)}),
-	)
-	d := BuildDashboard([]*Snapshot{mixed}, "", iv)
-	row := rowByName(t, d.Rows, "orders")
-	if p := row.Spark[0]; p.V != 4 || p.Partial || p.Gap || p.Title != stamp(mixed)+" · 4.0/s · 1/1 pods" {
-		t.Errorf("point = %+v, want V 4 solid 1/1", p)
+	s := snap(atTick(0), balanced("#a", 4), balanced("#b", 6))
+	d := BuildDashboard([]*Snapshot{s}, "", iv)
+	if p := rowByName(t, d.Rows, "orders").Spark[0]; p.V != 10 || p.Partial || p.Gap || p.Title != stamp(s)+" · 10.0/s · 2/2 pods" {
+		t.Errorf("row point = %+v, want solid 10.0/s from 2/2 pods", p)
 	}
-	if row.RateNA {
-		t.Error("RateNA set although p0 is not load-balanced")
+	if d.KPIs.CompletedPerSec != 10 {
+		t.Errorf("KPI completed/s = %v, want 10 (both units counted)", d.KPIs.CompletedPerSec)
 	}
-	if d.KPIs.CompletedPerSec != 4 {
-		t.Errorf("KPI completed/s = %v, want 4 (LB pod excluded)", d.KPIs.CompletedPerSec)
-	}
-
-	// The only reporting pod is load-balanced: rates are n/a.
-	only := snap(atTick(0),
-		okPod("p0", map[string]*Sample{"billing": rated(smp("Running", 2, 0, 2, 0), 1, 0)}),
-		lb("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 6, 0)}),
-	)
-	d = BuildDashboard([]*Snapshot{only}, "", iv)
-	orders := rowByName(t, d.Rows, "orders")
-	if !orders.RateNA || !orders.Spark[0].Gap {
-		t.Errorf("orders on LB-only pod = RateNA %v spark %+v", orders.RateNA, orders.Spark)
-	}
-	if billing := rowByName(t, d.Rows, "billing"); billing.RateNA {
-		t.Error("billing RateNA set although its pod is not load-balanced")
-	}
-	// Filtering to the LB pod keeps it n/a.
-	if r := rowByName(t, BuildDashboard([]*Snapshot{only}, "p1", iv).Rows, "orders"); !r.RateNA {
-		t.Error("RateNA not set for the pod-filtered load-balanced pod")
+	// Each unit stands alone when filtered to.
+	if p := rowByName(t, BuildDashboard([]*Snapshot{s}, "#b", iv).Rows, "orders").Spark[0]; p.V != 6 || p.Title != stamp(s)+" · 6.0/s · 1/1 pods" {
+		t.Errorf("filtered point = %+v, want 6.0/s from 1/1 pods", p)
 	}
 }
 
 // An errored pod is expected to contribute (its data is unknown), so the
-// point is hollow k/N instead of a solid dip; a load-balanced pod is outside
-// k and N, so it never makes a point hollow.
-func TestSeriesPartialCountsErroredPodsNotLoadBalanced(t *testing.T) {
+// point is hollow k/N instead of a solid dip.
+func TestSeriesPartialCountsErroredPods(t *testing.T) {
 	iv := 5 * time.Second
-	lb := func(p PodSnapshot) PodSnapshot { p.LoadBalanced = 2; return p }
 	ws := func(completed float64) map[string]*Sample {
 		return map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), completed, 0.5)}
 	}
 	errored := func(endpoint string) PodSnapshot {
 		// Carries a rated sample to prove an errored pod adds nothing to the sum.
-		return PodSnapshot{Endpoint: endpoint, Label: endpoint, Err: "timeout", LoadBalanced: 1, Workers: ws(99)}
+		return PodSnapshot{Key: endpoint, Label: endpoint, Err: "timeout", Workers: ws(99)}
 	}
 
 	// (a) p2 errored: 2 of 3 expected pods contribute, in the worker series,
@@ -310,24 +283,14 @@ func TestSeriesPartialCountsErroredPodsNotLoadBalanced(t *testing.T) {
 		t.Errorf("billing point = %+v, want a gap (nobody contributed)", p)
 	}
 
-	// (b) one load-balanced pod plus two healthy contributing pods: solid 2/2.
-	withLB := snap(atTick(0), okPod("p0", ws(4)), lb(okPod("p1", ws(50))), okPod("p2", ws(6)))
-	d = BuildDashboard([]*Snapshot{withLB}, "", iv)
 	solid := func(what string, p Point, v float64, title string) {
 		t.Helper()
 		if p.V != v || p.Partial || p.Gap || p.Title != title {
 			t.Errorf("%s = %+v, want V %v solid %q", what, p, v, title)
 		}
 	}
-	solid("row", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(withLB)+" · 10.0/s · 2/2 pods")
-	solid("kpi completed", d.KPIs.Completed[0], 10, stamp(withLB)+" · 10.0/s · 2/2 pods")
-	// An errored load-balanced pod is excluded from N as well.
-	lbDown := snap(atTick(0), okPod("p0", ws(4)), lb(errored("p1")), okPod("p2", ws(6)))
-	d = BuildDashboard([]*Snapshot{lbDown}, "", iv)
-	solid("row with errored LB pod", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(lbDown)+" · 10.0/s · 2/2 pods")
-	solid("kpi with errored LB pod", d.KPIs.Completed[0], 10, stamp(lbDown)+" · 10.0/s · 2/2 pods")
 
-	// (c) a healthy pod lacking the worker is not expected to report it...
+	// (b) a healthy pod lacking the worker is not expected to report it...
 	other := map[string]*Sample{"billing": rated(smp("Running", 2, 0, 2, 0), 1, 0)}
 	lacking := snap(atTick(0), okPod("p0", ws(4)), okPod("p1", ws(6)), okPod("p2", other))
 	d = BuildDashboard([]*Snapshot{lacking}, "", iv)
@@ -447,7 +410,7 @@ func TestKPIGapsWithoutRates(t *testing.T) {
 	}
 
 	// Every pod errored: pending has nothing to report either.
-	down := snap(atTick(1), PodSnapshot{Endpoint: "p0", Label: "p0", Err: "refused"})
+	down := snap(atTick(1), PodSnapshot{Key: "p0", Label: "p0", Err: "refused"})
 	d = BuildDashboard([]*Snapshot{down}, "", 5*time.Second)
 	if p := d.KPIs.Pending[0]; !p.Gap || p.Title != stamp(down)+" · no data" {
 		t.Errorf("pending point on errored fleet = %+v, want gap", p)
@@ -455,7 +418,7 @@ func TestKPIGapsWithoutRates(t *testing.T) {
 }
 
 func TestHealthDots(t *testing.T) {
-	bad := func(ep string) PodSnapshot { return PodSnapshot{Endpoint: ep, Err: "down"} }
+	bad := func(ep string) PodSnapshot { return PodSnapshot{Key: ep, Err: "down"} }
 	cases := []struct {
 		name string
 		s    *Snapshot
@@ -474,29 +437,141 @@ func TestHealthDots(t *testing.T) {
 	}
 }
 
-func TestLBWarningCopy(t *testing.T) {
-	lb := func(ep string, n int) PodSnapshot {
-		p := okPod(ep, nil)
-		p.LoadBalanced = n
-		return p
+func TestBalancerNote(t *testing.T) {
+	s := &Snapshot{Behind: map[string]int{
+		"http://10.0.0.2:8090/varmq": 2, // deliberately out of order: endpoints are sorted
+		"http://10.0.0.1:8090/varmq": 3,
+	}}
+	if got, want := BalancerNote(s), "3 instances behind 10.0.0.1:8090 · 2 instances behind 10.0.0.2:8090"; got != want {
+		t.Errorf("BalancerNote = %q, want %q", got, want)
 	}
-	// Deliberately out of order: the warning sorts by endpoint like the TUI.
+	for name, s := range map[string]*Snapshot{
+		"nil":    nil,
+		"no map": snap(atTick(0), okPod("p0", nil)),
+		"empty":  {Behind: map[string]int{}},
+	} {
+		if got := BalancerNote(s); got != "" {
+			t.Errorf("%s: BalancerNote = %q, want empty", name, got)
+		}
+	}
+}
+
+func TestTip(t *testing.T) {
+	for _, tc := range []struct {
+		unit PodSnapshot
+		want string
+	}{
+		{PodSnapshot{Instance: "a", Via: "http://x"}, "a via http://x"},
+		{PodSnapshot{Via: "http://x"}, "http://x"},
+		{PodSnapshot{Key: "#a"}, "#a"},
+		{PodSnapshot{Key: "#a", Instance: "a"}, "#a"}, // an instance without an address says nothing more
+	} {
+		if got := tc.unit.Tip(); got != tc.want {
+			t.Errorf("Tip of %+v = %q, want %q", tc.unit, got, tc.want)
+		}
+	}
+}
+
+// notReached is a healthy balanced unit that lists the workers in unreached
+// but got no answer for them, on top of the workers it did answer for.
+func notReached(key string, workers map[string]*Sample, unreached ...string) PodSnapshot {
+	p := okPod(key, workers)
+	p.Via, p.Instance, p.Balanced, p.Unreached = "http://lb", key[1:], true, unreached
+	return p
+}
+
+// A worker a healthy unit lists but did not answer for is neither reporting
+// nor absent on it.
+func TestUnreachedIsNotAbsent(t *testing.T) {
+	iv := 5 * time.Second
 	s := snap(atTick(0),
-		lb("http://b.example:8080", 3),
-		lb("http://c.example:8080", 1),
-		lb("http://a.example:8080", 2),
-		lb("http://d.example:8080", 0),
+		okPod("u1", map[string]*Sample{"w": rated(smp("Running", 4, 1, 3, 2), 3, 0)}),
+		notReached("#u2", nil, "w"),
 	)
-	want := "⚠️  Load-balanced endpoint: a.example (2 instances seen), b.example (3 instances seen). " +
-		"Each refresh shows one instance; use kubernetes or dns discovery to see all."
-	if got := LBWarning(s); got != want {
-		t.Errorf("LBWarning =\n%q\nwant\n%q", got, want)
+
+	row := rowByName(t, BuildDashboard([]*Snapshot{s}, "", iv).Rows, "w")
+	if row.AbsentOn != 0 {
+		t.Errorf("AbsentOn = %d, want 0 (u2 lists w)", row.AbsentOn)
 	}
-	if got := LBWarning(snap(atTick(0), lb("p0", 1), lb("p1", 0))); got != "" {
-		t.Errorf("LBWarning without LB pods = %q, want empty", got)
+	if want := "u1: Running\n#u2: not reached"; row.StatusTip != want {
+		t.Errorf("StatusTip = %q, want %q", row.StatusTip, want)
 	}
-	if got := LBWarning(nil); got != "" {
-		t.Errorf("LBWarning(nil) = %q, want empty", got)
+	if row.Status != "Running" || row.Concurrency != "4" || row.Busy != 1 || row.PendingMax != 2 {
+		t.Errorf("row = %+v, want the values of u1 alone", row)
+	}
+
+	g := BuildGrid(s)
+	if want := (GridCell{Present: true, Status: "Running", Class: "active", Busy: 1, Concurrency: 4, Pending: 2}); g.Rows[0].Cells[0] != want {
+		t.Errorf("u1 cell = %+v, want %+v", g.Rows[0].Cells[0], want)
+	}
+	if c := g.Rows[0].Cells[1]; !c.Unreached || c.Present {
+		t.Errorf("u2 cell = %+v, want Unreached and not Present", c)
+	}
+
+	// The rate point counts u2 as expected, not contributing.
+	p := workerRates([]*Snapshot{s}, "", "w", completedRate)[0]
+	if p.V != 3 || !p.Partial || p.Gap || p.Title != stamp(s)+" · 3.0/s · 1/2 pods" {
+		t.Errorf("rate point = %+v, want partial 3.0/s from 1/2 pods", p)
+	}
+
+	// Alone, with nothing contributing, the point is a gap.
+	only := snap(atTick(0), notReached("#u2", nil, "w"))
+	if p := workerRates([]*Snapshot{only}, "", "w", completedRate)[0]; !p.Gap || p.Title != stamp(only)+" · no data" {
+		t.Errorf("rate point of an unreached-only worker = %+v, want a gap", p)
+	}
+	// An unreached name on another unit does not make a lacking unit expected.
+	lacking := snap(atTick(0), okPod("u1", map[string]*Sample{"w": rated(smp("Running", 4, 1, 3, 2), 3, 0)}), okPod("u3", map[string]*Sample{}))
+	if p := workerRates([]*Snapshot{lacking}, "", "w", completedRate)[0]; p.Partial || p.Title != stamp(lacking)+" · 3.0/s · 1/1 pods" {
+		t.Errorf("rate point with a lacking unit = %+v, want solid 1/1", p)
+	}
+}
+
+// With no unit answering for a worker its row has nothing to merge: it says so
+// instead of failing on an empty fold, and the detail page has no such worker.
+func TestUnreachedByEveryUnitStillHasARow(t *testing.T) {
+	s := snap(atTick(0), notReached("#u1", map[string]*Sample{"other": smp("Idle", 2, 0, 2, 0)}, "w"), notReached("#u2", nil, "w"))
+	d := BuildDashboard([]*Snapshot{s}, "", 5*time.Second)
+	row := rowByName(t, d.Rows, "w")
+	if row.Status != "not reached" || row.Class != "unknown" || row.Concurrency != "—" || row.AbsentOn != 0 || !row.Spark[0].Gap {
+		t.Errorf("row = %+v, want a not reached row without values", row)
+	}
+	if want := "#u1: not reached\n#u2: not reached"; row.StatusTip != want {
+		t.Errorf("StatusTip = %q, want %q", row.StatusTip, want)
+	}
+	if got := rowByName(t, d.Rows, "other"); got.AbsentOn != 1 {
+		t.Errorf("other AbsentOn = %d, want 1 (u2 lacks it, u1 answered)", got.AbsentOn)
+	}
+	if _, ok := BuildDetail([]*Snapshot{s}, "", "w", 5*time.Second); ok {
+		t.Error("BuildDetail reported a worker no unit answered for")
+	}
+}
+
+// In the fleet series a unit with unreached workers is expected but contributes
+// only its valid rates and is never counted as contributing, so the point is
+// hollow; it is a gap only when nothing contributed and no rate was summed.
+func TestFleetRatesUnreachedMakesPartial(t *testing.T) {
+	iv := 5 * time.Second
+	s := snap(atTick(0),
+		notReached("#u1", map[string]*Sample{"w": rated(smp("Running", 1, 0, 1, 0), 2, 0.5)}, "x"),
+		okPod("u2", map[string]*Sample{"w": rated(smp("Running", 1, 0, 1, 0), 3, 0.5)}),
+	)
+	k := BuildDashboard([]*Snapshot{s}, "", iv).KPIs
+	if p := k.Completed[0]; p.V != 5 || p.Gap || !p.Partial || p.Title != stamp(s)+" · 5.0/s · 1/2 pods" {
+		t.Errorf("completed point = %+v, want hollow 5.0/s from 1/2 pods", p)
+	}
+	if p := k.Failed[0]; p.V != 60 || p.Gap || !p.Partial || p.Title != stamp(s)+" · 60.0/min · 1/2 pods" {
+		t.Errorf("failed point = %+v, want hollow 60.0/min from 1/2 pods", p)
+	}
+
+	// A rate was summed although no unit counts as contributing: still a point.
+	one := snap(atTick(0), notReached("#u1", map[string]*Sample{"w": rated(smp("Running", 1, 0, 1, 0), 2, 0)}, "x"))
+	if p := fleetRates([]*Snapshot{one}, "", completedRate, 1, "/s")[0]; p.Gap || !p.Partial || p.V != 2 || p.Title != stamp(one)+" · 2.0/s · 0/1 pods" {
+		t.Errorf("point = %+v, want hollow 2.0/s from 0/1 pods", p)
+	}
+	// Nothing rated and nothing contributing: a gap.
+	none := snap(atTick(0), notReached("#u1", map[string]*Sample{"w": smp("Running", 1, 0, 1, 0)}, "x"), notReached("#u2", nil, "w"))
+	if p := fleetRates([]*Snapshot{none}, "", completedRate, 1, "/s")[0]; !p.Gap {
+		t.Errorf("point = %+v, want a gap", p)
 	}
 }
 
@@ -514,7 +589,7 @@ func TestBuildGridAlignsCells(t *testing.T) {
 		}),
 	)
 	g := BuildGrid(s)
-	if len(g.Pods) != 3 || g.Pods[2] != (PodColumn{Endpoint: "p2", Label: "p2"}) {
+	if len(g.Pods) != 3 || g.Pods[2] != (PodColumn{Key: "p2", Label: "p2", Tip: "p2"}) {
 		t.Fatalf("pods = %+v", g.Pods)
 	}
 	if len(g.Rows) != 2 || g.Rows[0].Name != "billing" || g.Rows[1].Name != "orders" {
@@ -547,12 +622,12 @@ func TestBuildGridAlignsCells(t *testing.T) {
 	// An errored pod keeps its column (with the error) but shows no cells.
 	s = snap(atTick(0),
 		okPod("p0", map[string]*Sample{"orders": smp("Running", 8, 6, 2, 80)}),
-		PodSnapshot{Endpoint: "p1", Label: "pod-b", Err: "connection refused", LoadBalanced: 1,
+		PodSnapshot{Key: "p1", Via: "http://b", Instance: "inst-b", Label: "pod-b", Err: "connection refused",
 			Workers: map[string]*Sample{"orders": smp("Running", 8, 3, 5, 1)}},
 		okPod("p2", map[string]*Sample{"orders": smp("Running", 8, 4, 4, 20)}),
 	)
 	g = BuildGrid(s)
-	if want := (PodColumn{Endpoint: "p1", Label: "pod-b", Err: "connection refused"}); g.Pods[1] != want {
+	if want := (PodColumn{Key: "p1", Label: "pod-b", Err: "connection refused", Tip: "inst-b via http://b"}); g.Pods[1] != want {
 		t.Errorf("errored column = %+v, want %+v", g.Pods[1], want)
 	}
 	cells := g.Rows[0].Cells
@@ -589,7 +664,7 @@ func TestBuildDetail(t *testing.T) {
 	if d.SuccessRate != "77.8%" {
 		t.Errorf("SuccessRate = %q, want 77.8%% (7/9)", d.SuccessRate)
 	}
-	if len(d.Pods) != 2 || d.Pods[0].Endpoint != "p0" || d.Pods[1].Endpoint != "p1" {
+	if len(d.Pods) != 2 || d.Pods[0].Key != "p0" || d.Pods[1].Key != "p1" {
 		t.Errorf("Pods = %+v, want only the pods reporting orders", d.Pods)
 	}
 
@@ -618,7 +693,7 @@ func TestBuildDetail(t *testing.T) {
 
 	// Pod filter narrows counters, status and the pod list.
 	d, ok = BuildDetail([]*Snapshot{s}, "p1", "orders", iv)
-	if !ok || d.Status != "Idle" || d.Submitted != 1 || len(d.Pods) != 1 || d.Pods[0].Endpoint != "p1" {
+	if !ok || d.Status != "Idle" || d.Submitted != 1 || len(d.Pods) != 1 || d.Pods[0].Key != "p1" {
 		t.Errorf("p1 detail = %+v ok=%v", d, ok)
 	}
 
@@ -629,7 +704,7 @@ func TestBuildDetail(t *testing.T) {
 	if _, ok = BuildDetail([]*Snapshot{s}, "p2", "orders", iv); ok {
 		t.Error("worker reported present on a pod that lacks it")
 	}
-	bad := snap(atTick(0), PodSnapshot{Endpoint: "p0", Err: "down",
+	bad := snap(atTick(0), PodSnapshot{Key: "p0", Err: "down",
 		Workers: map[string]*Sample{"orders": smp("Running", 8, 0, 8, 0)}})
 	if _, ok = BuildDetail([]*Snapshot{bad}, "", "orders", iv); ok {
 		t.Error("worker reported present on an errored pod")
@@ -674,7 +749,7 @@ func TestEmptyInputs(t *testing.T) {
 		"empty":    {},
 		"no pods":  {snap(atTick(0))},
 		"no wkrs":  {snap(atTick(0), okPod("p0", nil), okPod("p1", map[string]*Sample{}))},
-		"all down": {snap(atTick(0), PodSnapshot{Endpoint: "p0", Err: "down"})},
+		"all down": {snap(atTick(0), PodSnapshot{Key: "p0", Err: "down"})},
 	} {
 		for _, pod := range []string{"", "p0"} {
 			d := BuildDashboard(snaps, pod, 5*time.Second)
@@ -694,7 +769,7 @@ func TestEmptyInputs(t *testing.T) {
 				t.Errorf("%s: grid rows = %+v", name, g.Rows)
 			}
 			Health(latest)
-			LBWarning(latest)
+			BalancerNote(latest)
 		}
 	}
 
@@ -704,8 +779,8 @@ func TestEmptyInputs(t *testing.T) {
 	if h := Health(nil); h != (HealthView{Dot: "○"}) {
 		t.Errorf("Health(nil) = %+v", h)
 	}
-	if w := LBWarning(nil); w != "" {
-		t.Errorf("LBWarning(nil) = %q", w)
+	if w := BalancerNote(nil); w != "" {
+		t.Errorf("BalancerNote(nil) = %q", w)
 	}
 }
 
@@ -731,15 +806,17 @@ func TestRowIDIsSafe(t *testing.T) {
 // may write to them.
 func TestBuildersDoNotMutateSnapshots(t *testing.T) {
 	fixture := func() []*Snapshot {
-		lb := okPod("p2", map[string]*Sample{"orders": rated(smp("Weird", 8, 4, 4, 20), 2, 0.5)})
-		lb.LoadBalanced = 3
+		unit := okPod("#c", map[string]*Sample{"orders": rated(smp("Weird", 8, 4, 4, 20), 2, 0.5)})
+		unit.Via, unit.Instance, unit.Balanced, unit.Unreached = "http://lb", "c", true, []string{"billing"}
+		first := snap(atTick(0),
+			okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 1), 3, 0)}),
+			okPod("p0", map[string]*Sample{"orders": rated(smp("Idle", 4, 0, 4, 2), 1, 1), "billing": smp("Paused", 1, 0, 1, 0)}),
+			unit,
+			PodSnapshot{Key: "p3", Err: "down"},
+		)
+		first.Behind = map[string]int{"http://lb": 1}
 		return []*Snapshot{
-			snap(atTick(0),
-				okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 1), 3, 0)}),
-				okPod("p0", map[string]*Sample{"orders": rated(smp("Idle", 4, 0, 4, 2), 1, 1), "billing": smp("Paused", 1, 0, 1, 0)}),
-				lb,
-				PodSnapshot{Endpoint: "p3", Err: "down"},
-			),
+			first,
 			snap(atTick(1),
 				okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 1), 3, 0)}),
 			),
@@ -752,7 +829,7 @@ func TestBuildersDoNotMutateSnapshots(t *testing.T) {
 	BuildGrid(snaps[0])
 	BuildDetail(snaps, "", "orders", 5*time.Second)
 	Health(snaps[0])
-	LBWarning(snaps[0])
+	BalancerNote(snaps[0])
 
 	if !reflect.DeepEqual(snaps, pristine) {
 		t.Error("a view builder modified its input snapshots")

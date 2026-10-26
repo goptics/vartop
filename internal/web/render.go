@@ -16,8 +16,8 @@ import (
 //go:embed templates static
 var assets embed.FS
 
-// PodOption is one entry of the pod select.
-type PodOption struct{ Endpoint, Label string }
+// PodOption is one entry of the pod select. Tip is the hover text of Label.
+type PodOption struct{ Key, Label, Tip string }
 
 // Page is everything a full page needs. Handlers fill it; templates never
 // compute anything the view models do not already carry.
@@ -29,13 +29,13 @@ type Page struct {
 	Health                      HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
-	// LBWarning is the load-balancer notice. Banner is a notice about what
-	// this tab shows: its server changed, its pod is gone, or its worker is
-	// not found.
+	// Note is the quiet line about the balancers behind the server (see
+	// BalancerNote). Banner is a notice about what this tab shows: its server
+	// changed, its pod is gone, or its worker is not found.
 	// Connecting is the whole "Connecting to {label}…" message. Err is a
 	// failure to show; with no view model set it also offers a Retry form
 	// that posts Server to /server.
-	LBWarning, Banner, Connecting, Err string
+	Note, Banner, Connecting, Err string
 
 	// At most one is set; none while connecting, stale or failed.
 	Dashboard *DashboardView
@@ -50,17 +50,18 @@ func (p Page) Scope() string {
 		return "all pods"
 	}
 	for _, o := range p.Pods {
-		if o.Endpoint == p.Pod {
+		if o.Key == p.Pod {
 			return o.Label
 		}
 	}
 	return p.Pod
 }
 
-// ActionResult is one pod's outcome of an action. Outcome is "ok",
-// "no change" or "failed"; Msg, when set, is shown in parentheses after it.
-// Worker names the worker when one response covers several (bulk).
-type ActionResult struct{ Worker, Pod, Endpoint, Outcome, Msg string }
+// ActionResult is one pod's outcome of an action. Key is the unit's key and
+// Tip the hover text of its label (Pod). Outcome is "ok", "no change" or
+// "failed"; Msg, when set, is shown in parentheses after it. Worker names the
+// worker when one response covers several (bulk).
+type ActionResult struct{ Worker, Pod, Key, Tip, Outcome, Msg string }
 
 // ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
 // on Server. A down pod's column carries its Err.
@@ -72,8 +73,9 @@ type ConfirmView struct {
 
 // ConfirmRow is one worker of the confirmation panel. Absent is aligned with
 // ConfirmView.Pods: true where the pod's newest snapshot is healthy and
-// lacks the worker. A down or not yet polled pod is never marked: the
-// action is sent to every pod in scope either way.
+// lacks the worker (a pod that lists it without an answer does not lack it).
+// A down or not yet polled pod is never marked: the action is sent to every
+// pod in scope either way.
 type ConfirmRow struct {
 	Name   string
 	Absent []bool

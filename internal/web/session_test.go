@@ -478,7 +478,7 @@ func TestOldTickNeverReachesNewHistory(t *testing.T) {
 	for i, s := range snaps {
 		var eps []string
 		for _, p := range s.Pods {
-			eps = append(eps, p.Endpoint)
+			eps = append(eps, p.Key)
 		}
 		if !slices.Equal(eps, []string{bSrv.URL}) {
 			t.Errorf("b snapshot %d has pods %v, want only b's %s", i, eps, bSrv.URL)

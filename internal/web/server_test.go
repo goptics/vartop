@@ -680,3 +680,31 @@ func TestConnectingAndErrorStates(t *testing.T) {
 		t.Error("GET /?server=dev should still show dev's dashboard")
 	}
 }
+
+// TestFillCarriesNoteAndTips: the header of every page names the balancers
+// behind the server and hovers each picker entry with where it was reached.
+func TestFillCarriesNoteAndTips(t *testing.T) {
+	h := NewHistory(time.Second)
+	s := snap(time.Unix(1000, 0),
+		PodSnapshot{Key: "#a", Via: "http://lb:8090/varmq", Instance: "a", Label: "instance-1", Balanced: true},
+		PodSnapshot{Key: "#b", Via: "http://lb:8090/varmq", Instance: "b", Label: "instance-2", Balanced: true},
+		PodSnapshot{Key: "http://c:8090/varmq", Via: "http://c:8090/varmq", Label: "instance-3"},
+	)
+	s.Behind = map[string]int{"http://lb:8090/varmq": 2}
+	h.Append(s)
+
+	var p Page
+	fill(&p, h)
+
+	if want := "2 instances behind lb:8090"; p.Note != want {
+		t.Errorf("Note = %q, want %q", p.Note, want)
+	}
+	want := []PodOption{
+		{Key: "#a", Label: "instance-1", Tip: "a via http://lb:8090/varmq"},
+		{Key: "#b", Label: "instance-2", Tip: "b via http://lb:8090/varmq"},
+		{Key: "http://c:8090/varmq", Label: "instance-3", Tip: "http://c:8090/varmq"},
+	}
+	if !slices.Equal(p.Pods, want) {
+		t.Errorf("Pods = %+v, want %+v", p.Pods, want)
+	}
+}

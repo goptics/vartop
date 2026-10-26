@@ -114,7 +114,7 @@ func sampleRows() []RowView {
 		},
 		{
 			Name: "<script>x</script>", ID: "w-3c7363", Status: "mixed", Class: "mixed",
-			Concurrency: "mixed 3–5", AbsentOn: 2, RateNA: true,
+			Concurrency: "mixed 3–5", AbsentOn: 2,
 		},
 	}
 }
@@ -123,7 +123,7 @@ func dashboardPage() Page {
 	return Page{
 		Title: "vartop", Server: "dev", SelfURL: "/?server=dev", IntervalSec: 5,
 		Servers: []string{"dev", "prod"},
-		Pods:    []PodOption{{Endpoint: "http://a:3000", Label: "a"}, {Endpoint: "http://b:3000", Label: "b"}},
+		Pods:    []PodOption{{Key: "http://a:3000", Label: "a"}, {Key: "http://b:3000", Label: "b"}},
 		Health:  HealthView{Healthy: 2, Total: 2, Dot: "●"},
 		Dashboard: &DashboardView{
 			KPIs: KPIView{
@@ -152,7 +152,6 @@ func TestDashboardRenders(t *testing.T) {
 		"4 ×2 pods",
 		"mixed 3–5",
 		"absent on 2 pods",
-		"n/a: load-balanced",
 		"●", "2/2 pods",
 	} {
 		if !strings.Contains(body, want) {
@@ -306,11 +305,14 @@ func TestEmptyPagesRender(t *testing.T) {
 			t.Error("banner page offers Retry")
 		}
 	})
-	t.Run("load-balancer warning", func(t *testing.T) {
+	t.Run("balancer note", func(t *testing.T) {
 		p := dashboardPage()
-		p.LBWarning = "⚠️  Load-balanced endpoint: lb (3 instances seen). Each refresh shows one instance."
-		if body := run(t, "dashboard", "layout", p); !strings.Contains(body, "Load-balanced endpoint: lb (3 instances seen)") {
-			t.Error("LB warning missing")
+		if body := run(t, "dashboard", "layout", p); strings.Contains(body, `class="note"`) {
+			t.Error("a note is rendered although there is none")
+		}
+		p.Note = "3 instances behind lb:8090"
+		if body := run(t, "dashboard", "layout", p); !strings.Contains(body, `<p class="note" role="note">3 instances behind lb:8090</p>`) {
+			t.Error("balancer note missing")
 		}
 	})
 }
@@ -319,7 +321,7 @@ func gridPage() Page {
 	p := dashboardPage()
 	p.Dashboard = nil
 	p.Grid = &GridView{
-		Pods: []PodColumn{{Endpoint: "http://a:3000", Label: "a"}, {Endpoint: "http://b:3000", Label: "b", Err: "connection refused"}},
+		Pods: []PodColumn{{Key: "http://a:3000", Label: "a"}, {Key: "http://b:3000", Label: "b", Err: "connection refused"}},
 		Rows: []GridRow{{Name: "orders", Cells: []GridCell{
 			{Present: true, Status: "Running", Class: "active", Busy: 2, Concurrency: 4, Pending: 1},
 			{},
@@ -339,6 +341,35 @@ func TestGridRenders(t *testing.T) {
 			t.Errorf("body lacks %q", want)
 		}
 	}
+	if strings.Contains(body, "not reached") {
+		t.Error("a cell says not reached although none is")
+	}
+
+	p := gridPage()
+	p.Grid.Rows[0].Cells[1] = GridCell{Unreached: true}
+	body = run(t, "grid", "layout", p)
+	if !strings.Contains(body, `<span class="na">not reached</span>`) {
+		t.Errorf("unreached cell not rendered:\n%s", body)
+	}
+}
+
+// Hover text of a unit's label is its Tip, never its key.
+func TestTipsAreTitles(t *testing.T) {
+	const tip = "inst-a via http://a:3000"
+	for name, body := range map[string]string{
+		"select option": run(t, "dashboard", "layout", Page{Server: "dev", SelfURL: "/", Pods: []PodOption{{Key: "#a", Label: "instance-1", Tip: tip}}}),
+		"grid column": run(t, "grid", "layout", Page{Server: "dev", Grid: &GridView{
+			Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}},
+			Rows: []GridRow{{Name: "w", Cells: []GridCell{{}}}},
+		}}),
+		"detail pods": run(t, "detail", "layout", Page{Server: "dev", Detail: &DetailView{Name: "w", Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}}),
+		"confirm":     run(t, "confirm", "confirm", ConfirmView{Action: "pause", Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}),
+		"result":      run(t, "results", "results", []ActionResult{{Pod: "instance-1", Key: "#a", Tip: tip, Outcome: "ok"}}),
+	} {
+		if !strings.Contains(body, `title="`+tip+`">instance-1<`) {
+			t.Errorf("%s: label lacks the tip as title:\n%s", name, body)
+		}
+	}
 }
 
 func detailPage() Page {
@@ -349,7 +380,7 @@ func detailPage() Page {
 		Submitted: 10, Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
 		ConcurrencyStart: 4, ConcurrencyMax: 64,
 		Completed1h: []Point{pt(1), pt(2)}, Failed1h: []Point{pt(0), pt(0)},
-		Pods: []PodColumn{{Endpoint: "http://a:3000", Label: "a"}},
+		Pods: []PodColumn{{Key: "http://a:3000", Label: "a"}},
 	}
 	return p
 }
@@ -408,9 +439,9 @@ func TestLiveRegionHoldsNoControls(t *testing.T) {
 
 func TestResultsRender(t *testing.T) {
 	body := run(t, "results", "results", []ActionResult{
-		{Pod: "a", Endpoint: "http://a:3000", Outcome: "ok"},
-		{Pod: "b", Endpoint: "http://b:3000", Outcome: "no change", Msg: "worker is not running"},
-		{Pod: "c", Endpoint: "http://c:3000", Outcome: "failed", Msg: "<b>boom</b>"},
+		{Pod: "a", Key: "http://a:3000", Outcome: "ok"},
+		{Pod: "b", Key: "http://b:3000", Outcome: "no change", Msg: "worker is not running"},
+		{Pod: "c", Key: "http://c:3000", Outcome: "failed", Msg: "<b>boom</b>"},
 	})
 	for _, want := range []string{"a", "ok", "no change (worker is not running)", "failed (&lt;b&gt;boom&lt;/b&gt;)"} {
 		if !strings.Contains(body, want) {
@@ -428,7 +459,7 @@ func TestResultsRender(t *testing.T) {
 func TestConfirmRenders(t *testing.T) {
 	body := run(t, "confirm", "confirm", ConfirmView{
 		Action: "pause", Server: "dev", Pod: "",
-		Pods: []PodColumn{{Endpoint: "http://a:3000", Label: "pod-a"}, {Endpoint: "http://b:3000", Label: "pod-b", Err: "<i>down</i>"}},
+		Pods: []PodColumn{{Key: "http://a:3000", Label: "pod-a"}, {Key: "http://b:3000", Label: "pod-b", Err: "<i>down</i>"}},
 		Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true, false}}, {Name: "a&b", Absent: []bool{false, false}}},
 	})
 	for _, want := range []string{

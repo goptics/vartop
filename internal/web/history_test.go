@@ -101,19 +101,19 @@ func TestAppendFillsRatesAcrossSnapshots(t *testing.T) {
 	// second snapshot with the same worker names, and is listed before p1 so that
 	// when Append reaches it p1's t0 samples are still the stored previous ones:
 	// borrowing them would give a valid 5s gap and RateOK==true (the key
-	// includes the endpoint).
+	// includes the unit key).
 	first := &Snapshot{At: t0, Pods: []PodSnapshot{
-		{Endpoint: "p1", Workers: map[string]*Sample{
+		{Key: "p1", Workers: map[string]*Sample{
 			"w": sample("w", t0, 100, 0),
 			"x": sample("x", t0, 1000, 5),
 		}},
 	}}
 	second := &Snapshot{At: t1, Pods: []PodSnapshot{
-		{Endpoint: "p0", Workers: map[string]*Sample{
+		{Key: "p0", Workers: map[string]*Sample{
 			"w": sample("w", t1, 5000, 50),
 			"x": sample("x", t1, 6000, 60),
 		}},
-		{Endpoint: "p1", Workers: map[string]*Sample{
+		{Key: "p1", Workers: map[string]*Sample{
 			"w": sample("w", t1, 150, 10),
 			"x": sample("x", t1, 1020, 5),
 		}},
@@ -162,7 +162,7 @@ func TestAppendCarriesRateOverEarlyPoll(t *testing.T) {
 	}
 	appendTo := func(h *History, samples ...*Sample) {
 		for _, s := range samples {
-			h.Append(&Snapshot{At: s.At, Pods: []PodSnapshot{{Endpoint: "p", Workers: map[string]*Sample{"w": s}}}})
+			h.Append(&Snapshot{At: s.At, Pods: []PodSnapshot{{Key: "p", Workers: map[string]*Sample{"w": s}}}})
 		}
 	}
 
@@ -216,7 +216,7 @@ func TestHistoryConcurrentAppendAndRead(t *testing.T) {
 			s.Name = "w"
 			s.Metrics.Completed = uint64(i * 10)
 			h.Append(&Snapshot{At: at, Pods: []PodSnapshot{
-				{Endpoint: "p", Workers: map[string]*Sample{"w": s}},
+				{Key: "p", Workers: map[string]*Sample{"w": s}},
 			}})
 		}
 	}()
@@ -269,5 +269,29 @@ func TestHistoryConcurrentAppendAndRead(t *testing.T) {
 	}
 	if got := snaps[len(snaps)-1].Pods[0].Workers["w"]; !got.RateOK {
 		t.Error("last sample missing a rate after 1000 evenly spaced appends")
+	}
+}
+
+// Units reached through one balancer share a Via; their series must still be
+// each one's own.
+func TestAppendKeysRatesByUnitKey(t *testing.T) {
+	iv := 5 * time.Second
+	h := NewHistory(iv)
+	t0 := time.Unix(1000, 0)
+	unit := func(key string, at time.Time, completed uint64) PodSnapshot {
+		sm := &Sample{At: at}
+		sm.Instance, sm.Metrics.Completed = key[1:], completed
+		return PodSnapshot{Key: key, Via: "http://lb", Instance: key[1:], Balanced: true, Workers: map[string]*Sample{"w": sm}}
+	}
+	first := &Snapshot{At: t0, Pods: []PodSnapshot{unit("#a", t0, 10), unit("#b", t0, 100)}}
+	second := &Snapshot{At: t0.Add(iv), Pods: []PodSnapshot{unit("#a", t0.Add(iv), 20), unit("#b", t0.Add(iv), 130)}}
+	h.Append(first)
+	h.Append(second)
+
+	for i, want := range []float64{10 / iv.Seconds(), 30 / iv.Seconds()} {
+		sm := second.Pods[i].Workers["w"]
+		if !sm.RateOK || sm.CompletedRate != want {
+			t.Errorf("%s: RateOK = %v, CompletedRate = %v, want %v", second.Pods[i].Key, sm.RateOK, sm.CompletedRate, want)
+		}
 	}
 }

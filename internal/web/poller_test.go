@@ -55,7 +55,7 @@ func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 func podByEndpoint(t *testing.T, s *Snapshot, endpoint string) PodSnapshot {
 	t.Helper()
 	for _, p := range s.Pods {
-		if p.Endpoint == endpoint {
+		if p.Key == endpoint {
 			return p
 		}
 	}
@@ -104,18 +104,21 @@ func TestPollOnceBuildsSnapshot(t *testing.T) {
 	}
 	var gotEPs []string
 	for _, p := range s.Pods {
-		gotEPs = append(gotEPs, p.Endpoint)
+		gotEPs = append(gotEPs, p.Key)
 	}
 	if !slices.Equal(gotEPs, wantEPs) {
 		t.Fatalf("pods = %v, want sorted %v", gotEPs, wantEPs)
 	}
 	for _, p := range s.Pods {
 		// Both pods report instance "host": the shared label falls back to host:port.
-		if want := strings.TrimPrefix(p.Endpoint, "http://"); p.Label != want {
-			t.Errorf("%s: Label = %q, want %q", p.Endpoint, p.Label, want)
+		if want := strings.TrimPrefix(p.Key, "http://"); p.Label != want {
+			t.Errorf("%s: Label = %q, want %q", p.Key, p.Label, want)
 		}
-		if p.Err != "" || p.LoadBalanced != 0 {
-			t.Errorf("%s: Err = %q, LoadBalanced = %d; want healthy, not load-balanced", p.Endpoint, p.Err, p.LoadBalanced)
+		if p.Err != "" || p.Balanced {
+			t.Errorf("%s: Err = %q, Balanced = %v; want healthy and direct", p.Key, p.Err, p.Balanced)
+		}
+		if p.Via != p.Key || p.Instance != "host" {
+			t.Errorf("%s: Via = %q, Instance = %q; want the endpoint and the instance that answered", p.Key, p.Via, p.Instance)
 		}
 	}
 
@@ -223,10 +226,10 @@ func TestPollOnceEscapesNames(t *testing.T) {
 
 func TestLabelCollisionsFallBack(t *testing.T) {
 	pods := []PodSnapshot{
-		{Endpoint: "http://h:1/a", Label: "x"},
-		{Endpoint: "http://h:1/b", Label: "x"},
-		{Endpoint: "http://h:2", Label: "x"},
-		{Endpoint: "http://h:3", Label: "y"},
+		{Key: "http://h:1/a", Label: "x"},
+		{Key: "http://h:1/b", Label: "x"},
+		{Key: "http://h:2", Label: "x"},
+		{Key: "http://h:3", Label: "y"},
 	}
 
 	dedupeLabels(pods)
@@ -238,6 +241,29 @@ func TestLabelCollisionsFallBack(t *testing.T) {
 	want := []string{"http://h:1/a", "http://h:1/b", "h:2", "y"}
 	if !slices.Equal(got, want) {
 		t.Errorf("labels = %q, want %q", got, want)
+	}
+}
+
+func TestLabelCollisionsFallBackOnVia(t *testing.T) {
+	pods := []PodSnapshot{
+		{Key: "#a", Via: "http://h:1/lb", Label: "x"},
+		{Key: "http://h:2", Via: "http://h:2", Label: "x"},
+	}
+
+	dedupeLabels(pods)
+
+	if got, want := []string{pods[0].Label, pods[1].Label}, []string{"h:1", "h:2"}; !slices.Equal(got, want) {
+		t.Errorf("labels = %q, want %q (host:port of the address each was reached through)", got, want)
+	}
+}
+
+// An empty worker list still says which instance answered.
+func TestPollPodEmptyListNamesInstance(t *testing.T) {
+	_, srv := newFakeVarmq(t, "idle-host", map[string]*fakeWorker{})
+	pod := pollPod(context.Background(), staticPool(t, srv.URL).Clients()[0])
+
+	if pod.Key != srv.URL || pod.Via != srv.URL || pod.Instance != "idle-host" || pod.Err != "" || len(pod.Workers) != 0 {
+		t.Errorf("pod = %+v, want a healthy direct unit of instance idle-host with no workers", pod)
 	}
 }
 

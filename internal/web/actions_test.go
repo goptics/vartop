@@ -107,7 +107,7 @@ func TestActionAllPods(t *testing.T) {
 		t.Errorf("%d ok results, want 2:\n%s", n, body)
 	}
 	// One line per pod, labelled as the pages label it.
-	for _, want := range []string{`title="` + aSrv.URL + `">a</span>`, `title="` + bSrv.URL + `">b</span>`} {
+	for _, want := range []string{`title="a via ` + aSrv.URL + `">a</span>`, `title="b via ` + bSrv.URL + `">b</span>`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("results lack %q", want)
 		}
@@ -525,6 +525,37 @@ func TestConcurrencyValidatesAndSkips(t *testing.T) {
 	}
 }
 
+// A worker a unit lists but did not answer for is not "not on this pod": the
+// action is sent there like to any unit, so the confirm panel must not say
+// otherwise.
+func TestBulkConfirmUnreachedIsNotAbsent(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	cfg := &config.Config{Servers: map[string]*config.Server{
+		"multi": {Name: "multi", Interval: 3600, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	}}
+	m := startManager(t, cfg, "multi")
+	srv := serve(t, m)
+	// The first poll ran and the next is an hour away: this snapshot is the latest.
+	unit := func(endpoint string, workers map[string]*Sample, unreached ...string) PodSnapshot {
+		return PodSnapshot{Key: endpoint, Via: endpoint, Label: endpoint, Workers: workers, Unreached: unreached}
+	}
+	m.Current().History.Append(snap(time.Now(),
+		unit(aSrv.URL, map[string]*Sample{"orders": smp("Running", 4, 0, 4, 0)}),
+		unit(bSrv.URL, nil, "orders"),
+	))
+
+	_, body := post(t, srv, "/bulk/pause", multi("names", "orders", "names", "emails"), true)
+
+	// emails is on neither unit: both cells say so. orders is on a and
+	// unreached on b: both are sent.
+	if absent, paused := strings.Count(body, `<span class="na">not on this pod</span>`), strings.Count(body, `<td>pause</td>`); absent != 2 || paused != 2 {
+		t.Errorf("confirm panel has %d absent and %d pause cells, want 2 and 2:\n%s", absent, paused, body)
+	}
+	if _, orders, _ := strings.Cut(body, `<th scope="row" class="name">orders</th>`); !strings.HasPrefix(orders, `<td>pause</td><td>pause</td>`) {
+		t.Errorf("orders row should read pause on both units:\n%s", body)
+	}
+}
+
 func TestBulkConfirmThenExecute(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	srv, _ := newTestServer(t, aSrv, bSrv)
@@ -538,8 +569,8 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 		"Confirm pause on multi",
 		`<th scope="row" class="name">emails</th>`,
 		`<th scope="row" class="name">orders</th>`,
-		`<th title="` + aSrv.URL + `">a</th>`,
-		`<th title="` + bSrv.URL + `">b</th>`,
+		`<th title="a via ` + aSrv.URL + `">a</th>`,
+		`<th title="b via ` + bSrv.URL + `">b</th>`,
 		`<input type="hidden" name="confirm" value="1">`,
 		`<input type="hidden" name="server" value="multi">`,
 	} {
@@ -700,7 +731,7 @@ func TestFailedRefreshKeepsResults(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.fragments(rec,
-		fragment{"results", "results", []ActionResult{{Pod: "a", Endpoint: "http://a:3000", Outcome: "ok"}}},
+		fragment{"results", "results", []ActionResult{{Pod: "a", Key: "http://a:3000", Outcome: "ok"}}},
 		fragment{"dashboard", "live_oob", Page{}})
 	body := rec.Body.String()
 	if rec.Code != http.StatusOK || !strings.Contains(body, `<li class="ok">`) {

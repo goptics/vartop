@@ -1,6 +1,7 @@
 package web
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -132,31 +133,36 @@ func pollOnce(ctx context.Context, pool *api.Pool) *Snapshot {
 	}
 	wg.Wait()
 
-	lb := pool.LoadBalanced()
 	for i := range snap.Pods {
 		p := &snap.Pods[i]
 		// After the requests: PodName may name the instance that just answered.
-		p.Label = pool.PodName(p.Endpoint)
-		p.LoadBalanced = lb[p.Endpoint]
+		p.Label = pool.PodName(p.Via)
 	}
 	dedupeLabels(snap.Pods)
-	slices.SortFunc(snap.Pods, func(a, b PodSnapshot) int { return strings.Compare(a.Endpoint, b.Endpoint) })
+	slices.SortFunc(snap.Pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
 	return snap
 }
 
-// pollPod lists one pod's workers, then fetches every worker concurrently. A
-// failed or timed-out list marks the pod errored. A worker that answers 404
-// was removed since the list and is skipped; any other fetch error also marks
-// the pod errored, naming the worker, since its state is unknown, not absent.
+// pollPod lists one pod's workers, then fetches every worker concurrently. The
+// pod is a direct unit: its key and the endpoint it was reached through are the
+// same, and its instance is the one that answered the list. A failed or
+// timed-out list marks the pod errored. A worker that answers 404 was removed
+// since the list and is skipped; any other fetch error also marks the pod
+// errored, naming the worker, since its state is unknown, not absent.
 //
 // ponytail: no per-pod request limit; add a semaphore of ~4 if TIME_WAIT
 // build-up or tick latency shows up.
 func pollPod(ctx context.Context, c *api.Client) PodSnapshot {
-	pod := PodSnapshot{Endpoint: c.PrimaryEndpoint()}
+	endpoint := c.PrimaryEndpoint()
+	pod := PodSnapshot{Key: endpoint, Via: endpoint}
 	list, err := c.ListWorkersCtx(ctx)
 	if err != nil {
 		pod.Err = err.Error()
 		return pod
+	}
+	pod.Instance = c.LastInstance() // an empty list carries no instance of its own
+	if len(list) > 0 {
+		pod.Instance = list[0].Instance
 	}
 
 	samples := make([]*Sample, len(list))
@@ -190,10 +196,14 @@ func pollPod(ctx context.Context, c *api.Client) PodSnapshot {
 }
 
 // dedupeLabels makes pod labels distinct within a snapshot: pods sharing a
-// label fall back to their endpoint's host:port, and pods still sharing one
-// to the full endpoint URL.
+// label fall back to the host:port of the endpoint they were reached through
+// (their key when none is set), and pods still sharing one to the full URL.
 func dedupeLabels(pods []PodSnapshot) {
-	fallbacks := []func(endpoint string) string{hostPort, func(endpoint string) string { return endpoint }}
+	address := func(p PodSnapshot) string { return cmp.Or(p.Via, p.Key) }
+	fallbacks := []func(PodSnapshot) string{
+		func(p PodSnapshot) string { return hostPort(address(p)) },
+		address,
+	}
 	for _, fallback := range fallbacks {
 		count := make(map[string]int, len(pods))
 		for _, p := range pods {
@@ -201,7 +211,7 @@ func dedupeLabels(pods []PodSnapshot) {
 		}
 		for i := range pods {
 			if count[pods[i].Label] > 1 {
-				pods[i].Label = fallback(pods[i].Endpoint)
+				pods[i].Label = fallback(pods[i])
 			}
 		}
 	}

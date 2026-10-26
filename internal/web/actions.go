@@ -38,9 +38,9 @@ func (e noChange) Error() string { return string(e) }
 
 // fanOut calls fn concurrently on every client of clients, or only on the
 // one whose endpoint is pod when pod is set, and returns one result per
-// pod, sorted by endpoint and labelled from labels (endpoint → label). It
-// calls nothing and errors when pod is not one of clients' endpoints.
-func fanOut(ctx context.Context, clients []*api.Client, pod string, labels map[string]string,
+// pod, sorted by endpoint and labelled from units (see unitsOf). It calls
+// nothing and errors when pod is not one of clients' endpoints.
+func fanOut(ctx context.Context, clients []*api.Client, pod string, units map[string]PodSnapshot,
 	fn func(context.Context, *api.Client) error) ([]ActionResult, error) {
 	targets, err := podScope(clients, pod)
 	if err != nil {
@@ -49,7 +49,7 @@ func fanOut(ctx context.Context, clients []*api.Client, pod string, labels map[s
 	results := make([]ActionResult, len(targets))
 	var wg sync.WaitGroup
 	for i, c := range targets {
-		wg.Go(func() { results[i] = outcome(c.PrimaryEndpoint(), labels, fn(ctx, c)) })
+		wg.Go(func() { results[i] = outcome(c.PrimaryEndpoint(), units, fn(ctx, c)) })
 	}
 	wg.Wait()
 	return results, nil
@@ -71,11 +71,13 @@ func podScope(clients []*api.Client, pod string) ([]*api.Client, error) {
 	return nil, errors.New("the selected pod is not a pod of this server; reload")
 }
 
-// outcome is the result of err on endpoint: varmq's 409 ("already in that
+// outcome is the result of err on the unit key: varmq's 409 ("already in that
 // state"), its 404 (the pod lacks the worker: actions fan out to every pod
 // in scope) and a skip are no change, any other error is a failure.
-func outcome(endpoint string, labels map[string]string, err error) ActionResult {
-	r := ActionResult{Pod: cmp.Or(labels[endpoint], config.ShortOrigin(endpoint)), Endpoint: endpoint, Outcome: "ok"}
+func outcome(key string, units map[string]PodSnapshot, err error) ActionResult {
+	u := units[key]
+	u.Key = key // a pod the snapshot lacks is still labelled and tipped by its key
+	r := ActionResult{Pod: cmp.Or(u.Label, config.ShortOrigin(key)), Key: key, Tip: u.Tip(), Outcome: "ok"}
 	var skip noChange
 	var apiErr *api.APIError
 	switch {
@@ -92,15 +94,15 @@ func outcome(endpoint string, labels map[string]string, err error) ActionResult 
 	return r
 }
 
-// labelsOf maps each pod endpoint of snap to its label.
-func labelsOf(snap *Snapshot) map[string]string {
-	labels := make(map[string]string)
+// unitsOf maps each unit key of snap to the unit, for its label and tip.
+func unitsOf(snap *Snapshot) map[string]PodSnapshot {
+	units := make(map[string]PodSnapshot)
 	if snap != nil {
 		for _, p := range snap.Pods {
-			labels[p.Endpoint] = p.Label
+			units[p.Key] = p
 		}
 	}
-	return labels
+	return units
 }
 
 // bind returns the session r acts on: the active one, read once, when r's
@@ -153,7 +155,7 @@ func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(mutationCtx(r), s.Clients(), pod, labelsOf(s.History.Latest()), func(ctx context.Context, c *api.Client) error {
+	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(s.History.Latest()), func(ctx context.Context, c *api.Client) error {
 		return c.ActionCtx(ctx, url.PathEscape(name), action)
 	})
 	if err != nil {
@@ -181,12 +183,12 @@ func (h *handler) concurrency(w http.ResponseWriter, r *http.Request) {
 	if latest != nil {
 		for _, p := range latest.Pods {
 			if smp := p.Workers[name]; smp != nil {
-				current[p.Endpoint] = smp.Concurrency
+				current[p.Key] = smp.Concurrency
 			}
 		}
 	}
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(mutationCtx(r), s.Clients(), pod, labelsOf(latest), func(ctx context.Context, c *api.Client) error {
+	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(latest), func(ctx context.Context, c *api.Client) error {
 		if cur, ok := current[c.PrimaryEndpoint()]; ok && cur == n {
 			return noChange(fmt.Sprintf("already %d", n))
 		}
@@ -223,7 +225,7 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	}
 	pod := r.PostFormValue("pod")
 	latest := s.History.Latest()
-	labels := labelsOf(latest)
+	units := unitsOf(latest)
 	targets, err := podScope(s.Clients(), pod)
 	if err != nil {
 		badRequest(w, err.Error())
@@ -237,14 +239,12 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, c := range targets {
 			ep := c.PrimaryEndpoint()
-			col := PodColumn{Endpoint: ep, Label: cmp.Or(labels[ep], config.ShortOrigin(ep))}
-			seen := podsOf(latest, ep) // nil when latest lacks the pod
-			if seen != nil {
-				col.Err = seen[0].Err
-			}
-			cv.Pods = append(cv.Pods, col)
+			u, seen := units[ep] // not seen when latest lacks the pod
+			u.Key = ep
+			cv.Pods = append(cv.Pods, PodColumn{Key: ep, Label: cmp.Or(u.Label, config.ShortOrigin(ep)), Err: u.Err, Tip: u.Tip()})
 			for i := range cv.Rows {
-				absent := seen != nil && seen[0].Err == "" && seen[0].Workers[cv.Rows[i].Name] == nil
+				name := cv.Rows[i].Name
+				absent := seen && u.Err == "" && u.Workers[name] == nil && !u.unreached(name)
 				cv.Rows[i].Absent = append(cv.Rows[i].Absent, absent)
 			}
 		}
@@ -258,7 +258,7 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	for i, name := range names {
 		wg.Go(func() {
 			// targets is already scoped, so this cannot fail.
-			res, _ := fanOut(ctx, targets, "", labels, func(ctx context.Context, c *api.Client) error {
+			res, _ := fanOut(ctx, targets, "", units, func(ctx context.Context, c *api.Client) error {
 				return c.ActionCtx(ctx, url.PathEscape(name), action)
 			})
 			for j := range res {

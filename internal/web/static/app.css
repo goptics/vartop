@@ -69,7 +69,7 @@ button.danger { color: var(--bad); }
 #status:empty { padding: 0; }
 .health { font-weight: 600; }
 .interval, .updated { color: var(--subtle); }
-.lb { flex-basis: 100%; margin: 0; padding: 6px 10px; border-left: 3px solid var(--warn); background: var(--panel); color: var(--warn); }
+.note { flex-basis: 100%; margin: 0; padding: 6px 10px; border-left: 3px solid var(--line); background: var(--panel); color: var(--subtle); }
 #errors, #banner { max-width: 1200px; margin: 0 auto; }
 #errors:empty, #banner:empty { display: none; }
 .err { color: var(--bad); margin: 8px 0; overflow-wrap: anywhere; }
