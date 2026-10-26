@@ -744,10 +744,10 @@ func TestNoRefreshForGonePod(t *testing.T) {
 	for _, from := range []string{"/", "/workers/orders"} {
 		req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
 		req.Header.Set("HX-Current-URL", "http://127.0.0.1"+from)
-		if set, _, ok := livePage(req, "multi", instanceNoun, snaps, "http://a", "orders"); ok {
+		if set, _, ok := livePage(req, "multi", instanceNoun, snaps, "http://a", "orders", ""); ok {
 			t.Errorf("from %s: livePage refreshes %s for a gone unit", from, set)
 		}
-		if _, _, ok := livePage(req, "multi", instanceNoun, snaps, "http://b", "orders"); !ok {
+		if _, _, ok := livePage(req, "multi", instanceNoun, snaps, "http://b", "orders", ""); !ok {
 			t.Errorf("from %s: livePage refuses a reported unit", from)
 		}
 	}
@@ -1150,8 +1150,8 @@ func TestActionRefusedWhenStale(t *testing.T) {
 	}})
 	f.claim()
 	f.write("multi", snap(time.Now().Add(-60*time.Second),
-		okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}),
-		okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)})))
+		labelled(okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1"),
+		labelled(okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2")))
 	f.release()
 
 	// About a minute old: the age is rounded to the second when refused.
@@ -1161,7 +1161,7 @@ func TestActionRefusedWhenStale(t *testing.T) {
 		form url.Values
 	}{
 		{"/workers/orders/actions/pause", multi()},
-		{"/workers/orders/actions/stop", multi("instance", aSrv.URL)},
+		{"/workers/orders/actions/stop", multi("instance", "instance-1")},
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
@@ -1278,4 +1278,91 @@ func TestActionPanicIs500(t *testing.T) {
 		t.Errorf("GET / after the panic = %d, want the dashboard: the server serves on", status)
 	}
 	noPatches(t, fakes...)
+}
+
+// labelled is u labelled label.
+func labelled(u fleet.PodSnapshot, label string) fleet.PodSnapshot {
+	u.Label = label
+	return u
+}
+
+// TestOldFormPOSTSendsNothing (R22): a form from before labels — a tab
+// left open across the upgrade — names its unit by key, under pod= on
+// every server. A POST takes the unit parameter as it is: a key is no
+// label, and the other noun's parameter is no unit of this server; either
+// is refused and nothing is sent, where reading it as absent would act on
+// every unit. An empty one is the old merged form: it acts on every unit.
+func TestOldFormPOSTSendsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server config.Server
+		param  string // this server's
+		other  string // the other noun's
+		names  string // a unit by the label the server gives it
+	}{
+		{"static", config.Server{}, "instance", "pod", "instance-1"},
+		{"kubernetes", kubernetesServer, "pod", "instance", "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			varmqs, fakes := threeVarmqs(t)
+			srv := serveUnits(t, tc.server, fakes...)
+			for _, unit := range []url.Values{
+				{tc.param: {fakes[0].URL}},
+				{tc.param: {"#a"}},
+				{tc.other: {fakes[0].URL}},
+				{tc.other: {"#a"}},
+				{tc.other: {tc.names}},
+			} {
+				for _, c := range []struct {
+					path string
+					form url.Values
+				}{
+					{"/workers/orders/actions/pause", multi()},
+					{"/workers/orders/concurrency", multi("n", "9")},
+					{"/bulk/pause", multi("names", "orders")},
+					{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+				} {
+					for k, v := range unit {
+						c.form[k] = v
+					}
+					resp, body := post(t, srv, c.path, c.form, true)
+					if resp.StatusCode != http.StatusConflict || resp.Header.Get("HX-Retarget") != "#banner" {
+						t.Errorf("POST %s %v = %d %q, want 409 in the banner", c.path, c.form, resp.StatusCode, body)
+					}
+				}
+			}
+			noPatches(t, varmqs...)
+
+			// The old merged form, with the other noun's parameter empty.
+			resp, body := post(t, srv, "/workers/orders/actions/pause", multi(tc.other, ""), true)
+			if resp.StatusCode != http.StatusOK || strings.Count(resultsOf(body), `<li class="ok">`) != 3 {
+				t.Errorf("POST with an empty %s= = %d, want every unit paused:\n%s", tc.other, resp.StatusCode, resultsOf(body))
+			}
+		})
+	}
+}
+
+// TestActionResponseShowsStale: an action's refreshed #live, like a page,
+// shows no current value once the newest snapshot is stale — here because
+// no daemon answers the poke after the action, and the snapshot ages past
+// the threshold while the response waits for one.
+func TestActionResponseShowsStale(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}}, // stale after 6s
+	}})
+	f.claim() // a daemon runs, as far as the lease says, but answers no poke
+	f.write("multi", snap(time.Now().Add(-5*time.Second),
+		labelled(okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1"),
+		labelled(okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2")))
+
+	req := postRequest(t, f.srv, "/workers/orders/actions/pause", multi())
+	req.Header.Set("HX-Current-URL", f.srv.URL+"/?server=multi")
+	resp, body := send(t, f.srv, req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pause = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	if live := liveOOB(body); !strings.Contains(live, `<td class="num">—</td>`) || strings.Contains(live, `<td class="num">3</td>`) {
+		t.Errorf("the refreshed #live of a stale server shows current values:\n%s", live)
+	}
 }

@@ -125,11 +125,7 @@ var webCmd = &cobra.Command{
 	// A failure here (port in use, shutdown) is not a usage mistake.
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadOrOnboard()
-		if err != nil {
-			return err
-		}
-		if _, err := cfg.GetActiveServer(serverFlag); err != nil {
+		if _, err := loadOrOnboard(); err != nil {
 			return err
 		}
 		startCollecting(cmd.ErrOrStderr())

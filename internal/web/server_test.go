@@ -794,8 +794,15 @@ func TestWaitingForFirstSnapshot(t *testing.T) {
 	if strings.Contains(body, `id="poller"`) {
 		t.Error("the waiting page polls #live, which would never bring the header")
 	}
-	if _, body := fetch(t, f.srv, "/?server=multi", true); !strings.Contains(body, `<p class="banner">`+copy+`</p>`) {
-		t.Errorf("a poll before the first snapshot lacks the banner %q:\n%s", copy, body)
+	// htmx (a poll, the unit picker) would swap in only part of the page:
+	// the browser reloads it instead, and gets the page above.
+	req, err := http.NewRequest(http.MethodGet, f.srv.URL+"/?server=multi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("HX-Request", "true")
+	if resp, _ := send(t, f.srv, req); resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Refresh") != "true" {
+		t.Errorf("htmx GET before the first snapshot = %d (HX-Refresh %q), want 200 reloading the page", resp.StatusCode, resp.Header.Get("HX-Refresh"))
 	}
 	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+copy+`</p>` {
@@ -834,28 +841,45 @@ func TestStaleBannerAndStart(t *testing.T) {
 	if !strings.Contains(body, ">orders<") || !strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">1</td>`) {
 		t.Errorf("a stale dashboard should list orders with its current values as —:\n%s", body)
 	}
+	// Nor the health of the stale snapshot.
+	_, status, _ := strings.Cut(body, `<div id="status">`)
+	status, _, _ = strings.Cut(status, "</div>")
+	if !strings.Contains(status, `<span class="health" title="healthy / total instances">— instances</span>`) || strings.Contains(status, "1/1") {
+		t.Errorf("a stale page's #status should show its health as —:\n%s", status)
+	}
 
-	// Start collector, from the page it is on.
-	noFollow := *f.srv.Client()
-	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	// Start collector, from the page it is on: htmx sends the browser
+	// there, a full navigation.
 	req := postRequest(t, f.srv, "/daemon/start", url.Values{"server": {"multi"}})
 	req.Header.Set("HX-Current-URL", f.srv.URL+"/workers/orders?server=multi")
-	resp, err := noFollow.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	resp, _ := send(t, f.srv, req)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Redirect") != "/workers/orders?server=multi" || f.started() != 1 {
+		t.Errorf("POST /daemon/start = %d, HX-Redirect %q, Start called %d times; want 200 sending htmx back to the page, once",
+			resp.StatusCode, resp.Header.Get("HX-Redirect"), f.started())
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/workers/orders?server=multi" || f.started() != 1 {
-		t.Errorf("POST /daemon/start = %d to %q, Start called %d times; want 303 back to the page, once", resp.StatusCode, resp.Header.Get("Location"), f.started())
+	// Without htmx (no route lets one through the guards) it is a 303.
+	rec := httptest.NewRecorder()
+	plain := httptest.NewRequest(http.MethodPost, "/daemon/start", strings.NewReader("server=multi"))
+	plain.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	f.h.startDaemon(rec, plain)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/?server=multi" {
+		t.Errorf("POST /daemon/start without htmx = %d to %q, want 303 to the dashboard", rec.Code, rec.Header().Get("Location"))
 	}
 
-	// A Start that fails says so on the page.
+	// A Start that fails says so in the banner, next to the button, which
+	// stays.
+	_, banner, _ := strings.Cut(body, `<div id="banner"`)
+	banner, _, _ = strings.Cut(banner, "</div>")
+	if !strings.Contains(banner, `hx-target="#start-error"`) || !strings.Contains(banner, `>Start collector</button> <span id="start-error" class="err" role="alert"></span>`) {
+		t.Errorf("the banner lacks the Start button's error slot:\n%s", banner)
+	}
 	f.mu.Lock()
 	f.startErr = errStart
 	f.mu.Unlock()
 	resp, body = post(t, f.srv, "/daemon/start", url.Values{"server": {"multi"}}, true)
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Retarget") != "#banner" || body != `<p class="banner">`+errStart.Error()+`</p>` || f.started() != 2 {
-		t.Errorf("failed Start = %d (HX-Retarget %q) %q, want 200 with the error as the banner", resp.StatusCode, resp.Header.Get("HX-Retarget"), body)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Retarget") != "" || resp.Header.Get("HX-Redirect") != "" || body != errStart.Error() || f.started() != 3 {
+		t.Errorf("failed Start = %d (HX-Retarget %q, HX-Redirect %q) %q, want 200 with the error alone, for its slot",
+			resp.StatusCode, resp.Header.Get("HX-Retarget"), resp.Header.Get("HX-Redirect"), body)
 	}
 
 	// The daemon runs, but the server's collection fails.

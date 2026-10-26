@@ -306,15 +306,12 @@ func pageTitle(what, server string) string {
 // or it has no snapshot yet. A stale newest snapshot is shown, with a
 // notice saying how old it is, and why.
 //
-// A poll swaps in only #live, #banner and #status, so to htmx the
-// waiting message is sent as the Banner instead.
+// htmx would swap in only part of a waiting page (a poll #live, #banner
+// and #status): the browser reloads it instead (see Page.reload), and
+// gets it whole, the page that reloads itself until the first snapshot.
 func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok bool) {
 	p = Page{SelfURL: r.URL.RequestURI(), Health: fleet.Health(nil), Noun: fleet.NounFor(nil)}
-	defer func() {
-		if isHTMX(r) && p.Waiting != "" {
-			p.Banner, p.Waiting = p.Waiting, ""
-		}
-	}()
+	defer func() { p.reload = isHTMX(r) && p.Waiting != "" }()
 	cfg, err := h.config()
 	if err != nil {
 		p.Banner = "cannot read the config: " + err.Error()
@@ -406,10 +403,11 @@ func serverOf(cfg *config.Config, want string) string {
 	return ""
 }
 
-// labelOf is the unit label value names on srv: value itself, but on
-// Kubernetes a value shaped like a unit key — "#" and an instance ID, or a
-// URL, what pod= held before labels — which no pod name is: then none, so
-// that an old link shows the merged view.
+// labelOf is the unit label a page's URL value names on srv: value
+// itself, but on Kubernetes a value shaped like a unit key — "#" and an
+// instance ID, or a URL, what pod= held before labels — which no pod name
+// is: then none, so that an old link shows the merged view. A POST takes
+// its value as it is (see bind).
 func labelOf(srv *config.Server, value string) string {
 	if srv.Kubernetes != nil && (strings.HasPrefix(value, "#") || strings.Contains(value, "://")) {
 		return ""
@@ -538,6 +536,9 @@ func (h *handler) render(w http.ResponseWriter, set string, status int, p Page) 
 		http.Error(w, template.HTMLEscapeString("render "+set+": "+err.Error()), http.StatusInternalServerError)
 		return
 	}
+	if p.reload {
+		w.Header().Set("HX-Refresh", "true")
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
@@ -552,7 +553,8 @@ const feedIdle = 10 * time.Minute
 // whose interval changed gets a new one. A feed no request read for
 // feedIdle is closed; it lets its file go.
 type feedCache struct {
-	dataDir string
+	dataDir   string
+	closeFeed func(*store.Feed) error // (*store.Feed).Close, but in tests
 
 	mu    sync.Mutex
 	feeds map[feedKey]*cachedFeed
@@ -569,7 +571,7 @@ type cachedFeed struct {
 }
 
 func newFeedCache(dataDir string) *feedCache {
-	return &feedCache{dataDir: dataDir, feeds: make(map[feedKey]*cachedFeed)}
+	return &feedCache{dataDir: dataDir, closeFeed: (*store.Feed).Close, feeds: make(map[feedKey]*cachedFeed)}
 }
 
 // get returns the feed of the server keyed server, polled every interval,
@@ -579,7 +581,7 @@ func (c *feedCache) get(server string, interval time.Duration, now time.Time) *s
 	defer c.mu.Unlock()
 	for k, cf := range c.feeds {
 		if now.Sub(cf.used) > feedIdle {
-			_ = cf.feed.Close()
+			_ = c.closeFeed(cf.feed)
 			delete(c.feeds, k)
 		}
 	}
@@ -598,7 +600,7 @@ func (c *feedCache) close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for k, cf := range c.feeds {
-		_ = cf.feed.Close()
+		_ = c.closeFeed(cf.feed)
 		delete(c.feeds, k)
 	}
 }

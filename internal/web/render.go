@@ -46,9 +46,10 @@ type Page struct {
 	// BalancerNote). Banner is a notice about what this tab shows: its
 	// server is not configured or failing, its unit is gone, unknown or
 	// down, or its worker is not found. Waiting is the whole "Waiting for
-	// the first snapshot of {server}…" message of a full page (to htmx it
-	// is the Banner). Stale says how old the newest snapshot is, and why:
-	// the page then shows no current value, only history.
+	// the first snapshot of {server}…" message of a full page (htmx
+	// reloads instead, see reload). Stale says how old the newest
+	// snapshot is, and why: the page then shows no current value — health
+	// included — only history.
 	Note, Banner, Waiting, Stale string
 
 	// DaemonDown: no daemon collects; the banner offers to start it.
@@ -60,6 +61,11 @@ type Page struct {
 	// podGone): the unit select shows it chosen, and the banner links to
 	// the merged view.
 	Gone string
+
+	// reload: an htmx request got a waiting page, which htmx would swap
+	// in only part of; the response has the browser reload it instead
+	// (HX-Refresh).
+	reload bool
 
 	// At most one is set; none while waiting or when the server or unit
 	// cannot be shown.

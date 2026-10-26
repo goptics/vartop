@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"html/template"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/store"
 )
 
 // The nouns of a Kubernetes server and of every other. Fixtures that name
@@ -213,7 +215,7 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 		"title=\"a: Running\nb: Running\"",
 		`hx-post="/bulk/pause"`,
 		`hx-post="/bulk/resume"`,
-		`<form class="pick" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">`,
+		`<form class="pick" action="/" method="get">`,
 		`<select name="server">`,
 		"All pods (merged)",
 	} {
@@ -227,6 +229,12 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 	}
 	if !strings.Contains(body, "<title>half</title>") {
 		t.Error("point title missing")
+	}
+	// The server picker is a plain form: picking a server loads its page.
+	_, picker, _ := strings.Cut(body, `<form class="pick" action="/" method="get">`)
+	picker, _, _ = strings.Cut(picker, "</form>")
+	if strings.Contains(picker, "hx-") || !strings.Contains(picker, `<button type="submit">Show</button>`) {
+		t.Errorf("the server picker should be a plain GET form with a submit button:\n%s", picker)
 	}
 	// Bulk checkboxes belong to the bulk form that sits outside #live.
 	if !strings.Contains(body, `form="bulk"`) {
@@ -735,6 +743,11 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 func TestFeedCacheEvicts(t *testing.T) {
 	c := newFeedCache(t.TempDir())
 	t.Cleanup(c.close)
+	var closed []*store.Feed
+	c.closeFeed = func(f *store.Feed) error {
+		closed = append(closed, f)
+		return f.Close()
+	}
 	t0 := time.Now()
 	a := c.get("a", time.Second, t0)
 	if c.get("a", time.Second, t0.Add(time.Minute)) != a {
@@ -743,9 +756,13 @@ func TestFeedCacheEvicts(t *testing.T) {
 	if c.get("a", 2*time.Second, t0.Add(time.Minute)) == a {
 		t.Error("a's new interval kept its old feed")
 	}
+	a2 := c.get("a", 2*time.Second, t0.Add(time.Minute))
 	c.get("b", time.Second, t0.Add(time.Minute+feedIdle+time.Second))
 	if len(c.feeds) != 1 {
 		t.Errorf("%d feeds after a's went idle, want b's alone", len(c.feeds))
+	}
+	if len(closed) != 2 || !slices.Contains(closed, a) || !slices.Contains(closed, a2) {
+		t.Errorf("closed %d feeds, want a's two", len(closed))
 	}
 	if c.get("a", time.Second, t0.Add(time.Minute+feedIdle+time.Second)) == a {
 		t.Error("a's idle feed was kept")

@@ -19,8 +19,9 @@
     <a href="{{pageURL "/" .Server .Noun.Param .Pod}}"{{if .Dashboard}} aria-current="page"{{end}}>Dashboard</a>
     <a href="{{pageURL "/grid" .Server .Noun.Param .Pod}}"{{if .Grid}} aria-current="page"{{end}}>{{.Noun.Cap}} grid</a>
   </nav>
-  {{if .Servers}}<form class="pick" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
+  {{if .Servers}}<form class="pick" action="/" method="get">
     <label>Server <select name="server">{{if .Unconfigured}}<option value="{{.Server}}" selected disabled>{{.Server}}</option>{{end}}{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <button type="submit">Show</button>
   </form>{{end}}
   {{if .Pods}}<form class="pick" hx-get="{{pathOf .SelfURL}}" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
     {{template "server_field" .}}
@@ -28,15 +29,15 @@
   </form>{{end}}
 </header>
 <div id="status">{{if not .Waiting}}
-  <span class="health" title="healthy / total {{.Noun.Many}}">{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}} {{.Noun.Many}}</span>
+  <span class="health" title="healthy / total {{.Noun.Many}}">{{if .Stale}}—{{else}}{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}}{{end}} {{.Noun.Many}}</span>
   {{if gt .IntervalSec 0}}<span class="interval">refresh every {{.IntervalSec}}s</span>{{end}}
   {{with .Updated}}<span class="updated{{if $.Stale}} stale{{end}}">updated {{.}}</span>{{end}}
   {{if .Note}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}
 </div>
 <div id="errors" role="alert"></div>
-<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}{{if .DaemonDown}}<form class="start" hx-post="/daemon/start" hx-target="body" hx-sync="#page:replace">
+<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}{{if .DaemonDown}}<form class="start" hx-post="/daemon/start" hx-target="#start-error" hx-swap="innerHTML" hx-sync="#page:replace">
   {{template "server_field" .}}
-  <button type="submit">Start collector</button>
+  <button type="submit">Start collector</button> <span id="start-error" class="err" role="alert"></span>
 </form>{{end}}</div>
 <main>
 {{if .Waiting}}<p class="waiting" role="status">{{.Waiting}}</p>{{end}}

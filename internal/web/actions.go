@@ -46,8 +46,15 @@ type target struct {
 // form names. A server without a fresh snapshot is poked, and given up to
 // fleet.SettleWait to take one, unless no daemon runs to answer. Otherwise
 // it answers 409 with the notice why — not configured, waiting for the
-// first snapshot, stale, the unit gone or unknown — and returns false;
-// nothing may reach varmq then.
+// first snapshot, stale, the unit gone or unknown, the form out of date —
+// and returns false; nothing may reach varmq then.
+//
+// The unit parameter is taken as it is, unlike a page's (see labelOf): a
+// form from before labels, still open in a tab, names its unit by key,
+// under pod= on every server. Its key is no label, and the other noun's
+// parameter, set, is no unit of this server: either is refused, where
+// reading it as absent would act on every unit. Empty, it is the old
+// merged form, which acts on every unit as it says.
 func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	cfg, err := h.config()
 	if err != nil {
@@ -66,10 +73,11 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		conflict(w, "cannot read the history of "+t.key+": "+err.Error())
 		return nil, false
 	}
-	latest := t.feed.Latest()
-	if latest == nil || isStale(latest, interval, time.Now()) {
-		latest = h.refresh(r.Context(), t)
+	if latest := t.feed.Latest(); latest == nil || isStale(latest, interval, time.Now()) {
+		h.refresh(r.Context(), t)
 	}
+	snaps := t.feed.Snapshots() // read once: the label is checked in the snapshot acted on
+	latest := latestOf(snaps)
 	switch now := time.Now(); {
 	case latest == nil:
 		conflict(w, waitingMsg(t.key))
@@ -80,8 +88,12 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		return nil, false
 	}
 	t.latest = latest
-	if t.label = labelOf(t.srv, r.PostFormValue(t.noun.Param)); t.label != "" {
-		if msg := missingLabel(t.feed.Snapshots(), t.label, t.key, t.noun); msg != "" {
+	if r.PostFormValue(otherParam(t.noun)) != "" {
+		conflict(w, outOfDateMsg)
+		return nil, false
+	}
+	if t.label = r.PostFormValue(t.noun.Param); t.label != "" {
+		if msg := missingLabel(snaps, t.label, t.key, t.noun); msg != "" {
 			conflict(w, msg)
 			return nil, false
 		}
@@ -89,17 +101,28 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	return t, true
 }
 
-// refresh pokes t's server and waits up to fleet.SettleWait, or until ctx
-// ends, for a snapshot taken after the poke, and returns t's newest
-// snapshot then. With no daemon running, which would answer the poke, it
-// returns at once.
-func (h *handler) refresh(ctx context.Context, t *target) *fleet.Snapshot {
+// outOfDateMsg refuses a form that names a unit under the other noun's
+// parameter: one from before labels.
+const outOfDateMsg = "This page is out of date — reload"
+
+// otherParam is the unit parameter of the other kind of server than n's.
+func otherParam(n fleet.Noun) string {
+	if n.Param == "pod" {
+		return "instance"
+	}
+	return "pod"
+}
+
+// refresh pokes t's server and syncs its feed until it holds a snapshot
+// taken after the poke, for up to fleet.SettleWait or until ctx ends. With
+// no daemon running, which would answer the poke, it returns at once.
+func (h *handler) refresh(ctx context.Context, t *target) {
 	if !h.daemonRunning() {
-		return t.feed.Latest()
+		return
 	}
 	at, err := h.src.Control.Poke(t.key)
 	if err != nil {
-		return t.feed.Latest()
+		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, fleet.SettleWait)
 	defer cancel()
@@ -108,12 +131,12 @@ func (h *handler) refresh(ctx context.Context, t *target) *fleet.Snapshot {
 	for {
 		if t.feed.Sync() == nil {
 			if s := t.feed.Latest(); s != nil && s.At.After(at) {
-				return s
+				return
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return t.feed.Latest()
+			return
 		case <-tick.C:
 		}
 	}
@@ -280,17 +303,28 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 
 // startDaemon starts the daemon (Source.Start), then sends the browser
 // back to the page it came from, which then shows whether the daemon
-// collects. A start that fails says why in the page's banner.
+// collects: htmx with HX-Redirect, a full navigation, so that the page
+// is loaded whole (a 303 would be followed inside htmx's request, its
+// page swapped in as an htmx response); anything else with a 303. A start
+// that fails answers its error alone, for the slot next to the Start
+// collector button (see the layout), which stays.
 func (h *handler) startDaemon(w http.ResponseWriter, r *http.Request) {
 	err := fmt.Errorf("vartop web cannot start the vartop daemon")
 	if h.src.Start != nil {
 		err = h.src.Start()
 	}
-	if err != nil {
-		notice(w, http.StatusOK, err.Error())
-		return
+	switch {
+	case err != nil:
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(template.HTMLEscapeString(err.Error())))
+	case isHTMX(r):
+		w.Header().Set("HX-Redirect", backTo(r))
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Redirect(w, r, backTo(r), http.StatusSeeOther)
 	}
-	http.Redirect(w, r, backTo(r), http.StatusSeeOther)
 }
 
 // backTo is the page a POST came from, as htmx names it (HX-Current-URL):
@@ -312,13 +346,22 @@ func backTo(r *http.Request) string {
 // and waiting up to fleet.SettleWait (less if the browser gives up) for a
 // snapshot taken after the poke, which shows them, then the #live region
 // of the page the request came from as an out-of-band swap.
+//
+// A refresh of a server whose newest snapshot is stale by then (no
+// snapshot came, and the one held aged past the threshold) shows no
+// current value, as a page does.
 func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, worker string, results []fleet.ActionResult) {
 	if slices.ContainsFunc(results, func(res fleet.ActionResult) bool { return res.Outcome != "no change" }) {
 		// The snapshot held is still the best there is if none comes.
 		h.refresh(r.Context(), t)
 	}
+	snaps := t.feed.Snapshots()
+	var stale string
+	if latest, now := latestOf(snaps), time.Now(); isStale(latest, t.srv.PollInterval(), now) {
+		stale, _ = h.staleMsg(t.key, latest, now)
+	}
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}
-	if set, p, ok := livePage(r, t.key, t.noun, t.feed.Snapshots(), t.label, worker); ok {
+	if set, p, ok := livePage(r, t.key, t.noun, snaps, t.label, worker, stale); ok {
 		frags = append(frags, fragment{set, "live_oob", p})
 	}
 	h.fragments(w, frags...)
@@ -330,7 +373,8 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 // worker's detail; without the header, the page that carries the route's
 // controls (detail of worker, or the dashboard). Other pages, a worker no
 // unit reports, and a label the newest snapshot lacks get no refresh.
-func livePage(r *http.Request, key string, n fleet.Noun, snaps []*fleet.Snapshot, label, worker string) (string, Page, bool) {
+// stale is the page's Stale notice: with one, it shows no current value.
+func livePage(r *http.Request, key string, n fleet.Noun, snaps []*fleet.Snapshot, label, worker, stale string) (string, Page, bool) {
 	set := "dashboard"
 	if worker != "" {
 		set = "detail"
@@ -351,7 +395,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, snaps []*fleet.Snapshot
 		}
 	}
 
-	p := Page{Server: key, Pod: label, Noun: n}
+	p := Page{Server: key, Pod: label, Noun: n, Stale: stale}
 	fill(&p, snaps)
 	if podGone(&p, snaps) {
 		return "", Page{}, false // the next poll shows why
