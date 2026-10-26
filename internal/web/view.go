@@ -64,8 +64,9 @@ type KPIView struct {
 type RowView struct {
 	Name, ID                 string // ID = "w-" + hex(Name): safe as a DOM id
 	Status, Class, StatusTip string // StatusTip: one "label: Status" line per pod
-	Concurrency              string // "{n} ×{p} {many}", "{n}" or "mixed {min}–{max}"
+	Concurrency              string // "{n} ×{p} {many}", "{n}", "mixed {min}–{max}" or "—"
 	Busy, Idle, PendingMax   int
+	Unknown                  bool   // no pod answered for the worker: Busy, Idle and PendingMax are not known
 	PendingTip               string // one "label: n" line per pod
 	AbsentOn                 int    // healthy pods that lack this worker
 	Spark                    []Point
@@ -192,6 +193,7 @@ func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration, n Nou
 			Busy:        m.busy,
 			Idle:        m.idle,
 			PendingMax:  m.pendingMax,
+			Unknown:     m.reporting == 0,
 			PendingTip:  strings.Join(m.pendingTips, tipSep),
 			AbsentOn:    m.absent,
 			Spark:       workerRates(window, pod, name, completedRate, n),

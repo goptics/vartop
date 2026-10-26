@@ -154,6 +154,7 @@ func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 		if snaps := fill(&p, s.History); !podGone(&p, snaps) {
 			d := BuildDashboard(snaps, p.Pod, s.History.Interval(), p.Noun)
 			p.Dashboard = &d
+			podDown(&p, snaps) // its banner stands in for "No workers reported yet."
 		}
 	}
 	h.render(w, "dashboard", http.StatusOK, p)
@@ -172,7 +173,9 @@ func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 
 // detail is 404 when no selected pod reports the worker, except to htmx: a
 // poll gets a 200 so the notice reaches the banner (htmx would swap an error
-// response into #errors, through the poller's #live filter, as nothing).
+// response into #errors, through the poller's #live filter, as nothing). A
+// selected pod that is down is not a missing worker: its error is the
+// banner, with a 200.
 func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	p, s := h.page(r)
@@ -180,7 +183,7 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	if s != nil {
 		snaps := fill(&p, s.History)
-		if podGone(&p, snaps) {
+		if podGone(&p, snaps) || podDown(&p, snaps) {
 			// p says why; no pod's data is shown under the gone one's name.
 		} else if d, ok := BuildDetail(snaps, p.Pod, name, s.History.Interval(), p.Noun); ok {
 			p.Detail = &d
@@ -297,10 +300,10 @@ func fill(p *Page, hist *History) []*Snapshot {
 // podGone reports whether p.Pod names a pod the newest of snaps lacks: one
 // that left discovery, or one never seen (a stale bookmark). p then gets the
 // banner saying so, naming the pod by the label of the last snapshot that
-// had it. Callers must then show no data: another pod's, under this pod's
-// name, would mislead. SelfURL keeps the pod, so every poll says the same,
-// and shows the pod's data again should it come back. With no snapshot yet
-// nothing is known, so nothing is gone.
+// had it, and that label as Gone. Callers must then show no data: another
+// pod's, under this pod's name, would mislead. SelfURL keeps the pod, so
+// every poll says the same, and shows the pod's data again should it come
+// back. With no snapshot yet nothing is known, so nothing is gone.
 func podGone(p *Page, snaps []*Snapshot) bool {
 	latest := latestOf(snaps)
 	if p.Pod == "" || latest == nil || podsOf(latest, p.Pod) != nil {
@@ -314,6 +317,22 @@ func podGone(p *Page, snaps []*Snapshot) bool {
 		}
 	}
 	p.Banner = p.Noun.Cap() + " " + label + " is no longer reported — reload"
+	p.Gone = label
+	return true
+}
+
+// podDown reports whether p.Pod names a pod that is errored in the newest
+// of snaps, and then puts its label and error in p's banner: the page has
+// none of its data to show, and the banner says why.
+func podDown(p *Page, snaps []*Snapshot) bool {
+	if p.Pod == "" {
+		return false
+	}
+	pods := podsOf(latestOf(snaps), p.Pod)
+	if len(pods) == 0 || pods[0].Err == "" {
+		return false
+	}
+	p.Banner = cmp.Or(pods[0].Label, p.Pod) + ": " + pods[0].Err
 	return true
 }
 

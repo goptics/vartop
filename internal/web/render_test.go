@@ -266,6 +266,21 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 	}
 }
 
+// A row no unit answered for shows no numbers: unknown is not zero.
+func TestUnknownRowShowsNoValues(t *testing.T) {
+	p := dashboardPage()
+	p.Dashboard.Rows = []RowView{{Name: "w", ID: "w-77", Status: "not reached", Class: "unknown", Concurrency: "—", Unknown: true}}
+
+	body := run(t, "dashboard", "layout", p)
+
+	if want := `<td>—</td>
+    <td class="num">—</td>
+    <td class="num">—</td>
+    <td class="num">—</td>`; !strings.Contains(body, want) {
+		t.Errorf("row lacks %q:\n%s", want, body)
+	}
+}
+
 func TestKPIShowsDashWhenLastPointIsGap(t *testing.T) {
 	p := dashboardPage()
 	p.Dashboard.KPIs.CompletedPerSec = 99.9

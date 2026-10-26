@@ -556,13 +556,22 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	src.set(bSrv.URL) // a leaves discovery
 	waitUntil(t, 3*time.Second, "a snapshot without a", func() bool { return len(m.Current().History.Latest().Pods) == 1 })
 
-	// Labelled from the last snapshot that had it.
-	banner := `<p class="banner">Instance ` + staticLabels(aSrv.URL, bSrv.URL)[aSrv.URL] + ` is no longer reported — reload</p>`
+	// Labelled from the last snapshot that had it, with a way out to the
+	// merged view of the same page: the picker shows the gone unit chosen,
+	// so picking All instances (merged) there is a change.
+	label := staticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
+	merged := map[string]string{dash: "/?server=multi", detail: "/workers/orders?server=multi"}
 	for _, path := range []string{dash, detail} {
+		banner := `<p class="banner">Instance ` + label + ` is no longer reported — reload · <a href="` + merged[path] + `">All instances (merged)</a></p>`
 		for _, hx := range []bool{true, false} { // a poll, a full load
 			status, body := fetch(t, srv, path, hx)
 			if status != http.StatusOK || !strings.Contains(body, banner) {
 				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
+			}
+			_, picker, _ := strings.Cut(body, `<select name="pod">`)
+			picker, _, _ = strings.Cut(picker, `</select>`)
+			if gone := `<option value="` + aSrv.URL + `" selected disabled>` + label + `</option>`; strings.Count(picker, " selected") != 1 || !strings.Contains(picker, gone) {
+				t.Errorf("GET %s (hx %v): picker %q, want only %q selected", path, hx, picker, gone)
 			}
 			for _, data := range []string{">orders<", `<tr id="w-`, "Instances reporting", `id="bulk"`, `class="controls"`, "No workers"} {
 				if strings.Contains(body, data) {
@@ -583,8 +592,37 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 		t.Fatalf("full load of a gone pod polls %q, want its pod kept", pollURL)
 	}
 	_, body = fetch(t, srv, pollURL, true)
-	if !strings.Contains(body, banner) || strings.Contains(body, `<tr id="w-`) || strings.Contains(body, ">orders<") {
+	if !strings.Contains(body, "Instance "+label+" is no longer reported — reload") || strings.Contains(body, `<tr id="w-`) || strings.Contains(body, ">orders<") {
 		t.Errorf("poll of %s should show the banner and no rows:\n%s", pollURL, body)
+	}
+}
+
+// TestErroredUnitSaysWhy: a page filtered to a unit that is down says why in
+// the banner, not that no workers were reported or that the worker is not
+// found.
+func TestErroredUnitSaysWhy(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Name: "multi", Interval: 3600, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	}}, "multi")
+	srv := serve(t, m)
+	// The first poll ran and the next is an hour away: this snapshot is the latest.
+	down := PodSnapshot{Key: "#x", Via: aSrv.URL, Instance: "x", Label: "instance-3", Balanced: true, Err: "not reached this refresh · last seen 40s ago"}
+	m.Current().History.Append(snap(time.Now(), okPod(aSrv.URL, map[string]*Sample{"orders": smp("Running", 4, 0, 4, 0)}), down))
+
+	banner := `<p class="banner">instance-3: not reached this refresh · last seen 40s ago</p>`
+	for _, path := range []string{"/?pod=%23x", "/workers/orders?pod=%23x"} {
+		for _, hx := range []bool{true, false} { // a poll, a full load
+			status, body := fetch(t, srv, path, hx)
+			if status != http.StatusOK || !strings.Contains(body, banner) {
+				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
+			}
+			for _, wrong := range []string{"No workers reported yet.", "not found"} {
+				if strings.Contains(body, wrong) {
+					t.Errorf("GET %s (hx %v) says %q", path, hx, wrong)
+				}
+			}
+		}
 	}
 }
 

@@ -66,11 +66,16 @@ type Page struct {
 
 	// Note is the quiet line about the balancers behind the server (see
 	// BalancerNote). Banner is a notice about what this tab shows: its server
-	// changed, its pod is gone, or its worker is not found.
+	// changed, its pod is gone or down, or its worker is not found.
 	// Connecting is the whole "Connecting to {label}…" message. Err is a
 	// failure to show; with no view model set it also offers a Retry form
 	// that posts Server to /server.
 	Note, Banner, Connecting, Err string
+
+	// Gone is the label of the pod Pod names when the newest snapshot no
+	// longer has it (see podGone): the pod select shows it chosen, and the
+	// banner links to the merged view.
+	Gone string
 
 	// At most one is set; none while connecting, stale or failed.
 	Dashboard *DashboardView

@@ -578,8 +578,12 @@ func TestUnreachedByEveryUnitStillHasARow(t *testing.T) {
 	s := snap(atTick(0), notReached("#u1", map[string]*Sample{"other": smp("Idle", 2, 0, 2, 0)}, "w"), notReached("#u2", nil, "w"))
 	d := BuildDashboard([]*Snapshot{s}, "", 5*time.Second, podNoun)
 	row := rowByName(t, d.Rows, "w")
-	if row.Status != "not reached" || row.Class != "unknown" || row.Concurrency != "—" || row.AbsentOn != 0 || !row.Spark[0].Gap {
+	if row.Status != "not reached" || row.Class != "unknown" || row.Concurrency != "—" || row.AbsentOn != 0 || !row.Spark[0].Gap ||
+		!row.Unknown || row.PendingTip != "" {
 		t.Errorf("row = %+v, want a not reached row without values", row)
+	}
+	if other := rowByName(t, d.Rows, "other"); other.Unknown {
+		t.Errorf("other = %+v, want its values known", other)
 	}
 	if want := "#u1: not reached\n#u2: not reached"; row.StatusTip != want {
 		t.Errorf("StatusTip = %q, want %q", row.StatusTip, want)

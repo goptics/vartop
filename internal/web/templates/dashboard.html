@@ -39,14 +39,14 @@
     <td class="name"><a href="{{workerURL .Name $.Server $.Pod}}">{{.Name}}</a></td>
     <td><span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}</td>
     <td>{{.Concurrency}}</td>
-    <td class="num">{{.Busy}}</td>
-    <td class="num">{{.Idle}}</td>
-    <td class="num"{{with .PendingTip}} title="{{.}}"{{end}}>{{.PendingMax}}</td>
+    <td class="num">{{if .Unknown}}—{{else}}{{.Busy}}{{end}}</td>
+    <td class="num">{{if .Unknown}}—{{else}}{{.Idle}}{{end}}</td>
+    <td class="num"{{with .PendingTip}} title="{{.}}"{{end}}>{{if .Unknown}}—{{else}}{{.PendingMax}}{{end}}</td>
     <td class="trend">{{template "spark" (sparkline .Spark 120 24)}}</td>
   </tr>{{end}}
   </tbody>
 </table>
-</div>{{else}}<p class="empty">No workers reported yet.</p>{{end}}
+</div>{{else if not $.Banner}}<p class="empty">No workers reported yet.</p>{{end}}
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
