@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1153,7 +1154,8 @@ func TestActionRefusedWhenStale(t *testing.T) {
 		okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)})))
 	f.release()
 
-	const down = `<p class="banner">No new data for 1m0s — the vartop daemon is not running.</p>`
+	// About a minute old: the age is rounded to the second when refused.
+	down := regexp.MustCompile(`^<p class="banner">No new data for 1m\ds — the vartop daemon is not running\.</p>$`)
 	for _, c := range []struct {
 		path string
 		form url.Values
@@ -1166,7 +1168,7 @@ func TestActionRefusedWhenStale(t *testing.T) {
 	} {
 		start := time.Now()
 		resp, body := post(t, f.srv, c.path, c.form, true)
-		if resp.StatusCode != http.StatusConflict || body != down {
+		if resp.StatusCode != http.StatusConflict || !down.MatchString(body) {
 			t.Errorf("POST %s %v = %d %q, want 409 with %q", c.path, c.form, resp.StatusCode, body, down)
 		}
 		if took := time.Since(start); took > time.Second {

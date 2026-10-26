@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -816,13 +817,15 @@ func TestStaleBannerAndStart(t *testing.T) {
 	f.write("multi", snap(time.Now().Add(-60*time.Second), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 2)})))
 	f.release() // the daemon stopped
 
-	const down = "No new data for 1m0s — the vartop daemon is not running."
+	// About a minute old: the age is rounded to the second when the page
+	// is rendered.
+	down := regexp.MustCompile(`<p class="banner stale">No new data for 1m\ds — the vartop daemon is not running\.</p>`)
 	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
 		for _, hx := range []bool{false, true} {
 			status, body := fetch(t, f.srv, path, hx)
 			_, banner, _ := strings.Cut(body, `<div id="banner"`)
 			banner, _, _ = strings.Cut(banner, "</div>")
-			if status != http.StatusOK || !strings.Contains(banner, down) || !strings.Contains(banner, `hx-post="/daemon/start"`) || !strings.Contains(banner, ">Start collector</button>") {
+			if status != http.StatusOK || !down.MatchString(banner) || !strings.Contains(banner, `hx-post="/daemon/start"`) || !strings.Contains(banner, ">Start collector</button>") {
 				t.Errorf("GET %s (hx %v) = %d, want 200 with %q and the Start collector button in #banner:\n%s", path, hx, status, down, banner)
 			}
 		}
@@ -861,7 +864,7 @@ func TestStaleBannerAndStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, body = fetch(t, f.srv, "/?server=multi", false)
-	if want := "No new data for 1m0s — multi: discovery failed: boom — retrying in 5s"; !strings.Contains(body, want) || strings.Contains(body, "Start collector") {
+	if want := regexp.MustCompile(`No new data for 1m\ds — multi: discovery failed: boom — retrying in 5s<`); !want.MatchString(body) || strings.Contains(body, "Start collector") {
 		t.Errorf("stale page of a failing server lacks %q, or offers Start:\n%s", want, body)
 	}
 }
