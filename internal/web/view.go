@@ -170,16 +170,17 @@ func BalancerNote(latest *Snapshot) string {
 }
 
 // BuildDashboard aggregates the newest snapshot into one row per worker and the
-// KPI cards, with sparklines over the newest 10 minutes of snaps (oldest first).
-// pod "" merges every pod; otherwise only the one with that key is considered.
-// n words the labels and tooltips.
-func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration, n Noun) DashboardView {
+// KPI cards, with sparklines over the 10 minutes up to the newest of snaps
+// (oldest first). pod "" merges every pod; otherwise only the one with that key
+// is considered. The interval is not needed: the window is a span of time. n
+// words the labels and tooltips.
+func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) DashboardView {
 	v := DashboardView{KPIs: KPIView{StatusCounts: map[string]int{}}}
 	if len(snaps) == 0 {
 		return v
 	}
 	pods := podsOf(snaps[len(snaps)-1], pod)
-	window := newest(snaps, trendWindow, interval)
+	window := newest(snaps, trendWindow)
 
 	for _, name := range workerNames(pods) {
 		m := mergeWorker(pods, name)
@@ -438,14 +439,14 @@ func peakPending(pods []PodSnapshot) (total, healthy int) {
 func completedRate(s *Sample) float64 { return s.CompletedRate }
 func failedRate(s *Sample) float64    { return s.FailedRate }
 
-// newest returns the snapshots within span: the last int(span/interval),
-// at least one. A non-positive interval keeps everything.
-func newest(snaps []*Snapshot, span, interval time.Duration) []*Snapshot {
-	n := len(snaps)
-	if interval > 0 {
-		n = min(n, max(1, int(span/interval)))
+// newest returns the snapshots taken within span of the latest of snaps
+// (oldest first, at least one), however many polls that took.
+func newest(snaps []*Snapshot, span time.Duration) []*Snapshot {
+	if len(snaps) == 0 {
+		return snaps
 	}
-	return snaps[len(snaps)-n:]
+	since := snaps[len(snaps)-1].At.Add(-span)
+	return snaps[slices.IndexFunc(snaps, func(s *Snapshot) bool { return !s.At.Before(since) }):]
 }
 
 // workerRates charts one worker's rate (pick) per snapshot: the sum over the

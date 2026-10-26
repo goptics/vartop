@@ -385,30 +385,57 @@ func TestKPIsPendingIsMaxPerPodSummedOverWorkers(t *testing.T) {
 		t.Errorf("pending point = %+v, want title %q", k.Pending[0], want)
 	}
 
-	// Series cover the newest int(10min/interval) snapshots only.
+	// Series cover the trendWindow before the newest snapshot, by time: a
+	// shorter history gives all of it...
 	var snaps []*Snapshot
 	for n := range 8 {
 		snaps = append(snaps, mk(n))
 	}
-	for _, tc := range []struct {
-		interval time.Duration
-		want     int
-	}{
-		{2 * time.Minute, 5},  // 10min / 2min
-		{time.Hour, 1},        // never fewer than one point
-		{0, 8},                // guard: no divide by zero, use everything
-		{5 * time.Second, 8},  // window larger than the history
-		{10 * time.Minute, 1}, // exactly one
-	} {
-		d := BuildDashboard(snaps, "", tc.interval, podNoun)
-		if len(d.KPIs.Completed) != tc.want || len(d.KPIs.Pending) != tc.want || len(d.Rows[0].Spark) != tc.want {
-			t.Errorf("interval %v: series lengths %d/%d/%d, want %d",
-				tc.interval, len(d.KPIs.Completed), len(d.KPIs.Pending), len(d.Rows[0].Spark), tc.want)
-		}
+	d = BuildDashboard(snaps, "", 5*time.Second, podNoun)
+	if len(d.KPIs.Completed) != 8 || len(d.KPIs.Pending) != 8 || len(d.Rows[0].Spark) != 8 {
+		t.Errorf("series lengths %d/%d/%d, want 8 (the history is shorter than the window)",
+			len(d.KPIs.Completed), len(d.KPIs.Pending), len(d.Rows[0].Spark))
 	}
-	d = BuildDashboard(snaps, "", 2*time.Minute, podNoun)
-	if !strings.HasPrefix(d.KPIs.Completed[4].Title, stamp(snaps[7])) || !strings.HasPrefix(d.KPIs.Completed[0].Title, stamp(snaps[3])) {
-		t.Errorf("window is not the newest snapshots: first %q last %q", d.KPIs.Completed[0].Title, d.KPIs.Completed[4].Title)
+	// ...and a longer one is cut 10 minutes before the newest, that point
+	// included: polls 2 minutes apart keep 6 of 8.
+	var sparse []*Snapshot
+	for n := range 8 {
+		sparse = append(sparse, mk(24*n))
+	}
+	d = BuildDashboard(sparse, "", 2*time.Minute, podNoun)
+	if len(d.KPIs.Completed) != 6 || len(d.KPIs.Pending) != 6 || len(d.Rows[0].Spark) != 6 {
+		t.Fatalf("series lengths %d/%d/%d, want 6", len(d.KPIs.Completed), len(d.KPIs.Pending), len(d.Rows[0].Spark))
+	}
+	if !strings.HasPrefix(d.KPIs.Completed[0].Title, stamp(sparse[2])) || !strings.HasPrefix(d.KPIs.Completed[5].Title, stamp(sparse[7])) {
+		t.Errorf("window is not the newest 10 minutes: first %q last %q", d.KPIs.Completed[0].Title, d.KPIs.Completed[5].Title)
+	}
+}
+
+// TestNewestByTime: the trend window is a span of time, not a count of
+// snapshots, so it holds the same minutes whatever the poll interval was.
+func TestNewestByTime(t *testing.T) {
+	at := func(d time.Duration) *Snapshot { return &Snapshot{At: viewT0.Add(d)} }
+	m := time.Minute
+	snaps := []*Snapshot{at(-20 * m), at(-9 * m), at(-5 * m), at(0)}
+
+	if got := newest(snaps, 10*m); !reflect.DeepEqual(got, snaps[1:]) {
+		t.Errorf("newest 10m = %v, want the last 3", got)
+	}
+	if got := newest(snaps, 25*m); !reflect.DeepEqual(got, snaps) {
+		t.Errorf("newest 25m = %v, want all 4", got)
+	}
+	edge := []*Snapshot{at(-11 * m), at(-10 * m), at(0)}
+	if got := newest(edge, 10*m); !reflect.DeepEqual(got, edge[1:]) {
+		t.Errorf("newest 10m = %v, want the one exactly 10m back kept and the one before it dropped", got)
+	}
+	if got := newest(snaps, 0); !reflect.DeepEqual(got, snaps[3:]) {
+		t.Errorf("newest 0 = %v, want the latest alone (at least one)", got)
+	}
+	if got := newest(snaps[:1], 10*m); !reflect.DeepEqual(got, snaps[:1]) {
+		t.Errorf("newest of one snapshot = %v, want it", got)
+	}
+	if got := newest(nil, 10*m); len(got) != 0 {
+		t.Errorf("newest of none = %v, want none", got)
 	}
 }
 
@@ -788,8 +815,8 @@ func TestBuildDetailSeriesSpanWholeHistory(t *testing.T) {
 		t.Errorf("failed point = %+v (detail failed series is per second)", p)
 	}
 
-	if dash := BuildDashboard(snaps, "", 5*time.Second, podNoun); len(dash.Rows[0].Spark) != 120 {
-		t.Errorf("dashboard spark = %d points, want 120 (10 min)", len(dash.Rows[0].Spark))
+	if dash := BuildDashboard(snaps, "", 5*time.Second, podNoun); len(dash.Rows[0].Spark) != 121 {
+		t.Errorf("dashboard spark = %d points, want 121 (10 min back from the newest, both ends)", len(dash.Rows[0].Spark))
 	}
 }
 

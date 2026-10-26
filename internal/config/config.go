@@ -180,7 +180,9 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes the configuration to os.UserConfigDir()/vartop/config.json.
+// Save writes the configuration to os.UserConfigDir()/vartop/config.json. It
+// writes config.json.tmp beside it and renames that over it, so a reader
+// never sees a half-written file.
 func Save(cfg *Config) error {
 	path, err := configPath()
 	if err != nil {
@@ -196,7 +198,12 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("failed to encode config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

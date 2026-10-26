@@ -163,7 +163,7 @@ func (j *job[T]) start(ctx context.Context, r *reacher, wg *sync.WaitGroup) {
 	gen, began := r.gen, time.Now()
 	wg.Go(func() {
 		v, instance, err := j.send(ctx, c)
-		a := answer[T]{V: v, Err: err, Via: c.PrimaryEndpoint(), At: time.Now()}
+		a := answer[T]{V: v, Err: err, Via: c.PrimaryEndpoint(), At: time.Now().Round(0)}
 		r.replies <- func() {
 			j.flying--
 			if gen < r.gen {

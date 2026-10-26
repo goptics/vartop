@@ -65,6 +65,15 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("API error (status %d): %s", e.StatusCode, e.Message)
 }
 
+// pooled is the transport every Client's pooled requests share. The default
+// one keeps only 2 idle connections per host, so a poll that fetches many
+// workers at once would reconnect for most of them on the next tick.
+var pooled = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 16
+	return t
+}()
+
 // NewClient establishes a new varmq API client for the given endpoint.
 func NewClient(endpoint, token string) *Client {
 	fresh := http.DefaultTransport.(*http.Transport).Clone()
@@ -73,7 +82,8 @@ func NewClient(endpoint, token string) *Client {
 		endpoint: endpoint,
 		token:    token,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: pooled,
 		},
 		freshClient: &http.Client{
 			Timeout:   10 * time.Second,

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,57 @@ func TestRate(t *testing.T) {
 		if ok != tc.ok || (ok && (c != tc.wantC || f != tc.wantF)) {
 			t.Errorf("%s: got (%v,%v,%v) want (%v,%v,%v)", tc.name, c, f, ok, tc.wantC, tc.wantF, tc.ok)
 		}
+	}
+}
+
+// TestRateAcrossSleepIsGap: the monotonic clock stands still while a laptop
+// sleeps, so a pair of poll times that kept it would be ~5s apart across 8
+// hours and rate a huge spike. Wall-clock times (see TestPollTimesAreWallClock)
+// are 8h apart: a gap, never a rate, and never "early".
+func TestRateAcrossSleepIsGap(t *testing.T) {
+	iv := 5 * time.Second
+	t0 := time.Unix(1000, 0)
+	prev := &Sample{At: t0, RateOK: true}
+	cur := &Sample{At: t0.Add(8 * time.Hour)}
+	cur.Metrics.Completed = 1_000_000
+	if c, f, ok := rate(prev, cur, iv); ok {
+		t.Errorf("rate across an 8h sleep = (%v, %v, true), want a gap", c, f)
+	}
+	if early(prev, cur, iv) {
+		t.Error("a sample 8h after the previous one is early, want a regular one")
+	}
+}
+
+// TestPollTimesAreWallClock: Go's monotonic reading does not advance during
+// suspend, so every time the poller takes (the tick and each sample, direct
+// or behind a balancer) must be wall clock, with no monotonic reading.
+func TestPollTimesAreWallClock(t *testing.T) {
+	_, direct := newFakeVarmq(t, "d", map[string]*fakeWorker{"w": {Status: "Running", Concurrency: 1}})
+	_, srvs := newFakes(t, "a", "b")
+	lb := newRoundRobinLB(t, srvs...)
+	dpool := staticPool(t, direct.URL)
+	bpool, btr := lbPoll(t, lb.URL)
+
+	samples := 0
+	check := func(what string, s *Snapshot) {
+		t.Helper()
+		if s.At != s.At.Round(0) {
+			t.Errorf("%s: Snapshot.At %v carries a monotonic reading", what, s.At)
+		}
+		for _, p := range s.Pods {
+			for name, sm := range p.Workers {
+				samples++
+				if sm.At != sm.At.Round(0) {
+					t.Errorf("%s: %s/%s Sample.At %v carries a monotonic reading", what, p.Key, name, sm.At)
+				}
+			}
+		}
+	}
+	check("direct", pollOnce(context.Background(), dpool, newTracker(time.Second, false)))
+	check("direct pollAt", pollAt(context.Background(), dpool, newTracker(time.Second, false), time.Now()))
+	check("balanced", pollUntil(t, bpool, btr, 5, "both units", hasKeys("#a", "#b")))
+	if samples != 4 {
+		t.Errorf("checked %d samples, want 4: the direct unit's in two polls and both balanced units'", samples)
 	}
 }
 

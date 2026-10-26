@@ -186,6 +186,49 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSaveIsAtomic: Save replaces config.json instead of rewriting it, so a
+// reader (or a crash) never sees it half-written. A hard link to the old file
+// keeps the old content only if Save renamed a new file over it.
+func TestSaveIsAtomic(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	const old = `{"servers":{}}`
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	held := filepath.Join(t.TempDir(), "held.json")
+	if err := os.Link(path, held); err != nil {
+		t.Skipf("no hard links here: %v", err)
+	}
+
+	cfg := &Config{
+		DefaultServer: "prod",
+		Servers:       map[string]*Server{"prod": {Name: "prod", Endpoints: []string{"http://localhost:8080/varmq"}, Interval: 5}},
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	if got, _ := os.ReadFile(held); string(got) != old {
+		t.Errorf("the file Save replaced now reads %q, want it untouched: Save wrote in place", got)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(leftovers) != 0 {
+		t.Errorf("Save left %v behind", leftovers)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+		t.Errorf("config.json: %v, %v; want mode 0600", info, err)
+	}
+	loaded, err := Load()
+	if err != nil || loaded.DefaultServer != "prod" || loaded.Servers["prod"] == nil {
+		t.Errorf("Load() = %+v, %v; want the saved config", loaded, err)
+	}
+}
+
 func TestLoadValidates(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)

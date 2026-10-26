@@ -136,7 +136,12 @@ func pollOnce(ctx context.Context, pool *api.Pool, t *tracker) *Snapshot {
 // becomes a balancer: its unit is dropped and, time permitting, it gets a
 // balancer pass of its own. Balanced units of an instance that is a direct
 // unit this tick are dropped.
+//
+// Every time a poll takes is wall clock, with no monotonic reading, which
+// stands still while the machine sleeps and would rate a night's counters
+// over a few seconds.
 func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Snapshot {
+	now = now.Round(0)
 	snap := &Snapshot{At: now}
 	var directs, balancers []*api.Client
 	for _, c := range pool.Clients() {
@@ -253,7 +258,7 @@ func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered [
 				errs[i] = err
 				return
 			}
-			samples[i] = &Sample{At: time.Now(), WorkerDetails: *d}
+			samples[i] = &Sample{At: time.Now().Round(0), WorkerDetails: *d}
 		})
 	}
 	wg.Wait()
