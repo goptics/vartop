@@ -36,17 +36,43 @@ func tickCmd() tea.Cmd {
 }
 
 // syncCmd syncs feed, the feed of the server shown in generation gen, and
-// reads what control.db says of it. nil for no feed: nothing to sync.
+// reads what control.db says of it; and builds the series of the sparklines
+// of the view shown, unless the model has them (see trendsFor). nil for no
+// feed: nothing to sync.
 func (m Model) syncCmd(feed *store.Feed, gen int) tea.Cmd {
 	if feed == nil {
 		return nil
 	}
 	key, ctl := m.key, m.ctl
+	label, interval, noun, build := m.selectedLabel, m.interval(), m.noun(), m.buildTrends
+	have := m.dashboardScreen().trends.key
 	return func() tea.Msg {
 		msg := syncedMsg{server: key, gen: gen, err: feed.Sync()}
 		msg.down, msg.srvErr = controlState(ctl, key)
+		msg.trends = trendsFor(feed, label, interval, noun, build, have)
 		return msg
 	}
+}
+
+// trendsFor builds, with build, the series of the sparklines of feed's
+// snapshots for the view of the unit labelled label ("" is every unit). They
+// come keyed by what they are built from, and none are built, and none sent,
+// when have, the key of those the model holds, is that already: a sync of the
+// snapshots it has costs nothing. Update only takes them in, it never builds
+// them: at a fleet's size that takes tens of milliseconds, and hundreds with
+// a short interval.
+func trendsFor(feed *store.Feed, label string, interval time.Duration, noun fleet.Noun, build func([]*fleet.Snapshot, string, time.Duration, fleet.Noun) trendSet, have trendsKey) trendSet {
+	snaps := feed.Snapshots() // read once: the key's newest snapshot is the series'
+	key := trendsKey{feed: feed, label: label}
+	if len(snaps) > 0 {
+		key.latest = snaps[len(snaps)-1]
+	}
+	if key == have {
+		return trendSet{}
+	}
+	ts := build(snaps, label, interval, noun)
+	ts.key = key
+	return ts
 }
 
 // controlState is what control.db says of the server keyed key: whether no

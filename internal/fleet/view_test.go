@@ -962,3 +962,67 @@ func TestStale(t *testing.T) {
 		}
 	}
 }
+
+// TestCompletedRatesMatchRowSpark: CompletedRates is the Spark of a worker's
+// row (what BuildDashboard charts) — the same points over the same window,
+// merged or of one unit — without their tooltips, which a UI that draws none
+// does not pay to format.
+func TestCompletedRatesMatchRowSpark(t *testing.T) {
+	notRated := func() *Sample { return smp("Running", 8, 0, 8, 0) }
+	var snaps []*Snapshot
+	for n := range 160 { // 13 minutes of 5s polls: longer than the window
+		var pods []PodSnapshot
+		switch {
+		case n%7 == 3: // p1 down
+			pods = []PodSnapshot{
+				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 0), "billing": notRated()}),
+				{Key: "p1", Via: "p1", Label: "p1", Err: "connection refused"},
+				notReached("p2", map[string]*Sample{"billing": rated(smp("Running", 1, 0, 1, 0), 3, 0)}, "orders"),
+			}
+		case n%11 == 5: // nothing rated yet
+			pods = []PodSnapshot{
+				okPod("p0", map[string]*Sample{"orders": notRated(), "billing": notRated()}),
+				okPod("p1", map[string]*Sample{"orders": notRated()}),
+			}
+		default:
+			pods = []PodSnapshot{
+				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 1), "billing": rated(smp("Running", 1, 0, 1, 0), 2, 0)}),
+				okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 0.5, 0)}),
+			}
+		}
+		snaps = append(snaps, snap(atTick(n), pods...))
+	}
+
+	for _, pod := range []string{"", "p0", "p1", "p2", "nope"} {
+		d := BuildDashboard(snaps, pod, 5*time.Second, podNoun)
+		for _, name := range []string{"orders", "billing", "nowhere"} {
+			got := CompletedRates(snaps, pod, name)
+			var want []Point
+			for _, r := range d.Rows {
+				if r.Name == name {
+					want = r.Spark
+				}
+			}
+			if want == nil { // no such row: the series is the window's gaps
+				want = WorkerRates(newest(snaps, TrendWindow), pod, name, completedRate, podNoun)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("pod %q worker %q: %d points, want %d", pod, name, len(got), len(want))
+			}
+			for i := range got {
+				if got[i].V != want[i].V || got[i].Gap != want[i].Gap || got[i].Partial != want[i].Partial {
+					t.Fatalf("pod %q worker %q point %d = %+v, want %+v without the Title", pod, name, i, got[i], want[i])
+				}
+				if got[i].Title != "" {
+					t.Fatalf("pod %q worker %q point %d has a Title %q", pod, name, i, got[i].Title)
+				}
+			}
+		}
+	}
+	if got := CompletedRates(snaps, "", "orders"); len(got) != 121 {
+		t.Errorf("CompletedRates covers %d of 160 polls, want the last 10 minutes: 121", len(got))
+	}
+	if got := CompletedRates(nil, "", "orders"); len(got) != 0 {
+		t.Errorf("CompletedRates of no snapshots = %v, want none", got)
+	}
+}

@@ -11,15 +11,18 @@ import (
 // Event handlers for different message types
 // All handlers use pointer receivers to modify model state
 
-// handleSynced takes in a sync of the shown server's feed: the rows are
-// built again from its newest snapshot. A sync of another server, or of
-// one shown before (an older generation), is dropped.
+// handleSynced takes in a sync of the shown server's feed: the series of the
+// sparklines it built, if they are of what is shown, and the rows built again
+// from its newest snapshot. A sync of another server, or of one shown before
+// (an older generation), is dropped.
 func (m *Model) handleSynced(msg syncedMsg) {
 	if msg.server != m.key || msg.gen != m.gen {
 		return
 	}
 	m.syncErr, m.down, m.srvErr = msg.err, msg.down, msg.srvErr
-	m.dashboardScreen().refresh(m)
+	d := m.dashboardScreen()
+	d.install(m, msg.trends)
+	d.refresh(m)
 }
 
 // handleConfig takes in the config read again. A server shown that was

@@ -71,7 +71,9 @@ func (s *switcherScreen) enter(m *Model) tea.Cmd {
 			// the merged view.
 			m.popScreen()
 			m.resetPodView()
-			return m.show(item.name)
+			cmd := m.show(item.name)
+			m.dashboardScreen().rebuildTable(m)
+			return cmd
 		}
 
 		// Expand this server
@@ -84,8 +86,9 @@ func (s *switcherScreen) enter(m *Model) tea.Cmd {
 		m.err = nil
 		m.selectedLabel = item.label
 		m.showNodeColumn = false
+		cmd := m.show(item.server)
 		m.dashboardScreen().rebuildTable(m)
-		return m.show(item.server)
+		return cmd
 	}
 	return nil
 }

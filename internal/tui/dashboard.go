@@ -26,11 +26,9 @@ type dashboardScreen struct {
 	// kpiLine is the line under the header, built with the rows (not by
 	// View); "" when there is nothing to chart.
 	kpiLine string
-	// trends are the series of the sparklines, built for trendsOf: again only
-	// when a snapshot came, not at every sync or resize. built counts them.
-	trends            trends
-	trendsOf          trendsKey
-	built             int
+	// trends are the series of the sparklines, built by the sync command (see
+	// trendsFor) and taken in by install.
+	trends            trendSet
 	inActionSelection bool
 	keys              dashboardKeyMap
 }
@@ -239,36 +237,33 @@ func (d *dashboardScreen) setRows(rows []table.Row, labels []string, was selecti
 // lists but did not answer for is not reached; a stale snapshot's values
 // are not current: both show —.
 //
-// The sparklines are built here too: the Trend cell of each row, and the KPI
-// line, from the feed's last 10 minutes of snapshots. The history stays
-// drawn when the newest snapshot is stale.
+// The sparklines are drawn here too: the Trend cell of each row, and the KPI
+// line, from the series of the last 10 minutes of snapshots the sync command
+// built (the series are never built here); until those of the view shown come
+// they are blank. The history stays drawn when the newest snapshot is stale.
 func (d *dashboardScreen) refresh(m *Model) { d.rebuild(m, d.selection()) }
 
-// rebuild is refresh, keeping the selection was.
+// rebuild is refresh, keeping the selection was. The table's columns are made
+// to follow the width and the Node column first, so that its rows are never
+// of a shape its columns are not.
 func (d *dashboardScreen) rebuild(m *Model, was selection) {
+	if cols := dashboardColumns(m.width, m.showNodeColumn); !slices.Equal(cols, d.table.Columns()) {
+		d.table.SetRows(nil) // rows of the old shape would not fit
+		d.table.SetColumns(cols)
+	}
+	d.trendW = trendWidth(m.width, m.showNodeColumn)
+
 	latest := m.latest()
 	stale := m.stale(time.Now())
-	pods := fleet.PodsOf(latest, m.selectedLabel)
-	var units []string
-	for _, p := range pods {
-		if p.Err == "" {
-			units = append(units, p.Label)
-		}
+	var tr trendSet
+	if d.trends.key.feed == m.feed && d.trends.key.label == m.selectedLabel {
+		tr = d.trends // of the view shown, not of another server's or unit's
 	}
-	var tr trends
-	if m.feed != nil {
-		// The series only change with a new snapshot (a reset feed's are new
-		// too): a sync that brings none, or a resize, charts the same ones.
-		if key := (trendsKey{m.feed, latest, m.selectedLabel}); key != d.trendsOf {
-			d.trends, d.trendsOf = newTrends(m.feed.Snapshots(), m.selectedLabel, units, m.interval(), m.noun()), key
-			d.built++
-		}
-		tr = d.trends
-	}
+	ch := newChart(m.interval())
 
 	var rows []table.Row
 	var labels []string
-	for _, p := range pods {
+	for _, p := range fleet.PodsOf(latest, m.selectedLabel) {
 		if p.Err != "" {
 			continue
 		}
@@ -278,7 +273,7 @@ func (d *dashboardScreen) rebuild(m *Model, was selection) {
 				row = slices.Insert(row, 1, center(12, p.Label))
 			}
 			if d.trendW > 0 {
-				row = append(row, tr.worker(p.Label, name).spark(d.trendW))
+				row = append(row, ch.spark(tr.worker(p.Label, name), d.trendW))
 			}
 			rows = append(rows, row)
 			labels = append(labels, p.Label)
@@ -287,9 +282,20 @@ func (d *dashboardScreen) rebuild(m *Model, was selection) {
 
 	d.kpiLine = ""
 	if text, _ := m.notice(); text == "" && latest != nil {
-		d.kpiLine = kpiLine(m.width, tr.kpis, tr.at, stale)
+		d.kpiLine = ch.kpiLine(m.width, tr.kpis, tr.at, stale)
 	}
 	d.setRows(rows, labels, was)
+}
+
+// install takes in series built by a sync command, if they are of what the
+// model shows now: its feed, its newest snapshot and its view. Those of
+// another server, another unit or an older snapshot — a sync that was under
+// way when the view changed, or another sync's — are left out, and the ones
+// the model has stay.
+func (d *dashboardScreen) install(m *Model, t trendSet) {
+	if t.key.feed != nil && t.key == (trendsKey{m.feed, m.latest(), m.selectedLabel}) {
+		d.trends = t
+	}
 }
 
 // unitWorker names a worker on a unit.
@@ -303,52 +309,49 @@ type trendsKey struct {
 	label  string
 }
 
-// trends are the series the dashboard's sparklines chart, of the last 10
-// minutes of snapshots: the completed/s of each worker on each unit shown,
-// and the KPIs of the view. fleet builds them, as it does the web charts';
-// each series is of the last snapshots, one point to a snapshot, so the
-// times are those of the last snapshots too.
-type trends struct {
+// trendSet is what the dashboard's sparklines chart, of the last 10 minutes of
+// snapshots: the completed/s of each worker on each unit shown, and the KPIs
+// of the view. Each series is of the last snapshots, one point to a snapshot,
+// so the times are those of the last snapshots too. The zero value has none.
+type trendSet struct {
+	key     trendsKey
 	at      []time.Time // when the snapshots of the series were taken, oldest first
 	workers map[unitWorker][]fleet.Point
 	kpis    fleet.KPIView
 }
 
 // newTrends builds the trends of snaps, the snapshots of a server (oldest
-// first), for units, the labels of the units shown, in the view of the unit
-// labelled label ("" is every unit).
-func newTrends(snaps []*fleet.Snapshot, label string, units []string, interval time.Duration, n fleet.Noun) trends {
-	tr := trends{workers: make(map[unitWorker][]fleet.Point)}
+// first), for the view of the unit labelled label ("" is every unit): the
+// series of the rows it shows — each worker of each unit in its newest
+// snapshot — and its KPIs. fleet builds them, as it does the web charts';
+// only what is drawn is built: no row, no tooltip that is not.
+func newTrends(snaps []*fleet.Snapshot, label string, interval time.Duration, n fleet.Noun) trendSet {
+	ts := trendSet{workers: make(map[unitWorker][]fleet.Point)}
 	if len(snaps) == 0 {
-		return tr
+		return ts
 	}
-	for _, u := range units {
-		v := fleet.BuildDashboard(snaps, u, interval, n)
-		for _, r := range v.Rows {
-			tr.workers[unitWorker{u, r.Name}] = r.Spark
+	for _, p := range fleet.PodsOf(snaps[len(snaps)-1], label) {
+		if p.Err != "" {
+			continue
 		}
-		if u == label {
-			tr.kpis = v.KPIs
+		for _, name := range workersOf(p) {
+			ts.workers[unitWorker{p.Label, name}] = fleet.CompletedRates(snaps, p.Label, name)
 		}
 	}
-	if !slices.Contains(units, label) {
-		// Every unit, or the one viewed though it answered nothing: its
-		// history is still there to draw.
-		tr.kpis = fleet.BuildDashboard(snaps, label, interval, n).KPIs
-	}
+	ts.kpis = fleet.BuildDashboard(snaps, label, interval, n).KPIs
 	// Every series covers the same snapshots: those within the window of the
 	// newest.
-	last := snaps[len(snaps)-min(len(tr.kpis.Completed), len(snaps)):]
-	tr.at = make([]time.Time, len(last))
+	last := snaps[len(snaps)-min(len(ts.kpis.Completed), len(snaps)):]
+	ts.at = make([]time.Time, len(last))
 	for i, s := range last {
-		tr.at[i] = s.At
+		ts.at[i] = s.At
 	}
-	return tr
+	return ts
 }
 
 // worker is the completed/s series of worker on the unit labelled label.
-func (tr trends) worker(label, worker string) series {
-	return series{tr.at, tr.workers[unitWorker{label, worker}]}
+func (ts trendSet) worker(label, worker string) series {
+	return series{ts.at, ts.workers[unitWorker{label, worker}]}
 }
 
 // workersOf is the names of the workers p lists, answered or not, sorted.
@@ -386,7 +389,6 @@ func (d *dashboardScreen) rebuildTable(m *Model) {
 	tHeight := m.height - 13
 
 	was := d.selection()
-	d.trendW = trendWidth(m.width, m.showNodeColumn)
 	t := table.New(
 		table.WithColumns(dashboardColumns(m.width, m.showNodeColumn)),
 		table.WithFocused(true),

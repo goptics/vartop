@@ -46,6 +46,9 @@ type Model struct {
 
 	settleWait time.Duration           // how long an action on a stale server waits for a newer snapshot
 	closeFeed  func(*store.Feed) error // closes a feed no longer wanted; (*store.Feed).Close but in tests
+	// buildTrends builds the series of the sparklines (see trendsFor); newTrends,
+	// but counted in tests.
+	buildTrends func([]*fleet.Snapshot, string, time.Duration, fleet.Noun) trendSet
 
 	width  int
 	height int
@@ -84,6 +87,7 @@ func NewModel(cfg *config.Config, serverKey string, dataDir string, ctl *store.C
 		feeds:          make(map[feedKey]*store.Feed),
 		settleWait:     fleet.SettleWait,
 		closeFeed:      (*store.Feed).Close,
+		buildTrends:    newTrends,
 		showNodeColumn: true,
 		width:          80, // Default width, will be updated by WindowSizeMsg
 		height:         24, // Default height, will be updated by WindowSizeMsg
@@ -158,6 +162,9 @@ func (m Model) View() string {
 func (m *Model) show(key string) tea.Cmd {
 	m.key = key
 	m.gen++
+	// The action menu is for the row it was opened on, which another server
+	// may have a namesake of.
+	m.dashboardScreen().inActionSelection = false
 	m.syncErr, m.down, m.srvErr = nil, false, ""
 	m.feed = nil
 	if srv := m.server(); srv != nil {
@@ -198,12 +205,12 @@ func (m *Model) noun() fleet.Noun { return fleet.NounFor(m.server()) }
 // at now (see fleet.Stale).
 func (m *Model) stale(now time.Time) bool { return fleet.Stale(m.latest(), m.interval(), now) }
 
-// resetPodView returns to the merged view of every unit of a server.
+// resetPodView returns to the merged view of every unit of a server; the
+// table is rebuilt for it by the show that comes with it.
 func (m *Model) resetPodView() {
 	m.err = nil
 	m.selectedLabel = ""
 	m.showNodeColumn = true
-	m.dashboardScreen().rebuildTable(m)
 }
 
 // Close closes the files of every feed the model opened.

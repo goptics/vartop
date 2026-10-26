@@ -62,13 +62,24 @@ func bucketed(pts []fleet.Point, width int, column func(i int) (int, bool)) []fl
 	}
 	out := make([]fleet.Point, width)
 	for c := range out {
-		if n[c] == 0 {
+		// Finite values can still sum to more than a float holds.
+		if mean := sum[c] / float64(max(n[c], 1)); n[c] == 0 || math.IsInf(mean, 0) {
 			out[c].Gap = true
-			continue
+		} else {
+			out[c].V = mean
 		}
-		out[c].V = sum[c] / float64(n[c])
 	}
 	return out
+}
+
+// sparkLevels are the runes sparklines are drawn with now: blockLevels, or
+// asciiLevels where block runes are wide. It asks the terminal's width
+// rules, so a build of many sparklines asks once (see chart).
+func sparkLevels() []rune {
+	if asciiBlocks() {
+		return []rune(asciiLevels)
+	}
+	return []rune(blockLevels)
 }
 
 // sparkline draws pts as width columns, one rune each: the points, taken to
@@ -77,11 +88,12 @@ func bucketed(pts []fleet.Point, width int, column func(i int) (int, bool)) []fl
 // scaled so that the highest column is the top level. A column of data is
 // never blank, whatever its value: a space means none.
 func sparkline(pts []fleet.Point, width int) string {
-	cols := bucketed(pts, width, func(i int) (int, bool) { return i * width / len(pts), true })
-	levels := []rune(blockLevels)
-	if asciiBlocks() {
-		levels = []rune(asciiLevels)
-	}
+	return draw(bucketed(pts, width, func(i int) (int, bool) { return i * width / len(pts), true }), sparkLevels())
+}
+
+// draw writes cols, one rune each, as levels scaled to the highest of them;
+// a gap is a space.
+func draw(cols []fleet.Point, levels []rune) string {
 	var peak float64
 	for _, c := range cols {
 		if !c.Gap {
@@ -96,7 +108,9 @@ func sparkline(pts []fleet.Point, width int) string {
 		}
 		level := 0
 		if peak > 0 && c.V > 0 {
-			level = min(int(math.Round(c.V/peak*float64(len(levels)-1))), len(levels)-1)
+			if f := math.Round(c.V / peak * float64(len(levels)-1)); !math.IsNaN(f) {
+				level = min(max(int(f), 0), len(levels)-1)
+			}
 		}
 		b.WriteRune(levels[level])
 	}
@@ -138,20 +152,49 @@ type series struct {
 	pts []fleet.Point
 }
 
-// spark draws the series over the trend window, up to its newest time, in
-// width columns.
-func (s series) spark(width int) string {
-	return sparkline(byTime(s.at, s.pts, fleet.TrendWindow, width), width)
+// chart draws sparklines of series polled every interval. Its levels are
+// picked when it is made, so that the many sparklines of one build ask the
+// terminal's width rules once.
+type chart struct {
+	levels   []rune
+	interval time.Duration
 }
+
+func newChart(interval time.Duration) chart {
+	return chart{levels: sparkLevels(), interval: interval}
+}
+
+// spark draws s over the trend window, up to its newest time, in a cell
+// width columns wide. The window is cut into as many slices as fit, but
+// each at least two polls long, so that polls a little late still leave one
+// in every slice and no hole reads as no data — only polls missed leave one.
+// Where the polls are minutes apart that is fewer slices than columns, and
+// the drawing is right-aligned in the cell.
+func (c chart) spark(s series, width int) string {
+	if width < 1 {
+		return ""
+	}
+	cols := width
+	if c.interval > 0 {
+		cols = min(width, max(1, int(fleet.TrendWindow/(2*c.interval))))
+	}
+	return strings.Repeat(" ", width-cols) + draw(byTime(s.at, s.pts, fleet.TrendWindow, cols), c.levels)
+}
+
+// kpiValueW is the width of the field each KPI's value is in, right-aligned:
+// the widest a value is, near enough (99999.9; 9999999 pending).
+const kpiValueW = 7
 
 // kpiLine is the line under the dashboard header: the completed/s,
 // failed/min and pending of k, each its current value and a sparkline of
 // the series (of the snapshots taken at at). The sparklines take a third
 // each of the width the text leaves, at most 12 columns, and are left out
-// below 4. A current value is — while stale, and when the newest point of
-// its series has no data (the web pages' rule); the sparklines are drawn
-// all the same. It is never wider than width.
-func kpiLine(width int, k fleet.KPIView, at []time.Time, stale bool) string {
+// below 4; the text is sized for the widest values, so that the sparklines
+// keep their width as the values change, or turn to —. A current value is —
+// while stale, and when the newest point of its series has no data (the web
+// pages' rule); the sparklines are drawn all the same. It is never wider than
+// width.
+func (c chart) kpiLine(width int, k fleet.KPIView, at []time.Time, stale bool) string {
 	if width < 1 {
 		return ""
 	}
@@ -167,10 +210,11 @@ func kpiLine(width int, k fleet.KPIView, at []time.Time, stale bool) string {
 	}
 
 	// The text is all there is but the sparklines: 2 columns of margin, 2
-	// between each KPI, 1 before each sparkline, and each label and value.
+	// between each KPI, 1 before each sparkline, and each label and value
+	// field.
 	text := 2 + 2*2 + 3
 	for i := range labels {
-		text += lipgloss.Width(labels[i]) + 1 + lipgloss.Width(values[i])
+		text += lipgloss.Width(labels[i]) + 1 + max(kpiValueW, lipgloss.Width(values[i]))
 	}
 	spark := min((width-text)/3, 12)
 	if spark < 4 {
@@ -185,14 +229,14 @@ func kpiLine(width int, k fleet.KPIView, at []time.Time, stale bool) string {
 	}
 	parts := make([]string, len(labels))
 	for i := range labels {
-		parts[i] = label.Render(labels[i]) + " "
+		style := value
 		if values[i] == "—" {
-			parts[i] += label.Render(values[i])
-		} else {
-			parts[i] += value.Render(values[i])
+			style = label
 		}
+		pad := strings.Repeat(" ", max(0, kpiValueW-lipgloss.Width(values[i])))
+		parts[i] = label.Render(labels[i]) + " " + pad + style.Render(values[i])
 		if spark > 0 {
-			parts[i] += " " + line.Render(series{at, pts[i]}.spark(spark))
+			parts[i] += " " + line.Render(c.spark(series{at, pts[i]}, spark))
 		}
 	}
 	return lipgloss.NewStyle().MaxWidth(width).Render("  " + strings.Join(parts, "  "))

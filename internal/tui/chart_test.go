@@ -2,9 +2,11 @@ package tui
 
 import (
 	"math"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -166,7 +168,7 @@ func TestTimeBuckets(t *testing.T) {
 		}
 	}
 	// The same points as the columns of a series: the blank stretch shows.
-	if line := (series{at: at, pts: pts}).spark(4); line != "▄ █▆" {
+	if line := newChart(5*time.Second).spark(series{at: at, pts: pts}, 4); line != "▄ █▆" {
 		t.Errorf("series.spark(4) = %q, want %q", line, "▄ █▆")
 	}
 
@@ -180,7 +182,7 @@ func TestTimeBuckets(t *testing.T) {
 	})
 	t.Run("a short history leaves the left blank", func(t *testing.T) {
 		at := timesAt(end, -4*m, -3*m, -2*m, -m, 0)
-		if line := (series{at: at, pts: vals(1, 2, 3, 4, 5)}).spark(10); !strings.HasPrefix(line, "      ") || strings.HasSuffix(line, " ") {
+		if line := newChart(5*time.Second).spark(series{at: at, pts: vals(1, 2, 3, 4, 5)}, 10); !strings.HasPrefix(line, "      ") || strings.HasSuffix(line, " ") {
 			t.Errorf("5 minutes of history in a 10-minute window = %q, want its left half blank, its right drawn", line)
 		}
 	})
@@ -219,10 +221,10 @@ func TestTimeBuckets(t *testing.T) {
 		if got := byTime(timesAt(end, 0), vals(1), window, 0); len(got) != 0 {
 			t.Errorf("byTime at width 0 = %+v, want none", got)
 		}
-		if line := (series{}).spark(5); line != "     " {
+		if line := newChart(5*time.Second).spark(series{}, 5); line != "     " {
 			t.Errorf("an empty series = %q, want 5 spaces", line)
 		}
-		if line := (series{at: timesAt(end, 0), pts: vals(1)}).spark(0); line != "" {
+		if line := newChart(5*time.Second).spark(series{at: timesAt(end, 0), pts: vals(1)}, 0); line != "" {
 			t.Errorf("width 0 = %q, want nothing", line)
 		}
 	})
@@ -239,7 +241,7 @@ func TestKPILineFits(t *testing.T) {
 	}
 	for width := range 140 {
 		for _, stale := range []bool{false, true} {
-			line := kpiLine(width, k, at, stale)
+			line := newChart(5*time.Second).kpiLine(width, k, at, stale)
 			if w := lipgloss.Width(line); w > width {
 				t.Errorf("kpiLine(%d, stale %v) is %d wide: %q", width, stale, w, line)
 			}
@@ -248,7 +250,127 @@ func TestKPILineFits(t *testing.T) {
 			}
 		}
 	}
-	if line := kpiLine(100, k, at, false); !strings.Contains(line, "completed/s 1234.5") || !strings.Contains(line, "failed/min 99999.9") || !strings.Contains(line, "pending 1234567") {
-		t.Errorf("kpiLine = %q, want the values whole", line)
+	if line := newChart(5*time.Second).kpiLine(140, k, at, false); !strings.Contains(line, "completed/s  1234.5") || !strings.Contains(line, "failed/min 99999.9") || !strings.Contains(line, "pending 1234567") {
+		t.Errorf("kpiLine = %q, want the values whole, in fields 7 wide", line)
+	}
+}
+
+// TestSparklineNonFinite: a column whose sum overflows has no level to be: it
+// is no data, and draws no panic.
+func TestSparklineNonFinite(t *testing.T) {
+	huge := math.MaxFloat64
+	for _, tc := range []struct {
+		name  string
+		pts   []fleet.Point
+		width int
+		want  string
+	}{
+		{"a column that overflows", vals(huge, huge), 1, " "},
+		{"beside one that does not", vals(huge, huge, 1, 2), 2, " █"},
+		{"values near the limit that do not", vals(huge, huge/2), 2, "█▅"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sparkline(tc.pts, tc.width); got != tc.want {
+				t.Errorf("sparkline = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// everyInterval is a series of one snapshot each interval over the window up
+// to end, each up to jitter of an interval early or late (the newest on
+// time), with the value 1; those within the gap (offsets from end) missing.
+func everyInterval(end time.Time, interval time.Duration, jitter float64, gapFrom, gapTo time.Duration) series {
+	rng := rand.New(rand.NewPCG(1, 2))
+	var s series
+	for k := int(fleet.TrendWindow / interval); k >= 0; k-- {
+		off := time.Duration(k) * interval
+		if k > 0 {
+			off += time.Duration((rng.Float64()*2 - 1) * jitter * float64(interval))
+		}
+		if off >= fleet.TrendWindow {
+			off = fleet.TrendWindow
+		}
+		if off >= gapFrom && off < gapTo {
+			continue
+		}
+		s.at = append(s.at, end.Add(-off))
+		s.pts = append(s.pts, fleet.Point{V: 1})
+	}
+	return s
+}
+
+// TestSparklineLongIntervals: a slice of the window is at least two polls
+// long, whatever the interval, so jitter in the polls does not leave a hole
+// that reads as no data; only polls really missed do. The drawing is
+// right-aligned in its cell.
+func TestSparklineLongIntervals(t *testing.T) {
+	end := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	const width = 20
+	for _, tc := range []struct {
+		interval time.Duration
+		cols     int // slices of the window
+	}{
+		{time.Second, 20}, {5 * time.Second, 20}, {10 * time.Second, 20}, {20 * time.Second, 15},
+		{30 * time.Second, 10}, {45 * time.Second, 6}, {60 * time.Second, 5}, {120 * time.Second, 2}, {5 * time.Minute, 1}, {20 * time.Minute, 1},
+	} {
+		t.Run(tc.interval.String(), func(t *testing.T) {
+			c := newChart(tc.interval)
+			full := c.spark(everyInterval(end, tc.interval, 0.2, -1, -1), width)
+			if got, want := utf8.RuneCountInString(full), width; got != want {
+				t.Fatalf("spark is %d columns, want the cell's %d: %q", got, want, full)
+			}
+			if want := strings.Repeat(" ", width-tc.cols) + strings.Repeat("█", tc.cols); full != want {
+				t.Errorf("one poll each interval, up to 20%% early or late: %q, want %q", full, want)
+			}
+
+			// Polls missed over a stretch of 3 slices leave a space.
+			span := fleet.TrendWindow / time.Duration(tc.cols)
+			if tc.cols >= 4 {
+				gapped := c.spark(everyInterval(end, tc.interval, 0.2, 2*span, 5*span), width)
+				if drawn := strings.TrimLeft(gapped, " "); !strings.Contains(drawn, " ") {
+					t.Errorf("polls missed for 3 slices: %q, want a space", gapped)
+				}
+			}
+		})
+	}
+}
+
+// TestChartLevelsPickedOnce: a chart takes the levels it draws with when it
+// is made, so that a build of many sparklines asks the terminal once.
+func TestChartLevelsPickedOnce(t *testing.T) {
+	t.Setenv("RUNEWIDTH_EASTASIAN", "1")
+	c := newChart(5 * time.Second)
+	t.Setenv("RUNEWIDTH_EASTASIAN", "0")
+	s := series{at: timesAt(time.Now(), 0), pts: vals(3)}
+	if got := c.spark(s, 1); got != "#" {
+		t.Errorf("a chart made where blocks are wide draws %q, want #", got)
+	}
+	if got := newChart(5*time.Second).spark(s, 1); got != "█" {
+		t.Errorf("a chart made where they are not draws %q, want █", got)
+	}
+}
+
+// TestKPILineWidthIsSteady: the sparklines are sized from the room the
+// values can take, not the room they take now: the line does not change
+// width, nor its sparklines, when the values turn to — and back.
+func TestKPILineWidthIsSteady(t *testing.T) {
+	end := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	at := timesAt(end, -2*time.Minute, -time.Minute, 0)
+	for _, k := range []fleet.KPIView{
+		{CompletedPerSec: 3, FailedPerMin: 0, PendingMax: 7, Completed: vals(1, 2, 3), Failed: vals(0, 0, 0), Pending: vals(5, 6, 7)},
+		{CompletedPerSec: 1234.5, FailedPerMin: 99.9, PendingMax: 1234567, Completed: vals(1, 2, 3), Failed: vals(0, 0, 0), Pending: vals(5, 6, 7)},
+		{Completed: vals(1, gap, gap), Failed: vals(gap, gap, gap), Pending: vals(5, 6, 7)}, // no current rate
+	} {
+		for width := 40; width < 130; width++ {
+			c := newChart(5 * time.Second)
+			fresh, stale := c.kpiLine(width, k, at, false), c.kpiLine(width, k, at, true)
+			if lipgloss.Width(fresh) != lipgloss.Width(stale) {
+				t.Fatalf("%d columns: the line is %d wide with values, %d without:\n%s\n%s", width, lipgloss.Width(fresh), lipgloss.Width(stale), fresh, stale)
+			}
+			if strings.ContainsAny(fresh, "▁▂▃▄▅▆▇█") != strings.ContainsAny(stale, "▁▂▃▄▅▆▇█") {
+				t.Fatalf("%d columns: sparklines drawn %v with values, %v without", width, strings.ContainsAny(fresh, "▁▂▃▄▅▆▇█"), strings.ContainsAny(stale, "▁▂▃▄▅▆▇█"))
+			}
+		}
 	}
 }

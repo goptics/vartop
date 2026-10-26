@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -15,6 +16,7 @@ import (
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/store"
 )
 
 // multiConfig is one server, "multi", over the given endpoints, polled every
@@ -616,7 +618,7 @@ func TestTrendHasNoRates(t *testing.T) {
 		t.Errorf("rows = %v, want %v", got, want)
 	}
 	// Nor has the KPI line a rate to give: — as on the web pages, not 0.0.
-	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s — ") || !strings.Contains(line, "  failed/min — ") || !strings.Contains(line, "  pending 7 ") {
+	if line := kpiLineOf(m); !regexp.MustCompile(`^  completed/s {7}— .*  failed/min {7}— .*  pending {7}7 `).MatchString(line) {
 		t.Errorf("KPI line = %q, want — for the rates it has none of, and pending 7", line)
 	}
 }
@@ -642,7 +644,7 @@ func TestKPILineOfDownUnit(t *testing.T) {
 		t.Fatalf("rows of a unit that answered nothing: %v", got)
 	}
 	line := kpiLineOf(m)
-	if !regexp.MustCompile(`^  completed/s — [▁-█ ]{12}  failed/min — [▁-█ ]{12}  pending — [▁-█ ]{12}$`).MatchString(line) {
+	if !regexp.MustCompile(`^  completed/s {7}— [▁-█ ]{12}  failed/min {7}— [▁-█ ]{12}  pending {7}— [▁-█ ]{12}$`).MatchString(line) {
 		t.Fatalf("KPI line = %q, want — for each value, then 12 columns each", line)
 	}
 	if !strings.ContainsAny(line, "▁▂▃▄▅▆▇█") {
@@ -653,8 +655,30 @@ func TestKPILineOfDownUnit(t *testing.T) {
 	m.selectedLabel, m.showNodeColumn = "", true
 	m.dashboardScreen().rebuildTable(m)
 	syncNow(t, m)
-	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s ") || strings.HasPrefix(line, "  completed/s — ") {
+	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s ") || regexp.MustCompile(`^  completed/s {7}—`).MatchString(line) {
 		t.Errorf("merged KPI line = %q, want a current completed/s", line)
+	}
+}
+
+// TestTrendOfLongInterval: where a poll is a minute a slice of the window is
+// two, so one poll each leaves no hole: the Trend is 5 slices, at the cell's
+// right.
+func TestTrendOfLongInterval(t *testing.T) {
+	cfg := multiConfig("http://a.invalid")
+	cfg.Servers["multi"].Interval = 60
+	f := newFixture(t, cfg)
+	f.claim()
+	end := time.Now().Round(time.Millisecond)
+	for j := range 11 { // 10 minutes of polls, each up to 20% early or late
+		at := end.Add(-time.Duration(10-j) * time.Minute)
+		if j < 10 {
+			at = at.Add(time.Duration(j%3-1) * 12 * time.Second)
+		}
+		f.write("multi", snapAt(at, rated(at, "instance-1", "http://a.invalid", 4, 1)))
+	}
+	m := f.model("multi")
+	if got, want := trendCells(t, m), []string{strings.Repeat(" ", 15) + "█████"}; !slices.Equal(got, want) {
+		t.Errorf("Trend = %q, want %q", got, want)
 	}
 }
 
@@ -776,7 +800,7 @@ func TestKPILine(t *testing.T) {
 
 	// 12 columns of 50s: the 5 minutes of history fill the right 6.
 	const blank = "      "
-	re := regexp.MustCompile(`^  completed/s 25\.0 ([▁-█ ]{12})  failed/min 0\.0 ([▁-█ ]{12})  pending 7 ([▁-█ ]{12})$`)
+	re := regexp.MustCompile(`^  completed/s {4}25\.0 ([▁-█ ]{12})  failed/min {5}0\.0 ([▁-█ ]{12})  pending {7}7 ([▁-█ ]{12})$`)
 	line := kpiLineOf(m)
 	sub := re.FindStringSubmatch(line)
 	if sub == nil {
@@ -806,14 +830,14 @@ func TestKPILine(t *testing.T) {
 	}
 
 	// Its sparklines take a third each of what the text leaves, to 12 and
-	// from 4: the text of this line is 48 columns with the sparklines' gaps,
-	// 45 without them.
-	for _, tc := range []struct{ width, spark int }{{47, 0}, {59, 0}, {60, 4}, {63, 5}, {84, 12}, {200, 12}} {
+	// from 4: the text of this line, with the values' fields 7 wide, is 61
+	// columns with the sparklines' gaps, 58 without them.
+	for _, tc := range []struct{ width, spark int }{{60, 0}, {72, 0}, {73, 4}, {76, 5}, {97, 12}, {200, 12}} {
 		deliver(m, tea.WindowSizeMsg{Width: tc.width, Height: 40})
 		line := kpiLineOf(m)
-		want := 45
+		want := 58
 		if tc.spark > 0 {
-			want = 48 + 3*tc.spark
+			want = 61 + 3*tc.spark
 		}
 		if got := utf8.RuneCountInString(line); got != want {
 			t.Errorf("at %d columns the KPI line is %d wide, want %d: %q", tc.width, got, want, line)
@@ -831,7 +855,7 @@ func TestKPILineOfOneUnit(t *testing.T) {
 	m.selectedLabel, m.showNodeColumn = "instance-2", false
 	m.dashboardScreen().rebuildTable(m)
 	syncNow(t, m)
-	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s 5.0 ") || !strings.Contains(line, "  pending 3 ") {
+	if line := kpiLineOf(m); !regexp.MustCompile(`^  completed/s {5}5\.0 .*  pending {7}3 `).MatchString(line) {
 		t.Errorf("instance-2's KPI line = %q, want 5.0 completed/s and 3 pending", line)
 	}
 }
@@ -842,7 +866,7 @@ func TestKPILineStale(t *testing.T) {
 	f := trendFixture(t, time.Now().Add(-time.Minute))
 	m := f.model("multi")
 	line := kpiLineOf(m)
-	if !regexp.MustCompile(`^  completed/s — [▁-█ ]{12}  failed/min — [▁-█ ]{12}  pending — [▁-█ ]{12}$`).MatchString(line) {
+	if !regexp.MustCompile(`^  completed/s {7}— [▁-█ ]{12}  failed/min {7}— [▁-█ ]{12}  pending {7}— [▁-█ ]{12}$`).MatchString(line) {
 		t.Errorf("stale KPI line = %q, want — for each value and the sparklines drawn", line)
 	}
 	if !strings.HasSuffix(line, "██████") {
@@ -901,44 +925,254 @@ func TestResizeKeepsSelectionAcrossTrend(t *testing.T) {
 	}
 }
 
-// TestTrendsBuiltPerSnapshot: the sparklines' series are built when a
-// snapshot comes, not at every sync, resize or View: a sync of the same
-// snapshot, a resize and a frame draw the series already built.
-func TestTrendsBuiltPerSnapshot(t *testing.T) {
+// countTrends makes m build its series through a counter, and returns it.
+func countTrends(m *Model) *atomic.Int64 {
+	var n atomic.Int64
+	build := m.buildTrends
+	m.buildTrends = func(snaps []*fleet.Snapshot, label string, interval time.Duration, noun fleet.Noun) trendSet {
+		n.Add(1)
+		return build(snaps, label, interval, noun)
+	}
+	return &n
+}
+
+// TestTrendsBuiltInTheCommand: the sparklines' series are built by the sync
+// command, off the UI goroutine, once for each snapshot and view — not by
+// Update, nor by a View, a resize or a sync that brings no snapshot.
+func TestTrendsBuiltInTheCommand(t *testing.T) {
 	end := time.Now()
 	f := trendFixture(t, end)
 	m := f.model("multi")
+	built := countTrends(m)
 	d := m.dashboardScreen()
-	built := d.built
-	if built == 0 {
-		t.Fatal("no series built")
-	}
 
+	// Nothing new: the command finds the series it has, and Update, View and
+	// a resize build none.
 	for range 3 {
-		_ = m.View()
 		syncNow(t, m)
+		_ = m.View()
 	}
 	for _, width := range []int{92, 106, 160} {
 		deliver(m, tea.WindowSizeMsg{Width: width, Height: 40})
 		_ = m.View()
 	}
-	m.selectedLabel, m.showNodeColumn = "instance-1", false
-	d.rebuildTable(m)
-	m.selectedLabel, m.showNodeColumn = "", true
-	d.rebuildTable(m)
-	if d.built != built+2 { // instance-1's series, then the merged ones again
-		t.Errorf("series built %d times, want %d: once for each of the two views", d.built, built+2)
+	if n := built.Load(); n != 0 {
+		t.Fatalf("series built %d times with no new snapshot, want none", n)
 	}
 
-	// A new snapshot is charted: instance-1 is at 40 a second now.
+	// A new snapshot: making the command builds nothing, running it does,
+	// and Update takes the series in without building.
 	at := end.Add(15 * time.Second).Round(time.Millisecond)
 	f.write("multi", snapAt(at, rated(at, "instance-1", "http://a.invalid", 40, 7), rated(at, "instance-2", "http://b.invalid", 5, 3)))
-	built = d.built
-	syncNow(t, m)
-	if d.built != built+1 {
-		t.Errorf("series built %d times after a new snapshot, want %d", d.built, built+1)
+	cmd := m.syncCmd(m.feed, m.gen)
+	if n := built.Load(); n != 0 {
+		t.Fatalf("making the sync command built the series (%d)", n)
 	}
-	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s 45.0 ") {
+	msg := cmd()
+	if n := built.Load(); n != 1 {
+		t.Fatalf("running the sync command built the series %d times, want 1", n)
+	}
+	deliver(m, msg)
+	_ = m.View()
+	if n := built.Load(); n != 1 {
+		t.Errorf("series built %d times by Update and View, want still 1", n)
+	}
+	if line := kpiLineOf(m); !regexp.MustCompile(`^  completed/s {4}45\.0 `).MatchString(line) {
 		t.Errorf("KPI line = %q, want the new snapshot's 45.0 completed/s", line)
+	}
+	if d.trends.key.latest != m.latest() {
+		t.Error("the series installed are not of the newest snapshot")
+	}
+
+	// Another view of the server is another build, by the command: the rows
+	// show at once, the Trend and KPI sparklines blank until it comes.
+	m.selectedLabel, m.showNodeColumn = "instance-1", false
+	cmd = m.show("multi")
+	if n := built.Load(); n != 1 {
+		t.Errorf("show built the series (%d builds)", n)
+	}
+	if cells := trendCells(t, m); len(cells) != 1 || strings.TrimSpace(cells[0]) != "" {
+		t.Errorf("Trend cells before the series arrive = %q, want blank", cells)
+	}
+	if line := kpiLineOf(m); strings.ContainsAny(line, "▁▂▃▄▅▆▇█") {
+		t.Errorf("KPI line before the series arrive = %q, want its sparklines blank", line)
+	}
+	deliver(m, cmd())
+	if n := built.Load(); n != 2 {
+		t.Errorf("series built %d times, want 2", n)
+	}
+	if cells := trendCells(t, m); len(cells) != 1 || strings.TrimSpace(cells[0]) == "" {
+		t.Errorf("Trend cells after = %q, want the unit's", cells)
+	}
+}
+
+// TestTrendsOfAnotherViewAreIgnored: series that are not of what the model
+// shows now — another feed, another view, an older snapshot — are not taken
+// in, though their sync is: they would draw another server's history.
+func TestTrendsOfAnotherViewAreIgnored(t *testing.T) {
+	end := time.Now()
+	f := trendFixture(t, end)
+	m := f.model("multi")
+	d := m.dashboardScreen()
+	want := trendCells(t, m)
+	installed := d.trends.key
+
+	at := end.Add(15 * time.Second).Round(time.Millisecond)
+	older := m.latest()
+	f.write("multi", snapAt(at, rated(at, "instance-1", "http://a.invalid", 40, 7), rated(at, "instance-2", "http://b.invalid", 0, 3)))
+	good := m.syncCmd(m.feed, m.gen)().(syncedMsg)
+	otherFeed := store.NewFeed(f.dir, "multi", 5*time.Second)
+	t.Cleanup(func() { _ = otherFeed.Close() })
+
+	for _, tc := range []struct {
+		name   string
+		change func(*trendsKey)
+	}{
+		{"another feed", func(k *trendsKey) { k.feed = otherFeed }},
+		{"another view", func(k *trendsKey) { k.label = "instance-1" }},
+		{"an older snapshot", func(k *trendsKey) { k.latest = older }},
+		{"no feed", func(k *trendsKey) { k.feed = nil }},
+	} {
+		msg := good
+		tc.change(&msg.trends.key)
+		deliver(m, msg)
+		if d.trends.key != installed {
+			t.Errorf("%s: the series were taken in", tc.name)
+		}
+		if got := trendCells(t, m); !slices.Equal(got, want) {
+			t.Errorf("%s: Trend cells changed to %q", tc.name, got)
+		}
+	}
+
+	deliver(m, good)
+	if d.trends.key == installed || d.trends.key.latest != m.latest() {
+		t.Error("the series of the newest snapshot were not taken in")
+	}
+	if got := trendCells(t, m); slices.Equal(got, want) {
+		t.Error("Trend cells did not change with the newest snapshot")
+	}
+}
+
+// TestSwitchingServerNeverShowsOldTrends: after a switch the new server's
+// rows show with a blank Trend until its series come — the old server's are
+// not drawn beside the new one's rows — and then its own.
+func TestSwitchingServerNeverShowsOldTrends(t *testing.T) {
+	f := newFixture(t, &config.Config{DefaultServer: "a", Servers: map[string]*config.Server{
+		"a": {Endpoints: []string{"http://a.invalid"}, Interval: 5},
+		"b": {Endpoints: []string{"http://b.invalid"}, Interval: 5},
+	}})
+	f.claim()
+	end := time.Now().Round(time.Millisecond)
+	for j := range 21 {
+		at := end.Add(-time.Duration(20-j) * 15 * time.Second)
+		f.write("a", snapAt(at, rated(at, "instance-1", "http://a.invalid", float64(j), 1)))
+		f.write("b", snapAt(at, rated(at, "instance-1", "http://b.invalid", 5, 1)))
+	}
+	aTrend := strings.Repeat(" ", 10) + "▁▂▃▃▄▅▆▆▇█"
+	bTrend := strings.Repeat(" ", 10) + strings.Repeat("█", 10)
+	m := f.model("a")
+	if got := trendCells(t, m); !slices.Equal(got, []string{aTrend}) {
+		t.Fatalf("a's Trend = %q, want %q", got, aTrend)
+	}
+	deliver(m, m.show("b")()) // b is shown once: its feed holds its snapshots from here on
+	if got := trendCells(t, m); !slices.Equal(got, []string{bTrend}) {
+		t.Fatalf("b's Trend = %q, want %q", got, bTrend)
+	}
+
+	// Back to a, whose rows are there at once: the series held are b's.
+	late := m.syncCmd(m.feed, m.gen)() // a sync of b under way when the switch comes
+	cmd := m.show("a")
+	if got := rowsOf(m); len(got) != 1 {
+		t.Fatalf("a's rows at once = %v, want its one", got)
+	}
+	if got := trendCells(t, m); strings.TrimSpace(got[0]) != "" {
+		t.Fatalf("right after the switch, Trend = %q, want blank: b's is not a's", got)
+	}
+	if line := kpiLineOf(m); strings.ContainsAny(line, "▁▂▃▄▅▆▇█") {
+		t.Fatalf("right after the switch the KPI line has b's sparklines: %q", line)
+	}
+	deliver(m, late)
+	if got := trendCells(t, m); strings.TrimSpace(got[0]) != "" {
+		t.Fatalf("a late sync of b drew its Trend on a: %q", got)
+	}
+
+	deliver(m, cmd())
+	if got := trendCells(t, m); !slices.Equal(got, []string{aTrend}) {
+		t.Errorf("a's Trend = %q, want %q", got, aTrend)
+	}
+}
+
+// TestSwitchClosesActionMenu: the action menu is for the row it was opened
+// on; a switch of server closes it, so that p, r and s do not act on a unit
+// of another server that has the same label and worker.
+func TestSwitchClosesActionMenu(t *testing.T) {
+	podA, podB := newFakePod(t), newFakePod(t)
+	f := newFixture(t, &config.Config{DefaultServer: "a", Servers: map[string]*config.Server{
+		"a": {Endpoints: []string{podA.url()}, Interval: 5, Token: "tok"},
+		"b": {Endpoints: []string{podB.url()}, Interval: 5, Token: "tok"},
+	}})
+	f.claim()
+	orders := func() map[string]*fleet.Sample { return map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)} }
+	f.write("a", fresh(unit("instance-1", podA.url(), orders())))
+	f.write("b", fresh(unit("instance-1", podB.url(), orders())))
+
+	m := f.model("a")
+	deliver(m, m.show("b")()) // b's feed is loaded: its rows are there at once when it is shown again
+	deliver(m, m.show("a")())
+	press(m, runeKey('a'))
+	d := m.dashboardScreen()
+	if !d.inActionSelection || d.selectedLabel() != "instance-1" || d.selectedWorkerName() != "orders" {
+		t.Fatalf("menu open %v on %q %q, want open on instance-1 orders", d.inActionSelection, d.selectedLabel(), d.selectedWorkerName())
+	}
+
+	// Switch to b, as the switcher does, with the menu open.
+	openSwitcher(t, m)
+	selectSwitcherItem(t, m, serverItem("b"))
+	press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.key != "b" {
+		t.Fatalf("server = %q, want b", m.key)
+	}
+	if got := rowsOf(m); len(got) != 1 || !strings.HasPrefix(got[0], "orders|instance-1|") {
+		t.Fatalf("b's rows at once = %v, want instance-1 orders", got)
+	}
+	if d.inActionSelection {
+		t.Fatal("the action menu is still open on b")
+	}
+	if cmd := press(m, runeKey('p')); cmd != nil {
+		runAll(m, cmd)
+	}
+	if podA.total() != 0 || podB.total() != 0 {
+		t.Errorf("requests after p: a %v, b %v, want none", podA.seen(), podB.seen())
+	}
+}
+
+// BenchmarkNewTrends is the build of the sparklines' series, which the sync
+// command runs off the UI goroutine, for a fleet of 50 units with 10 workers
+// each, an hour of history.
+func BenchmarkNewTrends(b *testing.B) {
+	for _, interval := range []time.Duration{5 * time.Second, time.Second} {
+		b.Run(interval.String(), func(b *testing.B) {
+			end := time.Now()
+			var snaps []*fleet.Snapshot
+			for j := range int(time.Hour / interval) {
+				at := end.Add(-time.Duration(int(time.Hour/interval)-1-j) * interval)
+				pods := make([]fleet.PodSnapshot, 50)
+				for u := range pods {
+					workers := make(map[string]*fleet.Sample)
+					for w := range 10 {
+						s := smp("Running", 4, 1, 3, 2)
+						s.At, s.RateOK, s.CompletedRate = at, true, float64(j%7+w)
+						workers[fmt.Sprintf("worker-%d", w)] = s
+					}
+					pods[u] = unit(fmt.Sprintf("pod-%d", u), fmt.Sprintf("http://pod-%d", u), workers)
+				}
+				snaps = append(snaps, snapAt(at, pods...))
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				newTrends(snaps, "", interval, fleet.Noun{One: "pod", Many: "pods"})
+			}
+		})
 	}
 }

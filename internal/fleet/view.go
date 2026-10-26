@@ -467,6 +467,20 @@ func newest(snaps []*Snapshot, span time.Duration) []*Snapshot {
 // healthy pod lacking the worker is not expected. With no contributing pod the
 // point is a gap.
 func WorkerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n Noun) []Point {
+	return workerRates(snaps, pod, name, pick, &n)
+}
+
+// CompletedRates is the completed/s of one worker over the trend window up to
+// the newest of snaps, the points of the Spark of its row in BuildDashboard
+// (merged, or of the pod labelled pod), without their tooltips: the Title of
+// a point costs a format call, and a UI that draws no tooltips wants a series
+// for every row it shows.
+func CompletedRates(snaps []*Snapshot, pod, name string) []Point {
+	return workerRates(newest(snaps, TrendWindow), pod, name, completedRate, nil)
+}
+
+// workerRates is WorkerRates; with n nil the points have no Title.
+func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n *Noun) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
@@ -490,11 +504,16 @@ func WorkerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 			contributing++
 			sum += pick(sm)
 		}
-		if contributing == 0 {
+		switch {
+		case n == nil && contributing == 0:
+			out[i] = Point{Gap: true}
+		case n == nil:
+			out[i] = Point{V: sum, Partial: contributing < expected}
+		case contributing == 0:
 			out[i] = noDataPoint(s)
-			continue
+		default:
+			out[i] = ratePoint(s, sum, contributing, expected, 1, "/s", *n)
 		}
-		out[i] = ratePoint(s, sum, contributing, expected, 1, "/s", n)
 	}
 	return out
 }
