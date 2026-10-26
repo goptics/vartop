@@ -151,9 +151,13 @@ func TestSwitcherHealthFromStore(t *testing.T) {
 		unit("instance-2", "http://10.0.0.2:8080", map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}),
 		unit("instance-3", "http://10.0.0.3:8080", map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}),
 	))
+	at := m.switcher.switcher.Index()
 	deliver(m, m.switcherCmd()())
 	if got := titles(); !strings.Contains(got, "multi (3 instances, 3 healthy)") {
 		t.Errorf("the switcher kept old health:\n%s", got)
+	}
+	if got := m.switcher.switcher.Index(); got != at {
+		t.Errorf("the cursor moved from %d to %d when the switcher read the store again", at, got)
 	}
 
 	// Selecting a unit shows it, on its server.

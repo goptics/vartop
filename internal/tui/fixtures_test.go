@@ -319,6 +319,7 @@ type fakePod struct {
 
 	mu          sync.Mutex
 	requests    []string // "METHOD /path"
+	auth        []string // each request's Authorization header, same order
 	failActions bool     // PATCH requests answer 409
 }
 
@@ -333,6 +334,7 @@ func newFakePod(t *testing.T) *fakePod {
 func (p *fakePod) handle(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	p.requests = append(p.requests, r.Method+" "+r.URL.Path)
+	p.auth = append(p.auth, r.Header.Get("Authorization"))
 	failActions := p.failActions
 	p.mu.Unlock()
 
@@ -367,6 +369,13 @@ func (p *fakePod) count(req string) int {
 }
 
 func (p *fakePod) total() int { return len(p.seen()) }
+
+// auths is the Authorization header of each request received.
+func (p *fakePod) auths() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.auth...)
+}
 
 func (p *fakePod) rejectActions() {
 	p.mu.Lock()

@@ -229,6 +229,9 @@ func TestDirectActionPokes(t *testing.T) {
 	if pod.count(want) != 1 || other.total() != 0 {
 		t.Fatalf("pause routed wrong: pod=%v other=%v", pod.seen(), other.seen())
 	}
+	if got := pod.auths(); len(got) != 1 || got[0] != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want the server's token", got)
+	}
 	if n := f.pokes("multi"); n != 1 {
 		t.Fatalf("pokes = %d, want 1", n)
 	}
