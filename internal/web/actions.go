@@ -57,19 +57,16 @@ type noChange string
 
 func (e noChange) Error() string { return string(e) }
 
-// actScope is what an action reaches: the direct units, whose clients are
-// each sent the action, sorted by endpoint; the balanced units, reached
-// through the balancers' clients, which latest counts behind instances
-// behind; the dead ones, balancer endpoints no instance answered; and the
-// unrefreshed ones, clients latest has no unit for. Dead and unrefreshed
-// units are sent nothing. Units are sorted by key; place says where the
-// pages list them.
+// actScope is what an action reaches, as latest shows the server. Clients
+// are sorted by endpoint; units are in latest's order.
 type actScope struct {
-	direct, unrefreshed []*api.Client
-	balanced, dead      []PodSnapshot
-	balancers           []*api.Client
-	behind              int
-	place               map[string]int // unit key → its index in latest.Pods
+	direct      []*api.Client  // the direct units' clients, each sent the action
+	unrefreshed []*api.Client  // clients latest has no unit for, sent nothing
+	balanced    []PodSnapshot  // units of instances behind a balancer, reached through balancers
+	dead        []PodSnapshot  // units of balancer endpoints no instance answered through, sent nothing
+	balancers   []*api.Client  // the balancer endpoints' clients
+	behind      int            // how many instances latest counts behind balancers, in all
+	place       map[string]int // unit key → its index in latest.Pods, the order the pages list units in
 }
 
 // viaBalancer reports whether sc holds a unit behind a load balancer.
