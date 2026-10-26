@@ -939,3 +939,26 @@ func TestFilterFollowsLabel(t *testing.T) {
 		t.Error("BuildDetail(instance-2) finds no orders")
 	}
 }
+
+// TestStale: a server's newest snapshot is stale once two polls were
+// missed and 2s more passed, not a moment before; no snapshot is not stale.
+func TestStale(t *testing.T) {
+	const interval = 5 * time.Second
+	latest := &Snapshot{At: viewT0}
+	limit := viewT0.Add(2*interval + 2*time.Second)
+	for _, c := range []struct {
+		latest *Snapshot
+		now    time.Time
+		want   bool
+	}{
+		{latest, viewT0, false},
+		{latest, limit, false},
+		{latest, limit.Add(time.Millisecond), true},
+		{latest, limit.Add(time.Hour), true},
+		{nil, limit.Add(time.Hour), false},
+	} {
+		if got := Stale(c.latest, interval, c.now); got != c.want {
+			t.Errorf("Stale(at %v, %v) = %v, want %v", c.latest != nil, c.now.Sub(viewT0), got, c.want)
+		}
+	}
+}

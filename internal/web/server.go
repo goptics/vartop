@@ -228,17 +228,6 @@ func goneLabelMsg(label string, n fleet.Noun) string {
 	return n.Cap() + " " + label + " is no longer reported — reload"
 }
 
-// staleAfter is how old the newest snapshot of a server polled every
-// interval may get before the pages call the server stale: two polls
-// missed, and 2s of slack.
-func staleAfter(interval time.Duration) time.Duration { return 2*interval + 2*time.Second }
-
-// isStale reports whether latest, of a server polled every interval, is
-// stale at now.
-func isStale(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
-	return latest != nil && now.Sub(latest.At) > staleAfter(interval)
-}
-
 func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p, snaps, ok := h.page(r)
 	p.Title = pageTitle("vartop", p.Server)
@@ -351,7 +340,7 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 			p.Banner = p.Server + ": " + msg
 		}
 		return p, nil, false
-	case isStale(latest, interval, now):
+	case fleet.Stale(latest, interval, now):
 		p.Stale, p.DaemonDown = h.staleMsg(p.Server, latest, now)
 	case latest.Err != "":
 		p.Banner = p.Server + ": " + latest.Err

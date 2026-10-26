@@ -73,7 +73,7 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		conflict(w, "cannot read the history of "+t.key+": "+err.Error())
 		return nil, false
 	}
-	if latest := t.feed.Latest(); latest == nil || isStale(latest, interval, time.Now()) {
+	if latest := t.feed.Latest(); latest == nil || fleet.Stale(latest, interval, time.Now()) {
 		h.refresh(r.Context(), t)
 	}
 	snaps := t.feed.Snapshots() // read once: the label is checked in the snapshot acted on
@@ -82,7 +82,7 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	case latest == nil:
 		conflict(w, waitingMsg(t.key))
 		return nil, false
-	case isStale(latest, interval, now):
+	case fleet.Stale(latest, interval, now):
 		msg, _ := h.staleMsg(t.key, latest, now)
 		conflict(w, msg)
 		return nil, false
@@ -357,7 +357,7 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 	}
 	snaps := t.feed.Snapshots()
 	var stale string
-	if latest, now := latestOf(snaps), time.Now(); isStale(latest, t.srv.PollInterval(), now) {
+	if latest, now := latestOf(snaps), time.Now(); fleet.Stale(latest, t.srv.PollInterval(), now) {
 		stale, _ = h.staleMsg(t.key, latest, now)
 	}
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}

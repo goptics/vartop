@@ -151,6 +151,14 @@ func Health(latest *Snapshot) HealthView {
 	return h
 }
 
+// Stale reports whether latest, the newest snapshot of a server polled
+// every interval, is stale at now: two polls missed, and 2s of slack. With
+// no snapshot (nil) there is nothing old to show: it is not stale. Both
+// UIs call a server stale by this one rule.
+func Stale(latest *Snapshot, interval time.Duration, now time.Time) bool {
+	return latest != nil && now.Sub(latest.At) > 2*interval+2*time.Second
+}
+
 // BalancerNote says how many instances answered behind each balancer endpoint
 // in the newest poll, endpoints sorted, and is "" when none did. It counts
 // varmq instances, so its noun does not follow the server's.
