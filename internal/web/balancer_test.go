@@ -68,9 +68,11 @@ func unitKeys(s *Snapshot) []string {
 	return keys
 }
 
-// hasKeys is a pollUntil condition: the snapshot's units are exactly keys.
+// hasKeys is a pollUntil condition: the snapshot's units are exactly keys,
+// in any order (units are listed by number, which follows discovery).
 func hasKeys(keys ...string) func(*Snapshot) bool {
-	return func(s *Snapshot) bool { return slices.Equal(unitKeys(s), keys) }
+	keys = slices.Sorted(slices.Values(keys))
+	return func(s *Snapshot) bool { return slices.Equal(slices.Sorted(slices.Values(unitKeys(s))), keys) }
 }
 
 func TestAttemptCap(t *testing.T) {
@@ -357,7 +359,7 @@ func TestPollBalancerMissedInstance(t *testing.T) {
 	}
 	s := pollAt(context.Background(), pool, tr, time.Now().Add(5*time.Second))
 
-	if keys := unitKeys(s); !slices.Equal(keys, []string{"#a", "#b", "#c"}) {
+	if keys := unitKeys(s); !hasKeys("#a", "#b", "#c")(s) {
 		t.Fatalf("units = %v, want #c kept while in the window", keys)
 	}
 	c := podByEndpoint(t, s, "#c")
@@ -389,7 +391,7 @@ func TestPollBalancerForgetsInstance(t *testing.T) {
 	// The window is a minute: c was last seen over a minute ago; a and b 40s ago.
 	s := pollAt(ctx, pool, tr, start.Add(70*time.Second))
 
-	if keys := unitKeys(s); !slices.Equal(keys, []string{"#a", "#b"}) {
+	if keys := unitKeys(s); !hasKeys("#a", "#b")(s) {
 		t.Errorf("units = %v, want #c forgotten past the window", keys)
 	}
 }
@@ -440,7 +442,7 @@ func TestPollDedupesInstanceAcrossEndpoints(t *testing.T) {
 
 		for range 3 {
 			s := pollOnce(context.Background(), pool, tr)
-			if keys := unitKeys(s); !slices.Equal(keys, []string{"#b", srvs[0].URL}) {
+			if keys := unitKeys(s); !hasKeys("#b", srvs[0].URL)(s) {
 				t.Fatalf("units = %v, want #b and a's own address, never #a", keys)
 			}
 			if a := podByEndpoint(t, s, srvs[0].URL); a.Balanced || a.Instance != "a" || a.Err != "" {
@@ -471,7 +473,7 @@ func TestPollBalancerIgnoresAnswersWithoutInstance(t *testing.T) {
 
 	for range 3 {
 		s := pollOnce(context.Background(), pool, tr)
-		if keys := unitKeys(s); !slices.Equal(keys, []string{"#a", "#b"}) {
+		if keys := unitKeys(s); !hasKeys("#a", "#b")(s) {
 			t.Fatalf("units = %v, want #a and #b", keys)
 		}
 		for _, p := range s.Pods {
@@ -609,7 +611,7 @@ func TestPollSlowDirectDoesNotStarveBalancer(t *testing.T) {
 		s := pollOnce(ctx, pool, tr)
 		cancel()
 
-		if keys := unitKeys(s); !slices.Equal(keys, []string{"#a", "#b", d.URL}) {
+		if keys := unitKeys(s); !hasKeys("#a", "#b", d.URL)(s) {
 			t.Fatalf("tick %d: units = %v, want #a, #b and d", tick, keys)
 		}
 		if p := podByEndpoint(t, s, d.URL); p.Err == "" {
@@ -635,7 +637,7 @@ func TestPollDirectUnitWithoutReplyKeepsItsInstance(t *testing.T) {
 	own.Close()
 	for range 3 {
 		s := pollOnce(context.Background(), pool, tr)
-		if keys := unitKeys(s); !slices.Equal(keys, []string{"#b", own.URL}) {
+		if keys := unitKeys(s); !hasKeys("#b", own.URL)(s) {
 			t.Fatalf("units = %v, want #b and a's own address, never #a", keys)
 		}
 		if a := podByEndpoint(t, s, own.URL); a.Err == "" || a.Instance != "a" {
@@ -955,7 +957,7 @@ func TestBalancerEndpointDown(t *testing.T) {
 		s := pollOnce(context.Background(), pool, tr)
 
 		want := dialErr(t, lb.URL)
-		if keys := unitKeys(s); !slices.Equal(keys, []string{"#a", "#b"}) {
+		if keys := unitKeys(s); !hasKeys("#a", "#b")(s) {
 			t.Fatalf("units = %v, want the known #a and #b", keys)
 		}
 		for _, p := range s.Pods {
