@@ -39,10 +39,7 @@ func (s *launchdService) Installed() bool {
 // Install unloads the agent when it is loaded, so that the new file is
 // read, and loads it: RunAtLoad starts it.
 func (s *launchdService) Install(exe string, env map[string]string) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(s.path, []byte(launchdPlist(exe, env)), 0o644); err != nil {
+	if err := writeServiceFile(s.path, launchdPlist(exe, env)); err != nil {
 		return err
 	}
 	_ = s.run("launchctl", "bootout", s.target()) // fails when it is not loaded
@@ -57,5 +54,9 @@ func (s *launchdService) Uninstall() error {
 	return nil
 }
 
-func (s *launchdService) Start() error   { return s.run("launchctl", "kickstart", s.target()) }
-func (s *launchdService) Restart() error { return s.run("launchctl", "kickstart", "-k", s.target()) }
+// Stop unloads the agent, until the next login or Install: launchd then
+// neither runs nor restarts it. It is no error when it is not loaded.
+func (s *launchdService) Stop() error {
+	_ = s.run("launchctl", "bootout", s.target()) // fails when it is not loaded
+	return nil
+}

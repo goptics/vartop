@@ -6,6 +6,9 @@ ExecStart="/opt/vartop dir/vartop" daemon run
 Environment="HOME=/home/u"
 Environment="KUBECONFIG=/home/u/.kube/a \"b\"%%c$d<e>&f"
 Environment="PATH=/opt/my tools/bin:/usr/bin"
+Environment="VARTOP_DATA_DIR="
+Environment="XDG_CACHE_HOME="
+Environment="XDG_CONFIG_HOME="
 Restart=on-failure
 RestartSec=5
 

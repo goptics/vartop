@@ -32,7 +32,7 @@ func (s *taskService) Install(exe string, env map[string]string) error {
 	if err := s.run("schtasks", "/Create", "/XML", f.Name(), "/TN", serviceTask, "/F"); err != nil {
 		return err
 	}
-	return s.Start()
+	return s.run("schtasks", "/Run", "/TN", serviceTask)
 }
 
 func (s *taskService) Uninstall() error {
@@ -40,9 +40,9 @@ func (s *taskService) Uninstall() error {
 	return s.run("schtasks", "/Delete", "/TN", serviceTask, "/F")
 }
 
-func (s *taskService) Start() error { return s.run("schtasks", "/Run", "/TN", serviceTask) }
-
-func (s *taskService) Restart() error {
+// Stop ends the task's run, if any. It is no error when it is not
+// running.
+func (s *taskService) Stop() error {
 	_ = s.run("schtasks", "/End", "/TN", serviceTask) // fails when it is not running
-	return s.Start()
+	return nil
 }

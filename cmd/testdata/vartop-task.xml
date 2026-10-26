@@ -29,7 +29,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>C:\Program Files\vartop\vartop.exe</Command>
-      <Arguments>daemon run --env &#34;KUBECONFIG=C:\Users\u\.kube\a \&#34;b\&#34;.yaml&#34; --env &#34;PATH=C:\Program Files\Git\bin;C:\Windows\\&#34;</Arguments>
+      <Arguments>daemon run --env &#34;KUBECONFIG=C:\Users\u\.kube\a \&#34;b\&#34;.yaml&#34; --env &#34;PATH=C:\Program Files\Git\bin;C:\Windows\\&#34; --env &#34;VARTOP_DATA_DIR=&#34; --env &#34;XDG_CACHE_HOME=&#34; --env &#34;XDG_CONFIG_HOME=&#34;</Arguments>
     </Exec>
   </Actions>
 </Task>

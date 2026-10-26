@@ -27,17 +27,20 @@ func (s *systemdService) Installed() bool {
 	return err == nil
 }
 
+// Install writes the unit, enables it and restarts it: restart starts a
+// unit not running and, gracefully, replaces a daemon of the old unit
+// (one systemd restarted after a kill, say).
 func (s *systemdService) Install(exe string, env map[string]string) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(s.path, []byte(systemdUnit(exe, env)), 0o644); err != nil {
+	if err := writeServiceFile(s.path, systemdUnit(exe, env)); err != nil {
 		return err
 	}
 	if err := s.systemctl("daemon-reload"); err != nil {
 		return err
 	}
-	return s.systemctl("enable", "--now", serviceUnit)
+	if err := s.systemctl("enable", serviceUnit); err != nil {
+		return err
+	}
+	return s.systemctl("restart", serviceUnit)
 }
 
 func (s *systemdService) Uninstall() error {
@@ -48,8 +51,7 @@ func (s *systemdService) Uninstall() error {
 	return errors.Join(err, s.systemctl("daemon-reload"))
 }
 
-func (s *systemdService) Start() error   { return s.systemctl("start", serviceUnit) }
-func (s *systemdService) Restart() error { return s.systemctl("restart", serviceUnit) }
+func (s *systemdService) Stop() error { return s.systemctl("stop", serviceUnit) }
 
 func (s *systemdService) systemctl(args ...string) error {
 	return s.run("systemctl", append([]string{"--user"}, args...)...)

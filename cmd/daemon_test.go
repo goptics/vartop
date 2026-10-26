@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,16 +50,17 @@ func isolate(t *testing.T) string {
 	return dataDir
 }
 
-// fakeSupervisor is a login service that records what it is asked, and
-// starts a daemon by running onStart: Install starts it too, as the real
-// ones do.
+// fakeSupervisor is a login service that records what it is asked.
+// Install starts the service's daemon by running onStart, as the real ones
+// do; Uninstall runs onUninstall first.
 type fakeSupervisor struct {
-	mu        sync.Mutex
-	installed bool
-	calls     []string
-	exe       string
-	env       map[string]string
-	onStart   func()
+	mu          sync.Mutex
+	installed   bool
+	calls       []string
+	exe         string
+	env         map[string]string
+	onStart     func()
+	onUninstall func()
 }
 
 func (f *fakeSupervisor) record(call string) {
@@ -81,6 +85,9 @@ func (f *fakeSupervisor) Install(exe string, env map[string]string) error {
 }
 
 func (f *fakeSupervisor) Uninstall() error {
+	if f.onUninstall != nil {
+		f.onUninstall()
+	}
 	f.record("uninstall")
 	f.mu.Lock()
 	f.installed = false
@@ -88,8 +95,7 @@ func (f *fakeSupervisor) Uninstall() error {
 	return nil
 }
 
-func (f *fakeSupervisor) Start() error   { f.record("start"); f.started(); return nil }
-func (f *fakeSupervisor) Restart() error { f.record("restart"); f.started(); return nil }
+func (f *fakeSupervisor) Stop() error { f.record("stop"); return nil }
 
 func (f *fakeSupervisor) started() {
 	if f.onStart != nil {
@@ -192,7 +198,8 @@ func claim(t *testing.T, ctl *store.Control, l store.Lease) string {
 }
 
 // startsAs makes the daemon spawned or started by the login service the
-// one claiming the lease as l. The service starts none while one runs.
+// one claiming the lease as l. Install starts none while one runs: the
+// tests stop the old one first, as vartop does.
 func (d *testDaemon) startsAs(t *testing.T, l store.Lease) {
 	spawn := d.o.spawn
 	d.o.spawn = func() error {
@@ -262,8 +269,8 @@ func TestEnsureDaemonStartsWhenAbsent(t *testing.T) {
 		if err := ensureDaemon(d.o); err != nil {
 			t.Fatalf("ensureDaemon() = %v", err)
 		}
-		if got := strings.Join(d.sup.called(), ","); got != "install,start" || d.spawned() != 0 {
-			t.Errorf("service calls = %s, spawns = %d; want install,start and no spawn", got, d.spawned())
+		if got := strings.Join(d.sup.called(), ","); got != "install" || d.spawned() != 0 {
+			t.Errorf("service calls = %s, spawns = %d; want install alone and no spawn", got, d.spawned())
 		}
 		if d.sup.exe != d.o.exe || fmt.Sprint(d.sup.env) != fmt.Sprint(d.o.env) {
 			t.Errorf("service rewritten to %q %v, want %q %v", d.sup.exe, d.sup.env, d.o.exe, d.o.env)
@@ -362,8 +369,8 @@ func TestEnsureDaemonRestartsOnConfigPathOrKubeconfigMismatch(t *testing.T) {
 				}
 				calls := strings.Join(d.sup.called(), ",")
 				if installed {
-					if calls != "install,restart" || d.spawned() != 0 {
-						t.Errorf("service calls = %s, spawns = %d; want install,restart and no spawn", calls, d.spawned())
+					if calls != "install" || d.spawned() != 0 {
+						t.Errorf("service calls = %s, spawns = %d; want install alone and no spawn", calls, d.spawned())
 					}
 					if fmt.Sprint(d.sup.env) != fmt.Sprint(d.o.env) {
 						t.Errorf("service environment = %v, want this vartop's %v", d.sup.env, d.o.env)
@@ -567,7 +574,7 @@ func TestDaemonStatusExitCodes(t *testing.T) {
 	}
 
 	token := claim(t, d.o.ctl, store.Lease{PID: 4242, Build: "/usr/bin/vartop (7 bytes, modified x)",
-		ConfigPath: "/home/u/.config/vartop/config.json", Kubeconfig: "/home/u/.kube/prod"})
+		ConfigPath: "/home/u/.config/vartop/config.json", Kubeconfig: "/home/u/.kube/prod", PathEnv: "/opt/bin:/usr/bin"})
 	db, err := store.OpenServer(d.o.dataDir, "prod", true)
 	if err != nil {
 		t.Fatal(err)
@@ -592,7 +599,7 @@ func TestDaemonStatusExitCodes(t *testing.T) {
 		t.Fatalf("status of a running daemon = %v, want exit code 0", err)
 	}
 	for _, want := range []string{"is running", "4242", "/usr/bin/vartop (7 bytes, modified x)",
-		"/home/u/.config/vartop/config.json", "/home/u/.kube/prod", d.o.dataDir,
+		"/home/u/.config/vartop/config.json", "/home/u/.kube/prod", "PATH", "/opt/bin:/usr/bin", d.o.dataDir,
 		"prod", "3s ago", "2 units, 1 healthy", "idle", "no data", "discovery failed: no such host"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status printed:\n%s\nwant %q in it", out, want)
@@ -633,6 +640,141 @@ func TestDaemonStopCopy(t *testing.T) {
 	}
 }
 
+// TestDaemonRestart: `daemon restart` stops the daemon running and leaves
+// exactly one of this vartop's identity — through Install alone when the
+// login service is installed.
+func TestDaemonRestart(t *testing.T) {
+	for _, installed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("service installed %v", installed), func(t *testing.T) {
+			d := newTestDaemon(t)
+			d.sup.installed = installed
+			old := d.o.want
+			old.Build = "old"
+			stopped := politeDaemon(t, d.o.ctl, old)
+			d.startsAs(t, d.o.want)
+			out, err := runDaemonCmd(t, daemonRestartCmd)
+			if err != nil {
+				t.Fatalf("daemon restart = %v", err)
+			}
+			select {
+			case <-stopped:
+			default:
+				t.Error("the old daemon was not asked to stop")
+			}
+			want, spawns := "install", 0
+			if !installed {
+				want, spawns = "", 1
+			}
+			if calls := strings.Join(d.sup.called(), ","); calls != want || d.spawned() != spawns {
+				t.Errorf("service calls = %q, spawns = %d; want %q and %d", calls, d.spawned(), want, spawns)
+			}
+			l, fresh := lease(t, d.o.ctl)
+			if !fresh || l.Build != d.o.want.Build || !strings.Contains(out, "restarted") {
+				t.Errorf("lease = %+v (fresh %v), printed %q; want one daemon of this build", l, fresh, out)
+			}
+		})
+	}
+}
+
+// TestDaemonUninstallStopsFirst: the daemon is stopped, gracefully, before
+// the service is removed.
+func TestDaemonUninstallStopsFirst(t *testing.T) {
+	d := newTestDaemon(t)
+	d.sup.installed = true
+	stopped := politeDaemon(t, d.o.ctl, d.o.want)
+	var runningAtUninstall bool
+	d.sup.onUninstall = func() { _, runningAtUninstall = lease(t, d.o.ctl) }
+	if _, err := runDaemonCmd(t, daemonUninstallCmd); err != nil {
+		t.Fatalf("daemon uninstall = %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("the daemon was not asked to stop")
+	}
+	if runningAtUninstall || strings.Join(d.sup.called(), ",") != "uninstall" || len(d.killed()) != 0 {
+		t.Errorf("running at Uninstall %v, service calls %v, kills %v; want stopped first, uninstall, no kill",
+			runningAtUninstall, d.sup.called(), d.killed())
+	}
+}
+
+// TestDaemonStopKilledStaysStopped: a daemon of the login service killed
+// for not stopping is stopped through the service too, so that its
+// restart-on-failure does not bring it back; one that stops when asked is
+// left alone.
+func TestDaemonStopKilledStaysStopped(t *testing.T) {
+	t.Run("killed", func(t *testing.T) {
+		d := newTestDaemon(t)
+		d.sup.installed = true
+		clock := &fakeClock{t: time.Now()}
+		d.o.now, d.o.sleep = clock.now, clock.sleep
+		hung := d.o.want
+		hung.PID = 4242
+		claim(t, d.o.ctl, hung)
+		out, err := runDaemonCmd(t, daemonStopCmd)
+		if err != nil || !strings.HasPrefix(out, "vartop daemon stopped.") {
+			t.Fatalf("daemon stop = %q, %v", out, err)
+		}
+		if kills, calls := d.killed(), strings.Join(d.sup.called(), ","); len(kills) != 1 || calls != "stop" {
+			t.Errorf("kills %v, service calls %q; want the pid killed, then stop", kills, calls)
+		}
+	})
+	t.Run("asked", func(t *testing.T) {
+		d := newTestDaemon(t)
+		d.sup.installed = true
+		politeDaemon(t, d.o.ctl, d.o.want)
+		if _, err := runDaemonCmd(t, daemonStopCmd); err != nil {
+			t.Fatal(err)
+		}
+		if calls := d.sup.called(); len(calls) != 0 {
+			t.Errorf("service calls %v; want none", calls)
+		}
+	})
+}
+
+// TestLosingRunKeepsLog: a `daemon run` that finds another daemon
+// collecting never renames the log that daemon writes.
+func TestLosingRunKeepsLog(t *testing.T) {
+	d := newTestDaemon(t)
+	claim(t, d.o.ctl, store.Lease{PID: 4242, Build: "other"})
+	path := filepath.Join(d.o.dataDir, "daemon.log")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), logMaxBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, err := runDaemon(context.Background())
+	if code != 0 || err != nil {
+		t.Fatalf("runDaemon() = %d, %v; want 0 (lost the claim)", code, err)
+	}
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Errorf("%s.1: %v; want the live log not renamed", path, err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Size() <= logMaxBytes {
+		t.Errorf("log: %v %v; want the live log kept (and appended to)", fi, err)
+	}
+}
+
+// TestBareDaemonRuns: `vartop daemon` alone runs the daemon, as `daemon
+// run` does (here it loses the claim to the daemon running and returns).
+func TestBareDaemonRuns(t *testing.T) {
+	d := newTestDaemon(t)
+	claim(t, d.o.ctl, store.Lease{PID: 4242, Build: "other"})
+	t.Cleanup(func() {
+		signal.Reset(syscall.SIGHUP) // the run ignores it
+		rootCmd.SetArgs(nil)
+	})
+	rootCmd.SetArgs([]string{"daemon"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("vartop daemon = %v", err)
+	}
+	log, _ := os.ReadFile(filepath.Join(d.o.dataDir, "daemon.log"))
+	if !bytes.Contains(log, []byte("another vartop daemon is collecting")) {
+		t.Errorf("daemon.log:\n%s\nwant the run's log", log)
+	}
+	if err := daemonCmd.Args(daemonCmd, []string{"bogus"}); err == nil {
+		t.Error("vartop daemon bogus accepted")
+	}
+}
+
 // TestOnboardingOffer: the login service is offered once a first config is
 // saved; yes installs it with this vartop's environment, and an installed
 // service is not offered again.
@@ -654,11 +796,15 @@ func TestOnboardingOffer(t *testing.T) {
 	}
 }
 
-func TestOpenLogRotates(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "daemon.log")
+// TestIdleLogRotates: with no daemon collecting, a log past logMaxBytes is
+// renamed to daemon.log.1 and a new one started.
+func TestIdleLogRotates(t *testing.T) {
+	d := newTestDaemon(t)
+	path := filepath.Join(d.o.dataDir, "daemon.log")
 	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), logMaxBytes+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	rotateIdleLog(d.o.ctl, d.o.dataDir)
 	f, err := openLog(path)
 	if err != nil {
 		t.Fatal(err)
@@ -704,6 +850,11 @@ func TestDetachedSpawnSubprocess(t *testing.T) {
 	l, fresh := lease(t, o.ctl)
 	if !fresh || l.PID == os.Getpid() || l.Build != buildID() {
 		t.Fatalf("lease = %+v (fresh %v), want one of another process of this build", l, fresh)
+	}
+	if runtime.GOOS == "linux" {
+		if cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", l.PID)); err != nil || cwd != dataDir {
+			t.Errorf("daemon's working dir = %q, %v; want the data dir %q", cwd, err, dataDir)
+		}
 	}
 	fleettest.WaitUntil(t, 10*time.Second, "a snapshot from the detached daemon", func() bool {
 		db, err := store.OpenServer(dataDir, "prod", false)

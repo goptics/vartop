@@ -18,6 +18,12 @@
 		<string>/home/u/.kube/a &#34;b&#34;%c$d&lt;e&gt;&amp;f</string>
 		<key>PATH</key>
 		<string>/opt/my tools/bin:/usr/bin</string>
+		<key>VARTOP_DATA_DIR</key>
+		<string></string>
+		<key>XDG_CACHE_HOME</key>
+		<string></string>
+		<key>XDG_CONFIG_HOME</key>
+		<string></string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>

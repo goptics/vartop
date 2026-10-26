@@ -16,8 +16,10 @@ func (r *recordRunner) run(name string, args ...string) error {
 	return nil
 }
 
-// TestSystemdService: install writes the unit under XDG_CONFIG_HOME and
-// enables it; start, restart and uninstall go through systemctl --user.
+// TestSystemdService: install writes the unit (0600) under
+// XDG_CONFIG_HOME, enables it and restarts it — which starts it, or
+// replaces a daemon of the old unit; stop and uninstall go through
+// systemctl --user too.
 func TestSystemdService(t *testing.T) {
 	isolate(t)
 	r := &recordRunner{}
@@ -25,10 +27,23 @@ func TestSystemdService(t *testing.T) {
 	if sup.Installed() {
 		t.Fatal("Installed() = true before Install")
 	}
+	unit := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "systemd", "user", "vartop.service")
+	if err := os.MkdirAll(filepath.Dir(unit), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unit, []byte("an older unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := sup.Install("/opt/vartop dir/vartop", goldenEnv); err != nil {
 		t.Fatal(err)
 	}
-	unit := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "systemd", "user", "vartop.service")
+	fi, err := os.Stat(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("unit mode = %v, want 0600: its variables may hold a proxy's credentials", fi.Mode().Perm())
+	}
 	data, err := os.ReadFile(unit)
 	if err != nil {
 		t.Fatal(err)
@@ -37,10 +52,7 @@ func TestSystemdService(t *testing.T) {
 	if !sup.Installed() {
 		t.Error("Installed() = false after Install")
 	}
-	if err := sup.Start(); err != nil {
-		t.Fatal(err)
-	}
-	if err := sup.Restart(); err != nil {
+	if err := sup.Stop(); err != nil {
 		t.Fatal(err)
 	}
 	if err := sup.Uninstall(); err != nil {
@@ -51,9 +63,9 @@ func TestSystemdService(t *testing.T) {
 	}
 	want := []string{
 		"systemctl --user daemon-reload",
-		"systemctl --user enable --now vartop.service",
-		"systemctl --user start vartop.service",
+		"systemctl --user enable vartop.service",
 		"systemctl --user restart vartop.service",
+		"systemctl --user stop vartop.service",
 		"systemctl --user disable --now vartop.service",
 		"systemctl --user daemon-reload",
 	}

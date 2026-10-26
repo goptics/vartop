@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -115,14 +116,23 @@ func sameDaemon(l, want store.Lease) bool {
 
 func daemonLogPath(dataDir string) string { return filepath.Join(dataDir, "daemon.log") }
 
-// openLog opens the daemon log at path for appending, renaming it to
-// <path>.1 first when it has grown past logMaxBytes.
+// rotateIdleLog renames dataDir's daemon log to daemon.log.1 when it has
+// grown past logMaxBytes, but only while no daemon holds a fresh lease in
+// ctl: the log of a daemon collecting is never renamed under it.
+func rotateIdleLog(ctl *store.Control, dataDir string) {
+	if _, fresh, err := ctl.Lease(); err != nil || fresh {
+		return
+	}
+	path := daemonLogPath(dataDir)
+	if fi, err := os.Stat(path); err == nil && fi.Size() > logMaxBytes {
+		_ = os.Rename(path, path+".1") // fails on Windows while a daemon writes it: it grows on then
+	}
+}
+
+// openLog opens the daemon log at path for appending.
 func openLog(path string) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
-	}
-	if fi, err := os.Stat(path); err == nil && fi.Size() > logMaxBytes {
-		_ = os.Rename(path, path+".1") // fails on Windows while a daemon writes it: it grows on then
 	}
 	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 }
@@ -153,16 +163,23 @@ func daemonLogger(dataDir string) (*slog.Logger, func()) {
 }
 
 // spawnDetached starts exe with args as a daemon of its own (see
-// detached), with no stdin and its stdout and stderr appended to the log
-// at logPath. It does not wait for it, but reaps it should it end while
-// vartop runs.
-func spawnDetached(exe string, args []string, logPath string) error {
-	log, err := openLog(logPath)
+// detached), working in dataDir (an absolute path), with no stdin and its
+// stdout and stderr appended to dataDir's daemon.log. It does not wait for
+// it, but reaps it should it end while vartop runs.
+func spawnDetached(exe string, args []string, dataDir string) error {
+	log, err := openLog(daemonLogPath(dataDir))
 	if err != nil {
 		return err
 	}
 	defer log.Close() // the daemon has its own
 	c := exec.Command(exe, args...)
+	// Not vartop's working dir, which the daemon would keep from being
+	// removed or unmounted; a relative VARTOP_DATA_DIR would now name
+	// another dir, so it gets the absolute one.
+	c.Dir = dataDir
+	if os.Getenv("VARTOP_DATA_DIR") != "" {
+		c.Env = append(os.Environ(), "VARTOP_DATA_DIR="+dataDir)
+	}
 	c.Stdout, c.Stderr = log, log
 	c.SysProcAttr = detached()
 	if err := c.Start(); err != nil {
@@ -231,8 +248,11 @@ var localDaemon = func() (o ensureOptions, release func(), err error) {
 		sup:     newSupervisor(runCommand),
 		exe:     exe,
 		env:     serviceEnv(os.Environ()),
-		spawn:   func() error { return spawnDetached(exe, []string{"daemon", "run"}, daemonLogPath(dataDir)) },
-		kill:    killPID,
+		spawn: func() error {
+			rotateIdleLog(ctl, dataDir)
+			return spawnDetached(exe, []string{"daemon", "run"}, dataDir)
+		},
+		kill: killPID,
 	}, func() { _ = ctl.Close() }, nil
 }
 
@@ -240,9 +260,9 @@ var localDaemon = func() (o ensureOptions, release func(), err error) {
 // build, config path and KUBECONFIG (the UI's environment wins). With none
 // running it starts one; with another one running (or one stopping) it
 // stops that and starts its own. A daemon is started through the login
-// service when that is installed — rewritten with this vartop's executable
-// and environment first — else as a detached process; ensureDaemon waits
-// up to startWait for it to claim the lease.
+// service when that is installed — Install rewrites it with this vartop's
+// executable and environment, and starts it — else as a detached process;
+// ensureDaemon waits up to startWait for it to claim the lease.
 func ensureDaemon(o ensureOptions) error {
 	o = o.withDefaults()
 	l, fresh, err := o.ctl.Lease()
@@ -257,26 +277,20 @@ func ensureDaemon(o ensureOptions) error {
 			return err
 		}
 	}
-	_, err = launchDaemon(o, l.Token, fresh)
+	_, err = launchDaemon(o, l.Token)
 	return err
 }
 
-// launchDaemon starts a daemon — anew when restart is set — and returns its
-// lease once it claimed it: the first lease other than that of token old.
-func launchDaemon(o ensureOptions, old string, restart bool) (store.Lease, error) {
+// launchDaemon starts a daemon and returns its lease once it claimed it:
+// the first lease other than that of token old. With the login service
+// installed, Install alone starts it.
+func launchDaemon(o ensureOptions, old string) (store.Lease, error) {
 	o = o.withDefaults()
 	var err error
-	switch {
-	case !o.sup.Installed():
+	if o.sup.Installed() {
+		err = o.sup.Install(o.exe, o.env)
+	} else {
 		err = o.spawn()
-	case restart:
-		if err = o.sup.Install(o.exe, o.env); err == nil {
-			err = o.sup.Restart()
-		}
-	default:
-		if err = o.sup.Install(o.exe, o.env); err == nil {
-			err = o.sup.Start()
-		}
 	}
 	if err != nil {
 		return store.Lease{}, fmt.Errorf("start the vartop daemon: %w", err)
@@ -305,24 +319,24 @@ func waitStarted(o ensureOptions, old string) (store.Lease, error) {
 // stopWait for it to let the lease go. One that does not is killed — only
 // while its lease is fresh, so that its pid is still the daemon's — and its
 // lease let go for it, so that the next daemon need not wait for it to go
-// stale. It returns the lease it found, and whether a daemon was running.
-func stopDaemon(o ensureOptions) (store.Lease, bool, error) {
+// stale. It returns the lease it found, and how the daemon stopped.
+func stopDaemon(o ensureOptions) (store.Lease, stopped, error) {
 	o = o.withDefaults()
 	l, fresh, err := o.ctl.Lease()
 	if err != nil || !fresh {
-		return l, false, err
+		return l, notRunning, err
 	}
 	if err := o.ctl.RequestStop(); err != nil {
-		return l, true, err
+		return l, notRunning, err
 	}
 	deadline := o.now().Add(stopWait)
 	for {
 		cur, fresh, err := o.ctl.Lease()
 		if err != nil {
-			return l, true, err
+			return l, notRunning, err
 		}
 		if !fresh || cur.Token != l.Token {
-			return l, true, nil
+			return l, stoppedAsked, nil
 		}
 		if !o.now().Before(deadline) {
 			break
@@ -330,10 +344,19 @@ func stopDaemon(o ensureOptions) (store.Lease, bool, error) {
 		o.sleep(leasePoll)
 	}
 	if err := o.kill(l.PID); err != nil {
-		return l, true, fmt.Errorf("vartop daemon (pid %d) did not stop: %w", l.PID, err)
+		return l, notRunning, fmt.Errorf("vartop daemon (pid %d) did not stop: %w", l.PID, err)
 	}
-	return l, true, o.ctl.Release(l.Token)
+	return l, stoppedKilled, o.ctl.Release(l.Token)
 }
+
+// stopped is how stopDaemon went.
+type stopped int
+
+const (
+	notRunning    stopped = iota // none was stopped: none held a fresh lease, or the error says why
+	stoppedAsked                 // the daemon stopped when asked
+	stoppedKilled                // it did not, and was killed
+)
 
 // installService installs the login service, with this vartop's executable
 // and environment, and returns the lease of the daemon it started. A daemon
@@ -406,6 +429,7 @@ func writeStatus(w io.Writer, o ensureOptions) (running bool, err error) {
 		fmt.Fprintf(tw, "  build\t%s\n", l.Build)
 		fmt.Fprintf(tw, "  config\t%s\n", l.ConfigPath)
 		fmt.Fprintf(tw, "  KUBECONFIG\t%s\n", cmp.Or(l.Kubeconfig, "(unset)"))
+		fmt.Fprintf(tw, "  PATH\t%s\n", l.PathEnv)
 	} else {
 		fmt.Fprintln(tw, "vartop daemon is not running")
 	}
@@ -517,7 +541,9 @@ var daemonCmd = &cobra.Command{
 	Short: "Run or manage the vartop daemon, which collects every server's history",
 	Long: `The vartop daemon polls every configured server into vartop's history, which
 vartop and vartop web read. vartop starts it when it is not running; the login
-service (vartop daemon install) starts it at login too, and again after a crash.`,
+service (vartop daemon install) starts it at login too, and again after a crash.
+
+vartop daemon alone runs it in the foreground, as vartop daemon run does.`,
 }
 
 // daemonRunEnv are the NAME=VALUE pairs `daemon run --env` sets first.
@@ -530,39 +556,66 @@ var daemonRunCmd = &cobra.Command{
 another daemon already collects. The log goes to daemon.log in the data dir,
 and to the terminal too.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		for _, kv := range daemonRunEnv {
-			if name, value, ok := strings.Cut(kv, "="); ok {
-				if err := os.Setenv(name, value); err != nil {
-					return err
-				}
-			}
+		if err := applyEnv(daemonRunEnv); err != nil {
+			return err
 		}
 		signal.Ignore(syscall.SIGHUP)
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-
-		dataDir, err := store.DataDir()
-		if err != nil {
-			return err
-		}
-		log, closeLog := daemonLogger(dataDir)
-		defer closeLog()
-		code, err := daemon.Run(ctx, daemon.Options{
-			DataDir:   dataDir,
-			Config:    readConfig,
-			BuildPool: api.PoolFor,
-			Lease:     ownLease(),
-			Now:       time.Now,
-			Log:       log,
-		})
-		if err != nil {
-			log.Error("vartop daemon failed", "err", err)
-		}
+		code, err := runDaemon(ctx)
 		if code != 0 {
 			return exitError{code, err}
 		}
 		return err
 	},
+}
+
+// applyEnv sets each NAME=VALUE of pairs in vartop's environment; NAME=
+// unsets NAME.
+func applyEnv(pairs []string) error {
+	for _, kv := range pairs {
+		name, value, ok := strings.Cut(kv, "=")
+		var err error
+		switch {
+		case !ok:
+		case value == "":
+			err = os.Unsetenv(name)
+		default:
+			err = os.Setenv(name, value)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runDaemon collects into the data dir of vartop's environment until ctx
+// ends or the daemon has to stop (daemon.Run), logging as daemonLogger
+// says.
+func runDaemon(ctx context.Context) (int, error) {
+	dataDir, err := store.DataDir()
+	if err != nil {
+		return 1, err
+	}
+	if ctl, err := store.OpenControl(dataDir); err == nil {
+		rotateIdleLog(ctl, dataDir)
+		_ = ctl.Close()
+	}
+	log, closeLog := daemonLogger(dataDir)
+	defer closeLog()
+	code, err := daemon.Run(ctx, daemon.Options{
+		DataDir:   dataDir,
+		Config:    readConfig,
+		BuildPool: api.PoolFor,
+		Lease:     ownLease(),
+		Now:       time.Now,
+		Log:       log,
+	})
+	if err != nil {
+		log.Error("vartop daemon failed", "err", err)
+	}
+	return code, err
 }
 
 var daemonStartCmd = &cobra.Command{
@@ -587,15 +640,20 @@ var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the daemon until your next login or the next time you open vartop",
 	RunE: withDaemon(func(o ensureOptions, w io.Writer) error {
-		_, running, err := stopDaemon(o)
+		_, how, err := stopDaemon(o)
 		switch {
 		case err != nil:
 			return err
-		case !running:
+		case how == notRunning:
 			fmt.Fprintln(w, "vartop daemon is not running")
-		default:
-			fmt.Fprintln(w, stoppedMsg)
+			return nil
+		case how == stoppedKilled && o.sup.Installed():
+			// The service manager restarts a daemon killed by a signal.
+			if err := o.sup.Stop(); err != nil {
+				return fmt.Errorf("vartop daemon killed, but its login service may start it again: %w", err)
+			}
 		}
+		fmt.Fprintln(w, stoppedMsg)
 		return nil
 	}),
 }
@@ -604,11 +662,11 @@ var daemonRestartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart the daemon with this vartop's build and environment",
 	RunE: withDaemon(func(o ensureOptions, w io.Writer) error {
-		old, running, err := stopDaemon(o)
+		old, _, err := stopDaemon(o)
 		if err != nil {
 			return err
 		}
-		l, err := launchDaemon(o, old.Token, running)
+		l, err := launchDaemon(o, old.Token)
 		if err != nil {
 			return err
 		}
@@ -650,6 +708,11 @@ var daemonUninstallCmd = &cobra.Command{
 			fmt.Fprintln(w, "vartop daemon's login service is not installed")
 			return nil
 		}
+		// Gracefully, so that the daemon lets the lease go: the service
+		// manager may kill it outright.
+		if _, _, err := stopDaemon(o); err != nil {
+			return err
+		}
 		if err := o.sup.Uninstall(); err != nil {
 			return err
 		}
@@ -659,15 +722,20 @@ var daemonUninstallCmd = &cobra.Command{
 }
 
 func init() {
-	daemonRunCmd.Flags().StringArrayVar(&daemonRunEnv, "env", nil, "set NAME=VALUE in the daemon's environment first")
-	_ = daemonRunCmd.Flags().MarkHidden("env") // the Windows login service's way to pass its environment
-	for _, c := range []*cobra.Command{daemonRunCmd, daemonStartCmd, daemonStopCmd, daemonRestartCmd,
+	daemonCmd.RunE = daemonRunCmd.RunE
+	for _, c := range []*cobra.Command{daemonCmd, daemonRunCmd} {
+		c.Flags().StringArrayVar(&daemonRunEnv, "env", nil, "set NAME=VALUE in the daemon's environment first (NAME= unsets it)")
+		_ = c.Flags().MarkHidden("env") // the Windows login service's way to pass its environment
+	}
+	for _, c := range []*cobra.Command{daemonCmd, daemonRunCmd, daemonStartCmd, daemonStopCmd, daemonRestartCmd,
 		daemonStatusCmd, daemonInstallCmd, daemonUninstallCmd} {
 		c.Args = cobra.NoArgs
 		// Not usage mistakes; Execute prints the error, and exits with
 		// an exitError's code.
 		c.SilenceUsage, c.SilenceErrors = true, true
-		daemonCmd.AddCommand(c)
+		if c != daemonCmd {
+			daemonCmd.AddCommand(c)
+		}
 	}
 	rootCmd.AddCommand(daemonCmd)
 }

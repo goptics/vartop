@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"encoding/xml"
 	"flag"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -35,9 +37,18 @@ func TestServiceEnvAllowList(t *testing.T) {
 		"AWS_PROFILE": "prod",
 		"HTTPS_PROXY": "http://proxy:3128",
 		"no_proxy":    "localhost",
+		// Always written, empty when unset: a value of the service
+		// manager's own must not take their place.
+		"XDG_CONFIG_HOME": "",
+		"XDG_CACHE_HOME":  "",
+		"VARTOP_DATA_DIR": "",
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("serviceEnv() = %v, want %v", got, want)
+	}
+	unset := map[string]string{"KUBECONFIG": "", "XDG_CONFIG_HOME": "", "XDG_CACHE_HOME": "", "VARTOP_DATA_DIR": ""}
+	if got := serviceEnv(nil); !maps.Equal(got, unset) {
+		t.Errorf("serviceEnv(nothing set) = %v, want %v", got, unset)
 	}
 	for _, name := range serviceAllow {
 		if secretName(name) {
@@ -51,13 +62,13 @@ func TestServiceEnvAllowList(t *testing.T) {
 	}
 }
 
-// goldenEnv is an environment with every kind of character the service
-// files must escape.
-var goldenEnv = map[string]string{
-	"PATH":       `/opt/my tools/bin:/usr/bin`,
-	"HOME":       `/home/u`,
-	"KUBECONFIG": `/home/u/.kube/a "b"%c$d<e>&f`,
-}
+// goldenEnv is a service environment with every kind of character the
+// service files must escape, and the names written empty when unset.
+var goldenEnv = serviceEnv([]string{
+	`PATH=/opt/my tools/bin:/usr/bin`,
+	`HOME=/home/u`,
+	`KUBECONFIG=/home/u/.kube/a "b"%c$d<e>&f`,
+})
 
 // golden compares got with testdata/name, or rewrites it with -update.
 func golden(t *testing.T, name, got string) {
@@ -85,10 +96,10 @@ func TestServiceFilesGolden(t *testing.T) {
 	t.Setenv("USERNAME", "u")
 	golden(t, "vartop.service", systemdUnit("/opt/vartop dir/vartop", goldenEnv))
 	golden(t, "dev.goptics.vartop.plist", launchdPlist("/opt/vartop dir/vartop", goldenEnv))
-	winEnv := map[string]string{
-		"PATH":       `C:\Program Files\Git\bin;C:\Windows\`,
-		"KUBECONFIG": `C:\Users\u\.kube\a "b".yaml`,
-	}
+	winEnv := serviceEnv([]string{
+		`PATH=C:\Program Files\Git\bin;C:\Windows\`,
+		`KUBECONFIG=C:\Users\u\.kube\a "b".yaml`,
+	})
 	golden(t, "vartop-task.xml", windowsTaskXML(`C:\Program Files\vartop\vartop.exe`, winEnv))
 }
 
@@ -99,6 +110,37 @@ func TestWindowsArgsRoundTrip(t *testing.T) {
 		if got := splitWindowsArgs(windowsQuote(s)); !slices.Equal(got, []string{s}) {
 			t.Errorf("windowsQuote(%q) parses back as %q", s, got)
 		}
+	}
+}
+
+// TestWindowsEnvRoundTrip: the task's --env pairs, applied by `daemon
+// run`, give the daemon the UI's environment: a name the UI has unset is
+// unset in the daemon, whatever the logon environment holds.
+func TestWindowsEnvRoundTrip(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/from/the/logon/environment")
+	t.Setenv("AWS_PROFILE", "logon")
+	env := serviceEnv([]string{`PATH=C:\bin`, `AWS_PROFILE=ui profile`})
+	task := windowsTaskXML(`C:\vartop.exe`, env)
+	start, end := strings.Index(task, "<Arguments>"), strings.Index(task, "</Arguments>")
+	var arguments string
+	if err := xml.Unmarshal([]byte("<a>"+task[start+len("<Arguments>"):end]+"</a>"), &arguments); err != nil {
+		t.Fatal(err)
+	}
+	args := splitWindowsArgs(arguments)
+	var pairs []string
+	for i, a := range args {
+		if a == "--env" && i+1 < len(args) {
+			pairs = append(pairs, args[i+1])
+		}
+	}
+	if err := applyEnv(pairs); err != nil {
+		t.Fatal(err)
+	}
+	if v, set := os.LookupEnv("KUBECONFIG"); set {
+		t.Errorf("KUBECONFIG = %q in the daemon, want it unset", v)
+	}
+	if got := os.Getenv("AWS_PROFILE"); got != "ui profile" {
+		t.Errorf("AWS_PROFILE = %q in the daemon, want the UI's", got)
 	}
 }
 

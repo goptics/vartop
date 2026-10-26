@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -24,14 +25,15 @@ type supervisor interface {
 	// Installed reports whether the service is registered.
 	Installed() bool
 	// Install registers the service to run exe with env, or rewrites it,
-	// and starts it.
+	// and (re)starts it: it is the one call that starts the service's
+	// daemon, and leaves one daemon running the new definition.
 	Install(exe string, env map[string]string) error
 	// Uninstall stops the service's daemon and removes the service.
 	Uninstall() error
-	// Start starts the service's daemon unless it is running.
-	Start() error
-	// Restart starts the service's daemon anew.
-	Restart() error
+	// Stop stops the service's daemon and cancels any restart of it the
+	// service manager has planned (after a kill, say), until the next
+	// login or Install.
+	Stop() error
 }
 
 // runner runs an OS command: systemctl, launchctl or schtasks.
@@ -54,8 +56,7 @@ type noService struct{ err error }
 func (noService) Installed() bool                           { return false }
 func (s noService) Install(string, map[string]string) error { return s.err }
 func (s noService) Uninstall() error                        { return s.err }
-func (s noService) Start() error                            { return s.err }
-func (s noService) Restart() error                          { return s.err }
+func (s noService) Stop() error                             { return s.err }
 
 const (
 	serviceUnit  = "vartop.service"     // the systemd user unit
@@ -84,11 +85,21 @@ func secretName(name string) bool {
 	return strings.Contains(n, "KEY") || strings.Contains(n, "SECRET") || strings.Contains(n, "TOKEN")
 }
 
+// serviceAlways are the variables the login service always sets, empty
+// when vartop has them unset, so that the service manager's own values
+// never stand in for them: the config path and KUBECONFIG are compared
+// with the UI's, and the UIs read the data dir the daemon writes.
+var serviceAlways = []string{"KUBECONFIG", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "VARTOP_DATA_DIR"}
+
 // serviceEnv picks from environ (as os.Environ gives it) what the login
 // service keeps: the variables of serviceAllow set to a value, never one
-// that secretName flags. Windows names match in any case.
+// that secretName flags, and those of serviceAlways in any case. Windows
+// names match in any case.
 func serviceEnv(environ []string) map[string]string {
 	env := make(map[string]string)
+	for _, name := range serviceAlways {
+		env[name] = ""
+	}
 	for _, kv := range environ {
 		name, value, ok := strings.Cut(kv, "=")
 		if !ok || value == "" || secretName(name) {
@@ -245,6 +256,18 @@ func windowsQuote(s string) string {
 	b.WriteString(strings.Repeat(`\`, slashes))
 	b.WriteByte('"')
 	return b.String()
+}
+
+// writeServiceFile writes a service file at path, 0600 (its variables may
+// hold a proxy's credentials) even over an older one of another mode.
+func writeServiceFile(path, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600) // WriteFile keeps the mode of a file there
 }
 
 // xmlText escapes s for XML text or an attribute value.
