@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -46,7 +47,13 @@ func newTestServer(t *testing.T, fakes ...*httptest.Server) (*httptest.Server, *
 // test ends.
 func startManager(t *testing.T, cfg *config.Config, name string) *Manager {
 	t.Helper()
-	m := NewManager(cfg, api.PoolFor)
+	return startManagerBuilding(t, cfg, name, api.PoolFor)
+}
+
+// startManagerBuilding is startManager with the pools made by build.
+func startManagerBuilding(t *testing.T, cfg *config.Config, name string, build func(*config.Server) (*api.Pool, error)) *Manager {
+	t.Helper()
+	m := NewManager(cfg, build)
 	t.Cleanup(func() { _ = m.Close() })
 	if err := m.Switch(name); err != nil {
 		t.Fatalf("Switch(%s): %v", name, err)
@@ -280,15 +287,15 @@ func TestPagesRender(t *testing.T) {
 		want []string
 	}{
 		{"/", []string{"orders", "emails", `hx-get="/?server=multi"`, "<title>vartop · multi</title>"}},
-		{"/grid", []string{"orders", "emails", `hx-get="/grid?server=multi"`, "<title>Pod grid · multi</title>"}},
-		{"/workers/orders", []string{"orders", "Pods reporting:", `hx-get="/workers/orders?server=multi"`, "<title>orders · multi</title>"}},
+		{"/grid", []string{"orders", "emails", `hx-get="/grid?server=multi"`, "<title>Instance grid · multi</title>"}},
+		{"/workers/orders", []string{"orders", "Instances reporting:", `hx-get="/workers/orders?server=multi"`, "<title>orders · multi</title>"}},
 	} {
 		status, body := fetch(t, srv, c.path, false)
 		if status != http.StatusOK {
 			t.Errorf("GET %s = %d, want 200", c.path, status)
 			continue
 		}
-		for _, want := range append(c.want, "2/2 pods", aSrv.URL, bSrv.URL) {
+		for _, want := range append(c.want, "2/2 instances", aSrv.URL, bSrv.URL) {
 			if !strings.Contains(body, want) {
 				t.Errorf("GET %s lacks %q", c.path, want)
 			}
@@ -302,7 +309,7 @@ func TestPagesRender(t *testing.T) {
 		}
 		// A pod never seen (a bad bookmark) shows why, not the merged view.
 		_, body = fetch(t, srv, "/?pod="+url.QueryEscape("http://gone.invalid"), false)
-		if !strings.Contains(body, "Pod http://gone.invalid is no longer reported — reload") || strings.Contains(body, `<tr id="w-`) {
+		if !strings.Contains(body, "Instance http://gone.invalid is no longer reported — reload") || strings.Contains(body, `<tr id="w-`) {
 			t.Error("an unknown pod should show the gone-pod banner and no rows")
 		}
 	})
@@ -335,6 +342,170 @@ func TestPagesRender(t *testing.T) {
 			t.Errorf("GET /nope = %d, want 404", status)
 		}
 	})
+}
+
+// threeFakes starts three fake varmqs: orders (concurrency 4) on each, emails
+// on the first only.
+func threeFakes(t *testing.T) []*httptest.Server {
+	t.Helper()
+	var fakes []*httptest.Server
+	for i, instance := range []string{"a", "b", "c"} {
+		workers := map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 4, Busy: i}}
+		if i == 0 {
+			workers["emails"] = &fakeWorker{Status: "Paused", Concurrency: 2}
+		}
+		_, f := newFakeVarmq(t, instance, workers)
+		fakes = append(fakes, f)
+	}
+	return fakes
+}
+
+// kubernetesServer is discovered through Kubernetes, the one kind of server
+// whose units are pods. serveUnits builds its pool, so no cluster is reached.
+var kubernetesServer = config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}
+
+// serveUnits serves the web UI over a Manager whose only server, "multi", is
+// a copy of server polling the fakes every second. It returns once the first
+// snapshot is in.
+func serveUnits(t *testing.T, server config.Server, fakes ...*httptest.Server) *httptest.Server {
+	t.Helper()
+	endpoints := make([]string, len(fakes))
+	for i, f := range fakes {
+		endpoints[i] = f.URL
+	}
+	server.Name, server.Interval = "multi", 1
+	cfg := &config.Config{Servers: map[string]*config.Server{"multi": &server}}
+	m := startManagerBuilding(t, cfg, "multi", func(*config.Server) (*api.Pool, error) {
+		return api.NewPool(&mutableSource{eps: endpoints}, ""), nil
+	})
+	return serve(t, m)
+}
+
+// visibleText is body without its tags, so attribute values (the pod form
+// field, class names, URLs) are left out.
+func visibleText(body string) string { return regexp.MustCompile(`<[^>]*>`).ReplaceAllString(body, "") }
+
+// checkPages fetches each path of pages from srv and requires its body to
+// contain its wants and its visible text to lack the other noun.
+func checkPages(t *testing.T, srv *httptest.Server, other string, pages map[string][]string) {
+	t.Helper()
+	for path, wants := range pages {
+		status, body := fetch(t, srv, path, false)
+		if status != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", path, status)
+			continue
+		}
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				t.Errorf("GET %s lacks %q", path, want)
+			}
+		}
+		if text := strings.ToLower(visibleText(body)); strings.Contains(text, other) {
+			t.Errorf("GET %s says %q:\n%s", path, other, text)
+		}
+	}
+}
+
+// TestPagesSayInstanceOnStaticServers: every page of a server whose endpoints
+// are listed names its units instances, never pods.
+func TestPagesSayInstanceOnStaticServers(t *testing.T) {
+	srv := serveUnits(t, config.Server{}, threeFakes(t)...)
+
+	checkPages(t, srv, "pod", map[string][]string{
+		"/": {
+			"All instances (merged)", ">Instance grid<", "3/3 instances", `title="healthy / total instances"`,
+			"Pending (max/instance)", "Concurrency (per instance)", "instance × worker", "4 ×3 instances", "absent on 2 instances",
+		},
+		"/grid": {">Instance grid<", "<title>Instance grid · multi</title>", "3/3 instances"},
+		"/workers/orders": {
+			"All instances (merged)", "Instances reporting:", "3/3 instances",
+			"per instance, on all instances", `aria-label="Concurrency per instance"`, `aria-label="Concurrency per instance, exact"`,
+		},
+	})
+}
+
+// TestPagesSayPodOnKubernetes: a Kubernetes server reads as it always did,
+// except for the subtitle of the status card, which no longer ends in
+// "instances".
+func TestPagesSayPodOnKubernetes(t *testing.T) {
+	srv := serveUnits(t, kubernetesServer, threeFakes(t)...)
+
+	checkPages(t, srv, "instance", map[string][]string{
+		"/": {
+			"All pods (merged)", ">Pod grid<", "3/3 pods", `title="healthy / total pods"`,
+			"Pending (max/pod)", "Concurrency (per pod)", `<p class="sub">pod × worker</p>`, "4 ×3 pods", "absent on 2 pods",
+		},
+		"/grid": {">Pod grid<", "<title>Pod grid · multi</title>", "3/3 pods"},
+		"/workers/orders": {
+			"All pods (merged)", "Pods reporting:", "3/3 pods",
+			"per pod, on all pods", `aria-label="Concurrency per pod"`, `aria-label="Concurrency per pod, exact"`,
+		},
+	})
+}
+
+// TestMessagesUseNoun: what the handlers say when a request misses names the
+// server's units by its noun, with the right article.
+func TestMessagesUseNoun(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		server       config.Server
+		one, article string
+	}{
+		{"static", config.Server{}, "instance", "an"},
+		{"kubernetes", kubernetesServer, "pod", "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := serveUnits(t, tc.server, threeFakes(t)...)
+			one := tc.one
+
+			// A form naming a unit the server does not have.
+			resp, body := post(t, srv, "/workers/orders/actions/pause", multi("pod", "http://gone.invalid"), true)
+			if want := "the selected " + one + " is not " + tc.article + " " + one + " of this server; reload"; resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, want) {
+				t.Errorf("unknown unit = %d %q, want 400 with %q", resp.StatusCode, body, want)
+			}
+
+			// emails lives on one unit; the others answer 404.
+			_, body = post(t, srv, "/workers/emails/actions/resume", multi(), true)
+			if want := "no change (not on this " + one + ")"; !strings.Contains(resultsOf(body), want) {
+				t.Errorf("404 outcome lacks %q:\n%s", want, resultsOf(body))
+			}
+
+			// The confirmation panel.
+			_, body = post(t, srv, "/bulk/pause", multi("names", "orders", "names", "emails"), true)
+			for _, want := range []string{"pause each worker on each " + one + " below:", `<span class="na">not on this ` + one + `</span>`} {
+				if !strings.Contains(body, want) {
+					t.Errorf("confirm panel lacks %q:\n%s", want, body)
+				}
+			}
+
+			// A worker no unit reports, to a full load and to a poll.
+			for _, hx := range []bool{false, true} {
+				_, body = fetch(t, srv, "/workers/nope", hx)
+				if want := "Worker &#34;nope&#34; not found on any " + one; !strings.Contains(body, want) {
+					t.Errorf("GET /workers/nope (hx %v) lacks %q:\n%s", hx, want, body)
+				}
+			}
+		})
+	}
+}
+
+// TestGoneUnitBannerUsesNoun: the stale-bookmark banner names the unit by the
+// label of the last snapshot that had it.
+func TestGoneUnitBannerUsesNoun(t *testing.T) {
+	both := snap(atTick(0), PodSnapshot{Key: "#a", Label: "instance-1"}, PodSnapshot{Key: "#b", Label: "instance-2"})
+	left := snap(atTick(1), PodSnapshot{Key: "#a", Label: "instance-1"})
+	for _, tc := range []struct {
+		n    Noun
+		want string
+	}{
+		{instanceNoun, "Instance instance-2 is no longer reported — reload"},
+		{podNoun, "Pod instance-2 is no longer reported — reload"},
+	} {
+		p := Page{Pod: "#b", Noun: tc.n}
+		if !podGone(&p, []*Snapshot{both, left}) || p.Banner != tc.want {
+			t.Errorf("%s: banner = %q, want %q", tc.n.One, p.Banner, tc.want)
+		}
+	}
 }
 
 // mutableSource is a discovery.Source whose endpoints a test changes.
@@ -386,14 +557,14 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	waitUntil(t, 3*time.Second, "a snapshot without a", func() bool { return len(m.Current().History.Latest().Pods) == 1 })
 
 	// Labelled from the last snapshot that had it.
-	banner := `<p class="banner">Pod a is no longer reported — reload</p>`
+	banner := `<p class="banner">Instance a is no longer reported — reload</p>`
 	for _, path := range []string{dash, detail} {
 		for _, hx := range []bool{true, false} { // a poll, a full load
 			status, body := fetch(t, srv, path, hx)
 			if status != http.StatusOK || !strings.Contains(body, banner) {
 				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
 			}
-			for _, data := range []string{">orders<", `<tr id="w-`, "Pods reporting", `id="bulk"`, `class="controls"`, "No workers"} {
+			for _, data := range []string{">orders<", `<tr id="w-`, "Instances reporting", `id="bulk"`, `class="controls"`, "No workers"} {
 				if strings.Contains(body, data) {
 					t.Errorf("GET %s (hx %v) shows %q", path, hx, data)
 				}
@@ -480,13 +651,13 @@ func TestStaleServerParamShowsBanner(t *testing.T) {
 				t.Errorf("GET %s (hx %v) lacks the banner", path, hx)
 			}
 			// The URL itself may name a worker; rendered data never shows.
-			for _, data := range []string{">orders<", ">emails<", "Pods reporting", `<tr id="w-`} {
+			for _, data := range []string{">orders<", ">emails<", "Instances reporting", `<tr id="w-`} {
 				if strings.Contains(body, data) {
 					t.Errorf("GET %s (hx %v) shows worker data %q", path, hx, data)
 				}
 			}
 			// #status is refreshed by every poll, so it must still be right.
-			if !strings.Contains(body, "● 2/2 pods") {
+			if !strings.Contains(body, "● 2/2 instances") {
 				t.Errorf("GET %s (hx %v) lacks the active server's health", path, hx)
 			}
 		}
@@ -618,7 +789,7 @@ func TestConnectingAndErrorStates(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(body, `<p class="banner">`+connecting("dev")+"</p>") {
 		t.Errorf("htmx GET / while connecting = %d, want 200 with the banner %q", status, connecting("dev"))
 	}
-	if !strings.Contains(body, "○ 0/0 pods") {
+	if !strings.Contains(body, "○ 0/0 instances") {
 		t.Error("htmx connecting response has no health in #status")
 	}
 

@@ -7,7 +7,66 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/goptics/vartop/internal/config"
 )
+
+// The nouns of a Kubernetes server and of every other. Fixtures that name
+// no server pick one.
+var (
+	podNoun      = Noun{One: "pod", Many: "pods", Article: "a"}
+	instanceNoun = Noun{One: "instance", Many: "instances", Article: "an"}
+)
+
+func TestNounFor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		srv  *config.Server
+		want Noun
+	}{
+		{"kubernetes", &config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}, podNoun},
+		{"static endpoints", &config.Server{Endpoints: []string{"http://a:1", "http://b:1"}}, instanceNoun},
+		{"dns", &config.Server{DNS: &config.DNSRef{Host: "varmq-headless", Port: 8080}}, instanceNoun},
+		{"nil", nil, instanceNoun},
+	} {
+		if got := NounFor(tc.srv); got != tc.want {
+			t.Errorf("%s: NounFor = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+
+	for _, tc := range []struct {
+		n         Noun
+		cap, many string
+	}{
+		{podNoun, "Pod", "Pods"},
+		{instanceNoun, "Instance", "Instances"},
+		{Noun{}, "", ""}, // the zero Noun a bare Page carries must not panic
+	} {
+		if got := tc.n.Cap(); got != tc.cap {
+			t.Errorf("%+v.Cap() = %q, want %q", tc.n, got, tc.cap)
+		}
+		if got := tc.n.CapMany(); got != tc.many {
+			t.Errorf("%+v.CapMany() = %q, want %q", tc.n, got, tc.many)
+		}
+	}
+}
+
+func TestPageScope(t *testing.T) {
+	opts := []PodOption{{Key: "#a", Label: "instance-1"}, {Key: "#b", Label: "instance-2"}}
+	for _, tc := range []struct {
+		p    Page
+		want string
+	}{
+		{Page{Noun: podNoun}, "all pods"},
+		{Page{Noun: instanceNoun}, "all instances"},
+		{Page{Noun: instanceNoun, Pod: "#b", Pods: opts}, "instance-2"},
+		{Page{Noun: instanceNoun, Pod: "#gone", Pods: opts}, "#gone"},
+	} {
+		if got := tc.p.Scope(); got != tc.want {
+			t.Errorf("Scope() of %+v = %q, want %q", tc.p, got, tc.want)
+		}
+	}
+}
 
 // run executes the named entry template of page set `set`.
 func run(t *testing.T, set, entry string, data any) string {
@@ -122,6 +181,7 @@ func sampleRows() []RowView {
 func dashboardPage() Page {
 	return Page{
 		Title: "vartop", Server: "dev", SelfURL: "/?server=dev", IntervalSec: 5,
+		Noun:    podNoun,
 		Servers: []string{"dev", "prod"},
 		Pods:    []PodOption{{Key: "http://a:3000", Label: "a"}, {Key: "http://b:3000", Label: "b"}},
 		Health:  HealthView{Healthy: 2, Total: 2, Dot: "●"},
@@ -364,7 +424,7 @@ func TestTipsAreTitles(t *testing.T) {
 		}}),
 		"detail pods": run(t, "detail", "layout", Page{Server: "dev", Detail: &DetailView{Name: "w", Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}}),
 		"confirm":     run(t, "confirm", "confirm", ConfirmView{Action: "pause", Pods: []PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}),
-		"result":      run(t, "results", "results", []ActionResult{{Pod: "instance-1", Key: "#a", Tip: tip, Outcome: "ok"}}),
+		"result":      run(t, "results", "results", ResultsView{Results: []ActionResult{{Pod: "instance-1", Key: "#a", Tip: tip, Outcome: "ok"}}, Noun: podNoun}),
 	} {
 		if !strings.Contains(body, `title="`+tip+`">instance-1<`) {
 			t.Errorf("%s: label lacks the tip as title:\n%s", name, body)
@@ -438,11 +498,11 @@ func TestLiveRegionHoldsNoControls(t *testing.T) {
 }
 
 func TestResultsRender(t *testing.T) {
-	body := run(t, "results", "results", []ActionResult{
+	body := run(t, "results", "results", ResultsView{Noun: podNoun, Results: []ActionResult{
 		{Pod: "a", Key: "http://a:3000", Outcome: "ok"},
 		{Pod: "b", Key: "http://b:3000", Outcome: "no change", Msg: "worker is not running"},
 		{Pod: "c", Key: "http://c:3000", Outcome: "failed", Msg: "<b>boom</b>"},
-	})
+	}})
 	for _, want := range []string{"a", "ok", "no change (worker is not running)", "failed (&lt;b&gt;boom&lt;/b&gt;)"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("results lack %q:\n%s", want, body)
@@ -458,7 +518,7 @@ func TestResultsRender(t *testing.T) {
 
 func TestConfirmRenders(t *testing.T) {
 	body := run(t, "confirm", "confirm", ConfirmView{
-		Action: "pause", Server: "dev", Pod: "",
+		Action: "pause", Server: "dev", Pod: "", Noun: podNoun,
 		Pods: []PodColumn{{Key: "http://a:3000", Label: "pod-a"}, {Key: "http://b:3000", Label: "pod-b", Err: "<i>down</i>"}},
 		Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true, false}}, {Name: "a&b", Absent: []bool{false, false}}},
 	})
@@ -477,6 +537,77 @@ func TestConfirmRenders(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("confirm lacks %q:\n%s", want, body)
 		}
+	}
+}
+
+// TestCopyFollowsNoun renders every page set with each noun: the words of the
+// units follow the Noun the Page, ConfirmView or ResultsView carries, and no
+// other noun's.
+func TestCopyFollowsNoun(t *testing.T) {
+	for _, n := range []Noun{podNoun, instanceNoun} {
+		other := podNoun
+		if n == podNoun {
+			other = instanceNoun
+		}
+		one, many := n.One, n.Many
+		check := func(t *testing.T, name, body string, want ...string) {
+			t.Helper()
+			for _, w := range want {
+				if !strings.Contains(body, w) {
+					t.Errorf("%s lacks %q:\n%s", name, w, body)
+				}
+			}
+			// Only the words that name a unit: the pod form field and class names stay.
+			text := visibleText(body)
+			if strings.Contains(strings.ToLower(text), other.One) {
+				t.Errorf("%s says %q on a %s page:\n%s", name, other.One, one, text)
+			}
+		}
+
+		t.Run(one, func(t *testing.T) {
+			p := dashboardPage()
+			p.Noun = n
+			p.Dashboard.Rows[0].Concurrency = "4 ×2 " + many // fixture copy: a view model words this itself
+			check(t, "dashboard", run(t, "dashboard", "layout", p),
+				"<label>"+n.Cap()+` <select name="pod">`,
+				"All "+many+" (merged)",
+				">"+n.Cap()+" grid</a>",
+				`title="healthy / total `+many+`"`,
+				"● 2/2 "+many+"</span>",
+				"Pending (max/"+one+")",
+				"Concurrency (per "+one+")",
+				"absent on 2 "+many+"<",
+				`<p class="sub">`+one+" × worker</p>",
+			)
+			if got := strings.Count(run(t, "dashboard", "layout", p), "Pending (max/"+one+")"); got != 2 {
+				t.Errorf("Pending (max/%s) appears %d times, want in the card and the column header", one, got)
+			}
+
+			p = detailPage()
+			p.Noun = n
+			check(t, "detail", run(t, "detail", "layout", p),
+				`<p class="pods">`+n.CapMany()+" reporting: ",
+				"per "+one+", on all "+many+"<",
+				`aria-label="Concurrency per `+one+`"`,
+				`aria-label="Concurrency per `+one+`, exact"`,
+				`hx-confirm="Stop a/b c on all `+many+` (dev)?"`,
+			)
+
+			p = gridPage()
+			p.Noun = n
+			check(t, "grid", run(t, "grid", "layout", p), ">"+n.Cap()+" grid</a>")
+			p.Grid = &GridView{}
+			check(t, "empty grid", run(t, "grid", "layout", p), "No "+many+" to show.")
+
+			check(t, "confirm", run(t, "confirm", "confirm", ConfirmView{
+				Action: "pause", Server: "dev", Noun: n,
+				Pods: []PodColumn{{Key: "#a", Label: "a"}},
+				Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true}}},
+			}), "pause each worker on each "+one+" below:", `<span class="na">not on this `+one+`</span>`)
+
+			check(t, "no results", run(t, "results", "results", ResultsView{Noun: n}),
+				`<p class="empty">No `+many+" were targeted.</p>")
+		})
 	}
 }
 

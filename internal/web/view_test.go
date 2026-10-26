@@ -77,6 +77,43 @@ func threePodSnap() *Snapshot {
 	)
 }
 
+// TestViewsUseNoun: the words in row labels and tooltips follow the Noun.
+func TestViewsUseNoun(t *testing.T) {
+	iv := 5 * time.Second
+	// orders on three units; the third has no rate yet, so 2 of 3 contribute.
+	s := snap(atTick(0),
+		okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 4, 0, 4, 3), 2, 0)}),
+		okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 4, 0, 4, 5), 4, 0)}),
+		okPod("p2", map[string]*Sample{"orders": smp("Running", 4, 0, 4, 9)}),
+	)
+	for _, n := range []Noun{podNoun, instanceNoun} {
+		t.Run(n.One, func(t *testing.T) {
+			d := BuildDashboard([]*Snapshot{s}, "", iv, n)
+			row := rowByName(t, d.Rows, "orders")
+			if want := "4 ×3 " + n.Many; row.Concurrency != want {
+				t.Errorf("Concurrency = %q, want %q", row.Concurrency, want)
+			}
+			rate := stamp(s) + " · 6.0/s · 2/3 " + n.Many
+			if got := row.Spark[0].Title; got != rate {
+				t.Errorf("worker rate title = %q, want %q", got, rate)
+			}
+			if got := d.KPIs.Completed[0].Title; got != rate {
+				t.Errorf("fleet rate title = %q, want %q", got, rate)
+			}
+			if got, want := d.KPIs.Failed[0].Title, stamp(s)+" · 0.0/min · 2/3 "+n.Many; got != want {
+				t.Errorf("failed title = %q, want %q", got, want)
+			}
+			if got, want := d.KPIs.Pending[0].Title, stamp(s)+" · 9 pending (max/"+n.One+")"; got != want {
+				t.Errorf("pending title = %q, want %q", got, want)
+			}
+			det, ok := BuildDetail([]*Snapshot{s}, "", "orders", iv, n)
+			if !ok || det.Completed1h[0].Title != rate || det.Failed1h[0].Title != stamp(s)+" · 0.0/s · 2/3 "+n.Many {
+				t.Errorf("detail titles = %q / %q, want %q / ...0.0/s · 2/3 %s", det.Completed1h[0].Title, det.Failed1h[0].Title, rate, n.Many)
+			}
+		})
+	}
+}
+
 func TestStatusClass(t *testing.T) {
 	cases := map[string]string{
 		"Idle":      "active",
@@ -97,7 +134,7 @@ func TestStatusClass(t *testing.T) {
 }
 
 func TestMergedRowAggregation(t *testing.T) {
-	d := BuildDashboard([]*Snapshot{threePodSnap()}, "", 5*time.Second)
+	d := BuildDashboard([]*Snapshot{threePodSnap()}, "", 5*time.Second, podNoun)
 
 	if got, want := rowNames(d.Rows), []string{"billing", "exports", "orders"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("rows = %v, want %v (sorted by name)", got, want)
@@ -147,7 +184,7 @@ func TestMergedRowAggregation(t *testing.T) {
 		PodSnapshot{Key: "p2", Label: "p2", Err: "timeout",
 			Workers: map[string]*Sample{"emails": smp("Running", 8, 5, 3, 99)}},
 	)
-	row := rowByName(t, BuildDashboard([]*Snapshot{emails}, "", 5*time.Second).Rows, "emails")
+	row := rowByName(t, BuildDashboard([]*Snapshot{emails}, "", 5*time.Second, podNoun).Rows, "emails")
 	if row.AbsentOn != 1 {
 		t.Errorf("emails AbsentOn = %d, want 1", row.AbsentOn)
 	}
@@ -157,7 +194,7 @@ func TestMergedRowAggregation(t *testing.T) {
 }
 
 func TestPodFilterKeepsOnePod(t *testing.T) {
-	d := BuildDashboard([]*Snapshot{threePodSnap()}, "p1", 5*time.Second)
+	d := BuildDashboard([]*Snapshot{threePodSnap()}, "p1", 5*time.Second, podNoun)
 
 	if got, want := rowNames(d.Rows), []string{"billing", "exports", "orders"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("rows = %v, want %v", got, want)
@@ -171,12 +208,12 @@ func TestPodFilterKeepsOnePod(t *testing.T) {
 	}
 
 	// p2 has no billing, so the filtered view must not list it.
-	d = BuildDashboard([]*Snapshot{threePodSnap()}, "p2", 5*time.Second)
+	d = BuildDashboard([]*Snapshot{threePodSnap()}, "p2", 5*time.Second, podNoun)
 	if got, want := rowNames(d.Rows), []string{"exports", "orders"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("rows for p2 = %v, want %v", got, want)
 	}
 
-	if d = BuildDashboard([]*Snapshot{threePodSnap()}, "nope", 5*time.Second); len(d.Rows) != 0 {
+	if d = BuildDashboard([]*Snapshot{threePodSnap()}, "nope", 5*time.Second, podNoun); len(d.Rows) != 0 {
 		t.Errorf("unknown pod filter produced rows %v", rowNames(d.Rows))
 	}
 }
@@ -200,7 +237,7 @@ func TestSeriesGapsAndPartial(t *testing.T) {
 	)
 	snaps := []*Snapshot{s1, s2, s3}
 
-	row := rowByName(t, BuildDashboard(snaps, "", iv).Rows, "orders")
+	row := rowByName(t, BuildDashboard(snaps, "", iv, podNoun).Rows, "orders")
 	if len(row.Spark) != 3 {
 		t.Fatalf("spark has %d points, want 3", len(row.Spark))
 	}
@@ -219,7 +256,7 @@ func TestSeriesGapsAndPartial(t *testing.T) {
 
 	// A worker absent from a snapshot is a gap there, not a zero.
 	other := snap(atTick(3), okPod("p0", map[string]*Sample{"billing": smp("Running", 1, 0, 1, 0)}))
-	row = rowByName(t, BuildDashboard([]*Snapshot{s1, other}, "", iv).Rows, "billing")
+	row = rowByName(t, BuildDashboard([]*Snapshot{s1, other}, "", iv, podNoun).Rows, "billing")
 	if len(row.Spark) != 2 || !row.Spark[0].Gap || !row.Spark[1].Gap {
 		t.Errorf("billing spark = %+v, want two gaps", row.Spark)
 	}
@@ -235,7 +272,7 @@ func TestNoLoadBalancedExclusion(t *testing.T) {
 		return p
 	}
 	s := snap(atTick(0), balanced("#a", 4), balanced("#b", 6))
-	d := BuildDashboard([]*Snapshot{s}, "", iv)
+	d := BuildDashboard([]*Snapshot{s}, "", iv, podNoun)
 	if p := rowByName(t, d.Rows, "orders").Spark[0]; p.V != 10 || p.Partial || p.Gap || p.Title != stamp(s)+" · 10.0/s · 2/2 pods" {
 		t.Errorf("row point = %+v, want solid 10.0/s from 2/2 pods", p)
 	}
@@ -243,7 +280,7 @@ func TestNoLoadBalancedExclusion(t *testing.T) {
 		t.Errorf("KPI completed/s = %v, want 10 (both units counted)", d.KPIs.CompletedPerSec)
 	}
 	// Each unit stands alone when filtered to.
-	if p := rowByName(t, BuildDashboard([]*Snapshot{s}, "#b", iv).Rows, "orders").Spark[0]; p.V != 6 || p.Title != stamp(s)+" · 6.0/s · 1/1 pods" {
+	if p := rowByName(t, BuildDashboard([]*Snapshot{s}, "#b", iv, podNoun).Rows, "orders").Spark[0]; p.V != 6 || p.Title != stamp(s)+" · 6.0/s · 1/1 pods" {
 		t.Errorf("filtered point = %+v, want 6.0/s from 1/1 pods", p)
 	}
 }
@@ -263,7 +300,7 @@ func TestSeriesPartialCountsErroredPods(t *testing.T) {
 	// (a) p2 errored: 2 of 3 expected pods contribute, in the worker series,
 	// the detail series and the KPI series alike.
 	down := snap(atTick(0), okPod("p0", ws(4)), okPod("p1", ws(6)), errored("p2"))
-	d := BuildDashboard([]*Snapshot{down}, "", iv)
+	d := BuildDashboard([]*Snapshot{down}, "", iv, podNoun)
 	check := func(what string, p Point, v float64, title string) {
 		t.Helper()
 		if p.V != v || !p.Partial || p.Gap || p.Title != title {
@@ -273,13 +310,13 @@ func TestSeriesPartialCountsErroredPods(t *testing.T) {
 	check("row", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(down)+" · 10.0/s · 2/3 pods")
 	check("kpi completed", d.KPIs.Completed[0], 10, stamp(down)+" · 10.0/s · 2/3 pods")
 	check("kpi failed", d.KPIs.Failed[0], 60, stamp(down)+" · 60.0/min · 2/3 pods")
-	det, _ := BuildDetail([]*Snapshot{down}, "", "orders", iv)
+	det, _ := BuildDetail([]*Snapshot{down}, "", "orders", iv, podNoun)
 	check("detail", det.Completed1h[0], 10, stamp(down)+" · 10.0/s · 2/3 pods")
 
 	// Errored pods count in N even when no healthy pod reports the worker, but
 	// with nobody contributing the point is a gap.
 	allDown := snap(atTick(0), errored("p0"), okPod("p1", map[string]*Sample{"billing": smp("Running", 1, 0, 1, 0)}))
-	if p := rowByName(t, BuildDashboard([]*Snapshot{allDown}, "", iv).Rows, "billing").Spark[0]; !p.Gap {
+	if p := rowByName(t, BuildDashboard([]*Snapshot{allDown}, "", iv, podNoun).Rows, "billing").Spark[0]; !p.Gap {
 		t.Errorf("billing point = %+v, want a gap (nobody contributed)", p)
 	}
 
@@ -293,12 +330,12 @@ func TestSeriesPartialCountsErroredPods(t *testing.T) {
 	// (b) a healthy pod lacking the worker is not expected to report it...
 	other := map[string]*Sample{"billing": rated(smp("Running", 2, 0, 2, 0), 1, 0)}
 	lacking := snap(atTick(0), okPod("p0", ws(4)), okPod("p1", ws(6)), okPod("p2", other))
-	d = BuildDashboard([]*Snapshot{lacking}, "", iv)
+	d = BuildDashboard([]*Snapshot{lacking}, "", iv, podNoun)
 	solid("row for orders", rowByName(t, d.Rows, "orders").Spark[0], 10, stamp(lacking)+" · 10.0/s · 2/2 pods")
 	solid("row for billing", rowByName(t, d.Rows, "billing").Spark[0], 1, stamp(lacking)+" · 1.0/s · 1/1 pods")
 	// ...while the fleet series expects every healthy pod, and p2 does contribute.
 	solid("kpi", d.KPIs.Completed[0], 11, stamp(lacking)+" · 11.0/s · 3/3 pods")
-	det, _ = BuildDetail([]*Snapshot{lacking}, "", "orders", iv)
+	det, _ = BuildDetail([]*Snapshot{lacking}, "", "orders", iv, podNoun)
 	solid("detail", det.Completed1h[0], 10, stamp(lacking)+" · 10.0/s · 2/2 pods")
 }
 
@@ -320,7 +357,7 @@ func TestKPIsPendingIsMaxPerPodSummedOverWorkers(t *testing.T) {
 		)
 	}
 
-	d := BuildDashboard([]*Snapshot{mk(0)}, "", 5*time.Second)
+	d := BuildDashboard([]*Snapshot{mk(0)}, "", 5*time.Second, podNoun)
 	k := d.KPIs
 	if k.PendingMax != 164 {
 		t.Errorf("PendingMax = %d, want 140+24 = 164 (max per pod, summed over workers)", k.PendingMax)
@@ -363,13 +400,13 @@ func TestKPIsPendingIsMaxPerPodSummedOverWorkers(t *testing.T) {
 		{5 * time.Second, 8},  // window larger than the history
 		{10 * time.Minute, 1}, // exactly one
 	} {
-		d := BuildDashboard(snaps, "", tc.interval)
+		d := BuildDashboard(snaps, "", tc.interval, podNoun)
 		if len(d.KPIs.Completed) != tc.want || len(d.KPIs.Pending) != tc.want || len(d.Rows[0].Spark) != tc.want {
 			t.Errorf("interval %v: series lengths %d/%d/%d, want %d",
 				tc.interval, len(d.KPIs.Completed), len(d.KPIs.Pending), len(d.Rows[0].Spark), tc.want)
 		}
 	}
-	d = BuildDashboard(snaps, "", 2*time.Minute)
+	d = BuildDashboard(snaps, "", 2*time.Minute, podNoun)
 	if !strings.HasPrefix(d.KPIs.Completed[4].Title, stamp(snaps[7])) || !strings.HasPrefix(d.KPIs.Completed[0].Title, stamp(snaps[3])) {
 		t.Errorf("window is not the newest snapshots: first %q last %q", d.KPIs.Completed[0].Title, d.KPIs.Completed[4].Title)
 	}
@@ -383,7 +420,7 @@ func TestFleetRatesSkipWorkerlessPods(t *testing.T) {
 		okPod("http://b", map[string]*Sample{"w": rated(smp("Running", 1, 0, 0, 0), 3, 0.5)}),
 		okPod("http://c", map[string]*Sample{}),
 	)
-	k := BuildDashboard([]*Snapshot{s}, "", 5*time.Second).KPIs
+	k := BuildDashboard([]*Snapshot{s}, "", 5*time.Second, podNoun).KPIs
 	if p := k.Completed[0]; p.Partial || p.Gap || p.Title != stamp(s)+" · 5.0/s · 2/2 pods" {
 		t.Errorf("completed point = %+v, want solid 5.0/s from 2/2 pods", p)
 	}
@@ -395,7 +432,7 @@ func TestFleetRatesSkipWorkerlessPods(t *testing.T) {
 func TestKPIGapsWithoutRates(t *testing.T) {
 	// First snapshot: no sample has a rate yet.
 	s := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 12)}))
-	d := BuildDashboard([]*Snapshot{s}, "", 5*time.Second)
+	d := BuildDashboard([]*Snapshot{s}, "", 5*time.Second, podNoun)
 	if p := d.KPIs.Completed[0]; !p.Gap || p.V != 0 {
 		t.Errorf("completed point = %+v, want gap", p)
 	}
@@ -411,7 +448,7 @@ func TestKPIGapsWithoutRates(t *testing.T) {
 
 	// Every pod errored: pending has nothing to report either.
 	down := snap(atTick(1), PodSnapshot{Key: "p0", Label: "p0", Err: "refused"})
-	d = BuildDashboard([]*Snapshot{down}, "", 5*time.Second)
+	d = BuildDashboard([]*Snapshot{down}, "", 5*time.Second, podNoun)
 	if p := d.KPIs.Pending[0]; !p.Gap || p.Title != stamp(down)+" · no data" {
 		t.Errorf("pending point on errored fleet = %+v, want gap", p)
 	}
@@ -443,6 +480,15 @@ func TestBalancerNote(t *testing.T) {
 		"http://10.0.0.1:8090/varmq": 3,
 	}}
 	if got, want := BalancerNote(s), "3 instances behind 10.0.0.1:8090 · 2 instances behind 10.0.0.2:8090"; got != want {
+		t.Errorf("BalancerNote = %q, want %q", got, want)
+	}
+	// One reads in the singular.
+	one := &Snapshot{Behind: map[string]int{"http://10.0.0.3:8090/varmq": 1}}
+	if got, want := BalancerNote(one), "1 instance behind 10.0.0.3:8090"; got != want {
+		t.Errorf("BalancerNote of one = %q, want %q", got, want)
+	}
+	mixed := &Snapshot{Behind: map[string]int{"http://lb-b:8090/varmq": 4, "http://lb-a:8090/varmq": 1}}
+	if got, want := BalancerNote(mixed), "1 instance behind lb-a:8090 · 4 instances behind lb-b:8090"; got != want {
 		t.Errorf("BalancerNote = %q, want %q", got, want)
 	}
 	for name, s := range map[string]*Snapshot{
@@ -489,7 +535,7 @@ func TestUnreachedIsNotAbsent(t *testing.T) {
 		notReached("#u2", nil, "w"),
 	)
 
-	row := rowByName(t, BuildDashboard([]*Snapshot{s}, "", iv).Rows, "w")
+	row := rowByName(t, BuildDashboard([]*Snapshot{s}, "", iv, podNoun).Rows, "w")
 	if row.AbsentOn != 0 {
 		t.Errorf("AbsentOn = %d, want 0 (u2 lists w)", row.AbsentOn)
 	}
@@ -509,19 +555,19 @@ func TestUnreachedIsNotAbsent(t *testing.T) {
 	}
 
 	// The rate point counts u2 as expected, not contributing.
-	p := workerRates([]*Snapshot{s}, "", "w", completedRate)[0]
+	p := workerRates([]*Snapshot{s}, "", "w", completedRate, podNoun)[0]
 	if p.V != 3 || !p.Partial || p.Gap || p.Title != stamp(s)+" · 3.0/s · 1/2 pods" {
 		t.Errorf("rate point = %+v, want partial 3.0/s from 1/2 pods", p)
 	}
 
 	// Alone, with nothing contributing, the point is a gap.
 	only := snap(atTick(0), notReached("#u2", nil, "w"))
-	if p := workerRates([]*Snapshot{only}, "", "w", completedRate)[0]; !p.Gap || p.Title != stamp(only)+" · no data" {
+	if p := workerRates([]*Snapshot{only}, "", "w", completedRate, podNoun)[0]; !p.Gap || p.Title != stamp(only)+" · no data" {
 		t.Errorf("rate point of an unreached-only worker = %+v, want a gap", p)
 	}
 	// An unreached name on another unit does not make a lacking unit expected.
 	lacking := snap(atTick(0), okPod("u1", map[string]*Sample{"w": rated(smp("Running", 4, 1, 3, 2), 3, 0)}), okPod("u3", map[string]*Sample{}))
-	if p := workerRates([]*Snapshot{lacking}, "", "w", completedRate)[0]; p.Partial || p.Title != stamp(lacking)+" · 3.0/s · 1/1 pods" {
+	if p := workerRates([]*Snapshot{lacking}, "", "w", completedRate, podNoun)[0]; p.Partial || p.Title != stamp(lacking)+" · 3.0/s · 1/1 pods" {
 		t.Errorf("rate point with a lacking unit = %+v, want solid 1/1", p)
 	}
 }
@@ -530,7 +576,7 @@ func TestUnreachedIsNotAbsent(t *testing.T) {
 // instead of failing on an empty fold, and the detail page has no such worker.
 func TestUnreachedByEveryUnitStillHasARow(t *testing.T) {
 	s := snap(atTick(0), notReached("#u1", map[string]*Sample{"other": smp("Idle", 2, 0, 2, 0)}, "w"), notReached("#u2", nil, "w"))
-	d := BuildDashboard([]*Snapshot{s}, "", 5*time.Second)
+	d := BuildDashboard([]*Snapshot{s}, "", 5*time.Second, podNoun)
 	row := rowByName(t, d.Rows, "w")
 	if row.Status != "not reached" || row.Class != "unknown" || row.Concurrency != "—" || row.AbsentOn != 0 || !row.Spark[0].Gap {
 		t.Errorf("row = %+v, want a not reached row without values", row)
@@ -541,7 +587,7 @@ func TestUnreachedByEveryUnitStillHasARow(t *testing.T) {
 	if got := rowByName(t, d.Rows, "other"); got.AbsentOn != 1 {
 		t.Errorf("other AbsentOn = %d, want 1 (u2 lacks it, u1 answered)", got.AbsentOn)
 	}
-	if _, ok := BuildDetail([]*Snapshot{s}, "", "w", 5*time.Second); ok {
+	if _, ok := BuildDetail([]*Snapshot{s}, "", "w", 5*time.Second, podNoun); ok {
 		t.Error("BuildDetail reported a worker no unit answered for")
 	}
 }
@@ -555,7 +601,7 @@ func TestFleetRatesUnreachedMakesPartial(t *testing.T) {
 		notReached("#u1", map[string]*Sample{"w": rated(smp("Running", 1, 0, 1, 0), 2, 0.5)}, "x"),
 		okPod("u2", map[string]*Sample{"w": rated(smp("Running", 1, 0, 1, 0), 3, 0.5)}),
 	)
-	k := BuildDashboard([]*Snapshot{s}, "", iv).KPIs
+	k := BuildDashboard([]*Snapshot{s}, "", iv, podNoun).KPIs
 	if p := k.Completed[0]; p.V != 5 || p.Gap || !p.Partial || p.Title != stamp(s)+" · 5.0/s · 1/2 pods" {
 		t.Errorf("completed point = %+v, want hollow 5.0/s from 1/2 pods", p)
 	}
@@ -565,12 +611,12 @@ func TestFleetRatesUnreachedMakesPartial(t *testing.T) {
 
 	// A rate was summed although no unit counts as contributing: still a point.
 	one := snap(atTick(0), notReached("#u1", map[string]*Sample{"w": rated(smp("Running", 1, 0, 1, 0), 2, 0)}, "x"))
-	if p := fleetRates([]*Snapshot{one}, "", completedRate, 1, "/s")[0]; p.Gap || !p.Partial || p.V != 2 || p.Title != stamp(one)+" · 2.0/s · 0/1 pods" {
+	if p := fleetRates([]*Snapshot{one}, "", completedRate, 1, "/s", podNoun)[0]; p.Gap || !p.Partial || p.V != 2 || p.Title != stamp(one)+" · 2.0/s · 0/1 pods" {
 		t.Errorf("point = %+v, want hollow 2.0/s from 0/1 pods", p)
 	}
 	// Nothing rated and nothing contributing: a gap.
 	none := snap(atTick(0), notReached("#u1", map[string]*Sample{"w": smp("Running", 1, 0, 1, 0)}, "x"), notReached("#u2", nil, "w"))
-	if p := fleetRates([]*Snapshot{none}, "", completedRate, 1, "/s")[0]; !p.Gap {
+	if p := fleetRates([]*Snapshot{none}, "", completedRate, 1, "/s", podNoun)[0]; !p.Gap {
 		t.Errorf("point = %+v, want a gap", p)
 	}
 }
@@ -648,7 +694,7 @@ func TestBuildDetail(t *testing.T) {
 		okPod("p1", map[string]*Sample{"orders": counters(smp("Idle", 8, 0, 8, 0), 1, 1, 1, 0)}),
 		okPod("p2", map[string]*Sample{"billing": smp("Running", 2, 0, 2, 0)}),
 	)
-	d, ok := BuildDetail([]*Snapshot{s}, "", "orders", iv)
+	d, ok := BuildDetail([]*Snapshot{s}, "", "orders", iv, podNoun)
 	if !ok {
 		t.Fatal("orders reported absent")
 	}
@@ -670,12 +716,12 @@ func TestBuildDetail(t *testing.T) {
 
 	// 6 ok / 2 failed on one pod.
 	one := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 8, 8, 6, 2)}))
-	if d, _ = BuildDetail([]*Snapshot{one}, "", "orders", iv); d.SuccessRate != "75.0%" {
+	if d, _ = BuildDetail([]*Snapshot{one}, "", "orders", iv, podNoun); d.SuccessRate != "75.0%" {
 		t.Errorf("SuccessRate = %q, want 75.0%%", d.SuccessRate)
 	}
 	// 0/0 has no rate.
 	zero := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 0)}))
-	if d, _ = BuildDetail([]*Snapshot{zero}, "", "orders", iv); d.SuccessRate != "—" {
+	if d, _ = BuildDetail([]*Snapshot{zero}, "", "orders", iv, podNoun); d.SuccessRate != "—" {
 		t.Errorf("SuccessRate = %q, want —", d.SuccessRate)
 	}
 
@@ -685,31 +731,31 @@ func TestBuildDetail(t *testing.T) {
 			okPod("p0", map[string]*Sample{"orders": smp("Running", 1, 0, 1, 0)}),
 			okPod("p1", map[string]*Sample{"orders": smp("Running", tc.start, 0, tc.start, 0)}),
 		)
-		d, _ = BuildDetail([]*Snapshot{cs}, "", "orders", iv)
+		d, _ = BuildDetail([]*Snapshot{cs}, "", "orders", iv, podNoun)
 		if d.ConcurrencyStart != tc.start || d.ConcurrencyMax != tc.wantMax {
 			t.Errorf("start %d: got start/max %d/%d, want %d/%d", tc.start, d.ConcurrencyStart, d.ConcurrencyMax, tc.start, tc.wantMax)
 		}
 	}
 
 	// Pod filter narrows counters, status and the pod list.
-	d, ok = BuildDetail([]*Snapshot{s}, "p1", "orders", iv)
+	d, ok = BuildDetail([]*Snapshot{s}, "p1", "orders", iv, podNoun)
 	if !ok || d.Status != "Idle" || d.Submitted != 1 || len(d.Pods) != 1 || d.Pods[0].Key != "p1" {
 		t.Errorf("p1 detail = %+v ok=%v", d, ok)
 	}
 
 	// Absent: unknown worker, filtered pod lacks it, errored pod, no history.
-	if _, ok = BuildDetail([]*Snapshot{s}, "", "ghost", iv); ok {
+	if _, ok = BuildDetail([]*Snapshot{s}, "", "ghost", iv, podNoun); ok {
 		t.Error("unknown worker reported present")
 	}
-	if _, ok = BuildDetail([]*Snapshot{s}, "p2", "orders", iv); ok {
+	if _, ok = BuildDetail([]*Snapshot{s}, "p2", "orders", iv, podNoun); ok {
 		t.Error("worker reported present on a pod that lacks it")
 	}
 	bad := snap(atTick(0), PodSnapshot{Key: "p0", Err: "down",
 		Workers: map[string]*Sample{"orders": smp("Running", 8, 0, 8, 0)}})
-	if _, ok = BuildDetail([]*Snapshot{bad}, "", "orders", iv); ok {
+	if _, ok = BuildDetail([]*Snapshot{bad}, "", "orders", iv, podNoun); ok {
 		t.Error("worker reported present on an errored pod")
 	}
-	if _, ok = BuildDetail(nil, "", "orders", iv); ok {
+	if _, ok = BuildDetail(nil, "", "orders", iv, podNoun); ok {
 		t.Error("worker reported present with no history")
 	}
 }
@@ -723,7 +769,7 @@ func TestBuildDetailSeriesSpanWholeHistory(t *testing.T) {
 			okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 3, 0.5)}),
 		))
 	}
-	d, ok := BuildDetail(snaps, "", "orders", 5*time.Second)
+	d, ok := BuildDetail(snaps, "", "orders", 5*time.Second, podNoun)
 	if !ok {
 		t.Fatal("orders reported absent")
 	}
@@ -738,7 +784,7 @@ func TestBuildDetailSeriesSpanWholeHistory(t *testing.T) {
 		t.Errorf("failed point = %+v (detail failed series is per second)", p)
 	}
 
-	if dash := BuildDashboard(snaps, "", 5*time.Second); len(dash.Rows[0].Spark) != 120 {
+	if dash := BuildDashboard(snaps, "", 5*time.Second, podNoun); len(dash.Rows[0].Spark) != 120 {
 		t.Errorf("dashboard spark = %d points, want 120 (10 min)", len(dash.Rows[0].Spark))
 	}
 }
@@ -752,14 +798,14 @@ func TestEmptyInputs(t *testing.T) {
 		"all down": {snap(atTick(0), PodSnapshot{Key: "p0", Err: "down"})},
 	} {
 		for _, pod := range []string{"", "p0"} {
-			d := BuildDashboard(snaps, pod, 5*time.Second)
+			d := BuildDashboard(snaps, pod, 5*time.Second, podNoun)
 			if len(d.Rows) != 0 {
 				t.Errorf("%s/%q: rows = %v, want none", name, pod, rowNames(d.Rows))
 			}
 			if d.KPIs.StatusCounts == nil || len(d.KPIs.StatusCounts) != 0 || d.KPIs.PendingMax != 0 {
 				t.Errorf("%s/%q: KPIs = %+v", name, pod, d.KPIs)
 			}
-			if _, ok := BuildDetail(snaps, pod, "orders", 5*time.Second); ok {
+			if _, ok := BuildDetail(snaps, pod, "orders", 5*time.Second, podNoun); ok {
 				t.Errorf("%s/%q: BuildDetail reported a worker", name, pod)
 			}
 		}
@@ -787,7 +833,7 @@ func TestEmptyInputs(t *testing.T) {
 func TestRowIDIsSafe(t *testing.T) {
 	name := "a/b c\"<x>"
 	s := snap(atTick(0), okPod("p0", map[string]*Sample{name: smp("Running", 1, 0, 1, 0)}))
-	rows := BuildDashboard([]*Snapshot{s}, "", 5*time.Second).Rows
+	rows := BuildDashboard([]*Snapshot{s}, "", 5*time.Second, podNoun).Rows
 	if len(rows) != 1 {
 		t.Fatalf("rows = %v", rowNames(rows))
 	}
@@ -824,10 +870,10 @@ func TestBuildersDoNotMutateSnapshots(t *testing.T) {
 	}
 	snaps, pristine := fixture(), fixture()
 
-	BuildDashboard(snaps, "", 5*time.Second)
-	BuildDashboard(snaps, "p1", 5*time.Second)
+	BuildDashboard(snaps, "", 5*time.Second, podNoun)
+	BuildDashboard(snaps, "p1", 5*time.Second, podNoun)
 	BuildGrid(snaps[0])
-	BuildDetail(snaps, "", "orders", 5*time.Second)
+	BuildDetail(snaps, "", "orders", 5*time.Second, podNoun)
 	Health(snaps[0])
 	BalancerNote(snaps[0])
 

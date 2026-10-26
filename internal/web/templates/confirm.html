@@ -1,11 +1,11 @@
 {{define "confirm"}}<section class="confirm">
   <h3>Confirm {{.Action}} on {{.Server}}</h3>
-  <p>{{.Action}} each worker on each pod below:</p>
+  <p>{{.Action}} each worker on each {{.Noun.One}} below:</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>Worker</th>{{range .Pods}}<th title="{{.Tip}}">{{.Label}}{{with .Err}}<small class="err">{{.}}</small>{{end}}</th>{{end}}</tr></thead>
     <tbody>{{range .Rows}}
-    <tr><th scope="row" class="name">{{.Name}}</th>{{range .Absent}}<td>{{if .}}<span class="na">not on this pod</span>{{else}}{{$.Action}}{{end}}</td>{{end}}</tr>{{end}}
+    <tr><th scope="row" class="name">{{.Name}}</th>{{range .Absent}}<td>{{if .}}<span class="na">not on this {{$.Noun.One}}</span>{{else}}{{$.Action}}{{end}}</td>{{end}}</tr>{{end}}
     </tbody>
   </table>
   </div>

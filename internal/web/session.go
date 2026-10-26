@@ -163,13 +163,16 @@ func (m *Manager) Close() error {
 }
 
 // ConnectionLabel names how srv is reached, as the TUI header does: the
-// kube context/namespace, the dns host:port, or its endpoint(s).
+// kube context/namespace, the dns host:port, or its endpoint(s). Unlike the
+// TUI, several endpoints are counted as instances ("2 instances"), not pods.
 func ConnectionLabel(srv *config.Server) string {
 	switch {
 	case srv.Kubernetes != nil:
 		return srv.Kubernetes.Context + "/" + srv.Kubernetes.Namespace
 	case srv.DNS != nil:
 		return fmt.Sprintf("dns:%s:%d", srv.DNS.Host, srv.DNS.Port)
+	case len(srv.Endpoints) > 1:
+		return fmt.Sprintf("%d %s", len(srv.Endpoints), NounFor(srv).Many)
 	default:
 		return srv.DisplayEndpoint()
 	}

@@ -1,5 +1,5 @@
 {{define "live_body"}}{{with .Grid}}{{$pods := .Pods}}
-{{if not $pods}}<p class="empty">No pods to show.</p>
+{{if not $pods}}<p class="empty">No {{$.Noun.Many}} to show.</p>
 {{else if not .Rows}}<p class="empty">No workers reported yet.</p>
 {{else}}<p class="legend">Each cell: status · busy/concurrency · pending</p>
 <div class="table-wrap">

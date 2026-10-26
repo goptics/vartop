@@ -16,7 +16,7 @@
   <a class="brand" href="{{pageURL "/" .Server .Pod}}">vartop</a>
   <nav>
     <a href="{{pageURL "/" .Server .Pod}}"{{if .Dashboard}} aria-current="page"{{end}}>Dashboard</a>
-    <a href="{{pageURL "/grid" .Server .Pod}}"{{if .Grid}} aria-current="page"{{end}}>Pod grid</a>
+    <a href="{{pageURL "/grid" .Server .Pod}}"{{if .Grid}} aria-current="page"{{end}}>{{.Noun.Cap}} grid</a>
   </nav>
   {{if .Servers}}<form class="pick" hx-post="/server" hx-trigger="change" hx-sync="#page:replace">
     {{template "server_field" .}}
@@ -24,11 +24,11 @@
   </form>{{end}}
   {{if .Pods}}<form class="pick" hx-get="{{pathOf .SelfURL}}" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
     {{template "server_field" .}}
-    <label>Pod <select name="pod"><option value=""{{if not .Pod}} selected{{end}}>All pods (merged)</option>{{range .Pods}}<option value="{{.Key}}"{{if eq .Key $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}</select></label>
+    <label>{{.Noun.Cap}} <select name="pod"><option value=""{{if not .Pod}} selected{{end}}>All {{.Noun.Many}} (merged)</option>{{range .Pods}}<option value="{{.Key}}"{{if eq .Key $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}</select></label>
   </form>{{end}}
 </header>
 <div id="status">{{if not .Connecting}}
-  <span class="health" title="healthy / total pods">{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}} pods</span>
+  <span class="health" title="healthy / total {{.Noun.Many}}">{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}} {{.Noun.Many}}</span>
   {{if gt .IntervalSec 0}}<span class="interval">refresh every {{.IntervalSec}}s</span>{{end}}
   {{with .Updated}}<span class="updated">updated {{.}}</span>{{end}}
   {{if .Note}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}

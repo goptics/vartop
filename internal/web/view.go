@@ -15,7 +15,8 @@ import (
 // snapshots and their samples are shared and read concurrently, so nothing here
 // writes to them.
 //
-// Terms used throughout (a "pod" is a unit, one varmq instance):
+// Terms used throughout (a "pod" is a unit, one varmq instance; the pages call
+// it by the server's Noun, "pod" on Kubernetes and "instance" elsewhere):
 //   - healthy pod: PodSnapshot.Err == "". Errored pods contribute nothing, not
 //     even workers they may still carry.
 //   - reporting pod (for a worker): healthy and has that worker.
@@ -42,7 +43,7 @@ type Point struct {
 	V       float64
 	Gap     bool   // no data for this snapshot: draw a break, not zero
 	Partial bool   // fewer pods contributed than were expected to: draw hollow
-	Title   string // hover text, e.g. "15:04:05 · 42.0/s · 2/3 pods"
+	Title   string // hover text, e.g. "15:04:05 · 42.0/s · 2/3 instances"
 }
 
 // HealthView summarises pod health for the header.
@@ -63,7 +64,7 @@ type KPIView struct {
 type RowView struct {
 	Name, ID                 string // ID = "w-" + hex(Name): safe as a DOM id
 	Status, Class, StatusTip string // StatusTip: one "label: Status" line per pod
-	Concurrency              string // "{n} ×{p} pods", "{n}" or "mixed {min}–{max}"
+	Concurrency              string // "{n} ×{p} {many}", "{n}" or "mixed {min}–{max}"
 	Busy, Idle, PendingMax   int
 	PendingTip               string // one "label: n" line per pod
 	AbsentOn                 int    // healthy pods that lack this worker
@@ -150,14 +151,19 @@ func Health(latest *Snapshot) HealthView {
 }
 
 // BalancerNote says how many instances answered behind each balancer endpoint
-// in the newest poll, endpoints sorted, and is "" when none did.
+// in the newest poll, endpoints sorted, and is "" when none did. It counts
+// varmq instances, so its noun does not follow the server's.
 func BalancerNote(latest *Snapshot) string {
 	if latest == nil {
 		return ""
 	}
 	var parts []string
 	for _, ep := range slices.Sorted(maps.Keys(latest.Behind)) {
-		parts = append(parts, fmt.Sprintf("%d instances behind %s", latest.Behind[ep], hostPort(ep)))
+		n, word := latest.Behind[ep], "instances"
+		if n == 1 {
+			word = "instance"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s behind %s", n, word, hostPort(ep)))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -165,7 +171,8 @@ func BalancerNote(latest *Snapshot) string {
 // BuildDashboard aggregates the newest snapshot into one row per worker and the
 // KPI cards, with sparklines over the newest 10 minutes of snaps (oldest first).
 // pod "" merges every pod; otherwise only the one with that key is considered.
-func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration) DashboardView {
+// n words the labels and tooltips.
+func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration, n Noun) DashboardView {
 	v := DashboardView{KPIs: KPIView{StatusCounts: map[string]int{}}}
 	if len(snaps) == 0 {
 		return v
@@ -181,13 +188,13 @@ func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration) Dashb
 			Status:      m.status,
 			Class:       m.class,
 			StatusTip:   strings.Join(m.statusTips, tipSep),
-			Concurrency: concurrencyLabel(m.concurrency),
+			Concurrency: concurrencyLabel(m.concurrency, n),
 			Busy:        m.busy,
 			Idle:        m.idle,
 			PendingMax:  m.pendingMax,
 			PendingTip:  strings.Join(m.pendingTips, tipSep),
 			AbsentOn:    m.absent,
-			Spark:       workerRates(window, pod, name, completedRate),
+			Spark:       workerRates(window, pod, name, completedRate, n),
 		})
 	}
 
@@ -201,9 +208,9 @@ func BuildDashboard(snaps []*Snapshot, pod string, interval time.Duration) Dashb
 	}
 	k := &v.KPIs
 	k.PendingMax, _ = peakPending(pods)
-	k.Completed = fleetRates(window, pod, completedRate, 1, "/s")
-	k.Failed = fleetRates(window, pod, failedRate, 60, "/min")
-	k.Pending = pendingSeries(window, pod)
+	k.Completed = fleetRates(window, pod, completedRate, 1, "/s", n)
+	k.Failed = fleetRates(window, pod, failedRate, 60, "/min", n)
+	k.Pending = pendingSeries(window, pod, n)
 	k.CompletedPerSec = k.Completed[len(k.Completed)-1].V
 	k.FailedPerMin = k.Failed[len(k.Failed)-1].V
 	return v
@@ -248,8 +255,9 @@ func BuildGrid(latest *Snapshot) GridView {
 // BuildDetail aggregates one worker across the pods reporting it in the newest
 // snapshot (counters are summed) and charts its rates over the whole history.
 // It reports false when no healthy, selected pod has the worker. The detail
-// series always span all of snaps, so the interval is not needed.
-func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration) (DetailView, bool) {
+// series always span all of snaps, so the interval is not needed. n words the
+// tooltips.
+func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun) (DetailView, bool) {
 	if len(snaps) == 0 {
 		return DetailView{}, false
 	}
@@ -265,8 +273,8 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration) (Detail
 		Class:            m.class,
 		StatusTip:        strings.Join(m.statusTips, tipSep),
 		ConcurrencyStart: slices.Max(m.concurrency),
-		Completed1h:      workerRates(snaps, pod, worker, completedRate),
-		Failed1h:         workerRates(snaps, pod, worker, failedRate),
+		Completed1h:      workerRates(snaps, pod, worker, completedRate, n),
+		Failed1h:         workerRates(snaps, pod, worker, failedRate, n),
 	}
 	d.ConcurrencyMax = max(concurrencyFloor, 2*d.ConcurrencyStart)
 	for _, p := range pods {
@@ -392,7 +400,7 @@ func mergeStatus(statuses []string) (status, class string) {
 
 // concurrencyLabel shows the per-pod concurrency, never a sum, and "—" when no
 // pod has any.
-func concurrencyLabel(perPod []int) string {
+func concurrencyLabel(perPod []int, n Noun) string {
 	if len(perPod) == 0 {
 		return "—"
 	}
@@ -401,7 +409,7 @@ func concurrencyLabel(perPod []int) string {
 	case lo != hi:
 		return fmt.Sprintf("mixed %d–%d", lo, hi)
 	case len(perPod) > 1:
-		return fmt.Sprintf("%d ×%d pods", lo, len(perPod))
+		return fmt.Sprintf("%d ×%d %s", lo, len(perPod), n.Many)
 	}
 	return strconv.Itoa(lo)
 }
@@ -443,7 +451,7 @@ func newest(snaps []*Snapshot, span, interval time.Duration) []*Snapshot {
 // ones reporting the worker or listing it unreached, plus every errored one; a
 // healthy pod lacking the worker is not expected. With no contributing pod the
 // point is a gap.
-func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64) []Point {
+func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n Noun) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
@@ -471,7 +479,7 @@ func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 			out[i] = noDataPoint(s)
 			continue
 		}
-		out[i] = ratePoint(s, sum, contributing, expected, 1, "/s")
+		out[i] = ratePoint(s, sum, contributing, expected, 1, "/s", n)
 	}
 	return out
 }
@@ -482,7 +490,7 @@ func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 // valid rates of its workers but contributes only when it has one and none of
 // its workers is unreached, so the point is partial then. It is a gap only when
 // nothing contributed and no rate was summed.
-func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale float64, unit string) []Point {
+func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale float64, unit string, n Noun) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
@@ -513,14 +521,14 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 			out[i] = noDataPoint(s)
 			continue
 		}
-		out[i] = ratePoint(s, sum, contributing, expected, scale, unit)
+		out[i] = ratePoint(s, sum, contributing, expected, scale, unit, n)
 	}
 	return out
 }
 
 // pendingSeries charts the Σ-over-workers of max-per-pod pending per snapshot.
 // A snapshot with no healthy pod has no data.
-func pendingSeries(snaps []*Snapshot, pod string) []Point {
+func pendingSeries(snaps []*Snapshot, pod string, n Noun) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		total, healthy := peakPending(podsOf(s, pod))
@@ -528,19 +536,19 @@ func pendingSeries(snaps []*Snapshot, pod string) []Point {
 			out[i] = noDataPoint(s)
 			continue
 		}
-		out[i] = Point{V: float64(total), Title: fmt.Sprintf("%s · %d pending (max/pod)", pointTime(s), total)}
+		out[i] = Point{V: float64(total), Title: fmt.Sprintf("%s · %d pending (max/%s)", pointTime(s), total, n.One)}
 	}
 	return out
 }
 
 // ratePoint builds one rate point from contributing of the expected pods; it
 // is partial when fewer contributed than were expected.
-func ratePoint(s *Snapshot, sum float64, contributing, expected int, scale float64, unit string) Point {
+func ratePoint(s *Snapshot, sum float64, contributing, expected int, scale float64, unit string, n Noun) Point {
 	v := sum * scale
 	return Point{
 		V:       v,
 		Partial: contributing < expected,
-		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d pods", pointTime(s), v, unit, contributing, expected),
+		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d %s", pointTime(s), v, unit, contributing, expected, n.Many),
 	}
 }
 

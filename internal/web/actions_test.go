@@ -153,8 +153,8 @@ func TestActionOnPodLackingWorker(t *testing.T) {
 	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	_, body := post(t, srv, "/workers/emails/actions/resume", multi(), true)
-	if r := resultsOf(body); strings.Count(r, `<li class="ok">`) != 1 || !strings.Contains(r, `<li class="nochange">`) || !strings.Contains(r, "no change (not on this pod)") {
-		t.Errorf("want ok on a and no change (not on this pod) on b:\n%s", r)
+	if r := resultsOf(body); strings.Count(r, `<li class="ok">`) != 1 || !strings.Contains(r, `<li class="nochange">`) || !strings.Contains(r, "no change (not on this instance)") {
+		t.Errorf("want ok on a and no change (not on this instance) on b:\n%s", r)
 	}
 }
 
@@ -525,7 +525,7 @@ func TestConcurrencyValidatesAndSkips(t *testing.T) {
 	}
 }
 
-// A worker a unit lists but did not answer for is not "not on this pod": the
+// A worker a unit lists but did not answer for is not "not on this instance": the
 // action is sent there like to any unit, so the confirm panel must not say
 // otherwise.
 func TestBulkConfirmUnreachedIsNotAbsent(t *testing.T) {
@@ -548,7 +548,7 @@ func TestBulkConfirmUnreachedIsNotAbsent(t *testing.T) {
 
 	// emails is on neither unit: both cells say so. orders is on a and
 	// unreached on b: both are sent.
-	if absent, paused := strings.Count(body, `<span class="na">not on this pod</span>`), strings.Count(body, `<td>pause</td>`); absent != 2 || paused != 2 {
+	if absent, paused := strings.Count(body, `<span class="na">not on this instance</span>`), strings.Count(body, `<td>pause</td>`); absent != 2 || paused != 2 {
 		t.Errorf("confirm panel has %d absent and %d pause cells, want 2 and 2:\n%s", absent, paused, body)
 	}
 	if _, orders, _ := strings.Cut(body, `<th scope="row" class="name">orders</th>`); !strings.HasPrefix(orders, `<td>pause</td><td>pause</td>`) {
@@ -579,7 +579,7 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 		}
 	}
 	// emails is not on b: its cell says so; the other three are sent.
-	absent := `<td><span class="na">not on this pod</span></td>`
+	absent := `<td><span class="na">not on this instance</span></td>`
 	if n, m := strings.Count(body, `<td>pause</td>`), strings.Count(body, absent); n != 3 || m != 1 {
 		t.Errorf("confirm panel has %d pause and %d absent cells, want 3 and 1 (2 names × 2 pods)", n, m)
 	}
@@ -604,8 +604,8 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 	if n := strings.Count(resultsOf(body), "<li "); n != 4 {
 		t.Errorf("%d results, want one per name × pod:\n%s", n, body)
 	}
-	if r := resultsOf(body); strings.Count(r, "no change (not on this pod)") != 1 || strings.Contains(r, `<li class="failed">`) {
-		t.Errorf("emails on b should read no change (not on this pod), nothing failed:\n%s", r)
+	if r := resultsOf(body); strings.Count(r, "no change (not on this instance)") != 1 || strings.Contains(r, `<li class="failed">`) {
+		t.Errorf("emails on b should read no change (not on this instance), nothing failed:\n%s", r)
 	}
 	for _, want := range []string{`<span class="worker">orders</span>`, `<span class="worker">emails</span>`} {
 		if strings.Count(body, want) != 2 {
@@ -731,7 +731,7 @@ func TestFailedRefreshKeepsResults(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.fragments(rec,
-		fragment{"results", "results", []ActionResult{{Pod: "a", Key: "http://a:3000", Outcome: "ok"}}},
+		fragment{"results", "results", ResultsView{Results: []ActionResult{{Pod: "a", Key: "http://a:3000", Outcome: "ok"}}, Noun: podNoun}},
 		fragment{"dashboard", "live_oob", Page{}})
 	body := rec.Body.String()
 	if rec.Code != http.StatusOK || !strings.Contains(body, `<li class="ok">`) {

@@ -495,7 +495,7 @@ func TestConnectionLabel(t *testing.T) {
 		{"kubernetes", &config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}, "prod/jobs"},
 		{"dns", &config.Server{DNS: &config.DNSRef{Host: "varmq-headless", Port: 8080}}, "dns:varmq-headless:8080"},
 		{"single endpoint", &config.Server{Endpoints: []string{"http://localhost:8080/varmq"}}, "http://localhost:8080/varmq"},
-		{"several endpoints", &config.Server{Endpoints: []string{"http://a:1/varmq", "http://b:1/varmq"}}, "2 pods"},
+		{"several endpoints", &config.Server{Endpoints: []string{"http://a:1/varmq", "http://b:1/varmq"}}, "2 instances"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

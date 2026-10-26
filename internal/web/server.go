@@ -152,7 +152,7 @@ func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p.Title = pageTitle("vartop", p.Server)
 	if s != nil {
 		if snaps := fill(&p, s.History); !podGone(&p, snaps) {
-			d := BuildDashboard(snaps, p.Pod, s.History.Interval())
+			d := BuildDashboard(snaps, p.Pod, s.History.Interval(), p.Noun)
 			p.Dashboard = &d
 		}
 	}
@@ -161,7 +161,7 @@ func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 	p, s := h.page(r)
-	p.Title = pageTitle("Pod grid", p.Server)
+	p.Title = pageTitle(p.Noun.Cap()+" grid", p.Server)
 	if s != nil {
 		g := BuildGrid(latestOf(fill(&p, s.History)))
 		p.Grid = &g
@@ -182,10 +182,10 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 		snaps := fill(&p, s.History)
 		if podGone(&p, snaps) {
 			// p says why; no pod's data is shown under the gone one's name.
-		} else if d, ok := BuildDetail(snaps, p.Pod, name, s.History.Interval()); ok {
+		} else if d, ok := BuildDetail(snaps, p.Pod, name, s.History.Interval(), p.Noun); ok {
 			p.Detail = &d
 		} else {
-			where := "any pod"
+			where := "any " + p.Noun.One
 			if p.Pod != "" {
 				where = p.Scope()
 			}
@@ -244,6 +244,7 @@ func (h *handler) page(r *http.Request) (Page, *Session) {
 			u.RawQuery = q.Encode()
 			p.SelfURL = u.RequestURI()
 		}
+		p.Noun = NounFor(cur.Server)
 		return p, cur
 	case want == h.m.Failed():
 		h.failure(&p, want)
@@ -253,6 +254,7 @@ func (h *handler) page(r *http.Request) (Page, *Session) {
 		fill(&p, cur.History)
 	}
 
+	p.Noun = NounFor(h.m.cfg.Servers[p.Server])
 	if isHTMX(r) && (p.Connecting != "" || p.Err != "") {
 		p.Banner = cmp.Or(p.Connecting, p.Err)
 		p.Connecting, p.Err = "", ""
@@ -308,7 +310,7 @@ func podGone(p *Page, snaps []*Snapshot) bool {
 			break
 		}
 	}
-	p.Banner = "Pod " + label + " is no longer reported — reload"
+	p.Banner = p.Noun.Cap() + " " + label + " is no longer reported — reload"
 	return true
 }
 

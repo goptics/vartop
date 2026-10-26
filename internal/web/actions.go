@@ -39,25 +39,27 @@ func (e noChange) Error() string { return string(e) }
 // fanOut calls fn concurrently on every client of clients, or only on the
 // one whose endpoint is pod when pod is set, and returns one result per
 // pod, sorted by endpoint and labelled from units (see unitsOf). It calls
-// nothing and errors when pod is not one of clients' endpoints.
-func fanOut(ctx context.Context, clients []*api.Client, pod string, units map[string]PodSnapshot,
+// nothing and errors when pod is not one of clients' endpoints. n words the
+// error and the results' messages.
+func fanOut(ctx context.Context, clients []*api.Client, pod string, units map[string]PodSnapshot, n Noun,
 	fn func(context.Context, *api.Client) error) ([]ActionResult, error) {
-	targets, err := podScope(clients, pod)
+	targets, err := podScope(clients, pod, n)
 	if err != nil {
 		return nil, err
 	}
 	results := make([]ActionResult, len(targets))
 	var wg sync.WaitGroup
 	for i, c := range targets {
-		wg.Go(func() { results[i] = outcome(c.PrimaryEndpoint(), units, fn(ctx, c)) })
+		wg.Go(func() { results[i] = outcome(c.PrimaryEndpoint(), units, n, fn(ctx, c)) })
 	}
 	wg.Wait()
 	return results, nil
 }
 
 // podScope is the clients an action on pod reaches, sorted by endpoint: all
-// of them when pod is "", else the one whose endpoint is pod.
-func podScope(clients []*api.Client, pod string) ([]*api.Client, error) {
+// of them when pod is "", else the one whose endpoint is pod. n words the
+// error for a pod that is none.
+func podScope(clients []*api.Client, pod string, n Noun) ([]*api.Client, error) {
 	if pod == "" {
 		return slices.SortedFunc(slices.Values(clients), func(a, b *api.Client) int {
 			return strings.Compare(a.PrimaryEndpoint(), b.PrimaryEndpoint())
@@ -68,13 +70,13 @@ func podScope(clients []*api.Client, pod string) ([]*api.Client, error) {
 			return []*api.Client{c}, nil
 		}
 	}
-	return nil, errors.New("the selected pod is not a pod of this server; reload")
+	return nil, fmt.Errorf("the selected %s is not %s %s of this server; reload", n.One, n.Article, n.One)
 }
 
 // outcome is the result of err on the unit key: varmq's 409 ("already in that
 // state"), its 404 (the pod lacks the worker: actions fan out to every pod
 // in scope) and a skip are no change, any other error is a failure.
-func outcome(key string, units map[string]PodSnapshot, err error) ActionResult {
+func outcome(key string, units map[string]PodSnapshot, n Noun, err error) ActionResult {
 	u := units[key]
 	u.Key = key // a pod the snapshot lacks is still labelled and tipped by its key
 	r := ActionResult{Pod: cmp.Or(u.Label, config.ShortOrigin(key)), Key: key, Tip: u.Tip(), Outcome: "ok"}
@@ -87,7 +89,7 @@ func outcome(key string, units map[string]PodSnapshot, err error) ActionResult {
 	case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict:
 		r.Outcome, r.Msg = "no change", apiErr.Message
 	case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound:
-		r.Outcome, r.Msg = "no change", "not on this pod"
+		r.Outcome, r.Msg = "no change", "not on this "+n.One
 	default:
 		r.Outcome, r.Msg = "failed", err.Error()
 	}
@@ -155,7 +157,7 @@ func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(s.History.Latest()), func(ctx context.Context, c *api.Client) error {
+	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(s.History.Latest()), NounFor(s.Server), func(ctx context.Context, c *api.Client) error {
 		return c.ActionCtx(ctx, url.PathEscape(name), action)
 	})
 	if err != nil {
@@ -188,7 +190,7 @@ func (h *handler) concurrency(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pod := r.PostFormValue("pod")
-	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(latest), func(ctx context.Context, c *api.Client) error {
+	results, err := fanOut(mutationCtx(r), s.Clients(), pod, unitsOf(latest), NounFor(s.Server), func(ctx context.Context, c *api.Client) error {
 		if cur, ok := current[c.PrimaryEndpoint()]; ok && cur == n {
 			return noChange(fmt.Sprintf("already %d", n))
 		}
@@ -223,17 +225,18 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	if s == nil {
 		return
 	}
+	noun := NounFor(s.Server)
 	pod := r.PostFormValue("pod")
 	latest := s.History.Latest()
 	units := unitsOf(latest)
-	targets, err := podScope(s.Clients(), pod)
+	targets, err := podScope(s.Clients(), pod, noun)
 	if err != nil {
 		badRequest(w, err.Error())
 		return
 	}
 
 	if r.PostFormValue("confirm") != "1" {
-		cv := ConfirmView{Action: action, Server: key, Pod: pod, Rows: make([]ConfirmRow, len(names))}
+		cv := ConfirmView{Action: action, Server: key, Pod: pod, Noun: noun, Rows: make([]ConfirmRow, len(names))}
 		for i, name := range names {
 			cv.Rows[i].Name = name
 		}
@@ -258,7 +261,7 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	for i, name := range names {
 		wg.Go(func() {
 			// targets is already scoped, so this cannot fail.
-			res, _ := fanOut(ctx, targets, "", units, func(ctx context.Context, c *api.Client) error {
+			res, _ := fanOut(ctx, targets, "", units, noun, func(ctx context.Context, c *api.Client) error {
 				return c.ActionCtx(ctx, url.PathEscape(name), action)
 			})
 			for j := range res {
@@ -299,7 +302,7 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, key string, s 
 		s.PollNow(ctx)
 		cancel()
 	}
-	frags := []fragment{{"results", "results", results}}
+	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: NounFor(s.Server)}}}
 	if set, p, ok := livePage(r, key, s, pod, worker); ok {
 		frags = append(frags, fragment{set, "live_oob", p})
 	}
@@ -333,17 +336,17 @@ func livePage(r *http.Request, key string, s *Session, pod, worker string) (stri
 		}
 	}
 
-	p := Page{Server: key, Pod: pod}
+	p := Page{Server: key, Pod: pod, Noun: NounFor(s.Server)}
 	snaps := fill(&p, s.History)
 	if podGone(&p, snaps) {
 		return "", Page{}, false // the next poll shows why
 	}
 	switch set {
 	case "dashboard":
-		d := BuildDashboard(snaps, p.Pod, s.History.Interval())
+		d := BuildDashboard(snaps, p.Pod, s.History.Interval(), p.Noun)
 		p.Dashboard = &d
 	case "detail":
-		d, ok := BuildDetail(snaps, p.Pod, worker, s.History.Interval())
+		d, ok := BuildDetail(snaps, p.Pod, worker, s.History.Interval(), p.Noun)
 		if !ok {
 			return "", Page{}, false
 		}

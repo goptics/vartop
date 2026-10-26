@@ -11,13 +11,13 @@
     {{template "spark" (sparkline $k.Failed 160 32)}}
   </div>
   <div class="card pending">
-    <h3>Pending (max/pod)</h3>
+    <h3>Pending (max/{{$.Noun.One}})</h3>
     <p class="big">{{if noData $k.Pending}}—{{else}}{{$k.PendingMax}}{{end}}</p>
     {{template "spark" (sparkline $k.Pending 160 32)}}
   </div>
   <div class="card">
     <h3>Workers by status</h3>
-    <p class="sub">pod × worker instances</p>
+    <p class="sub">{{$.Noun.One}} × worker</p>
     <ul class="chips">{{range statusClasses}}{{$n := index $k.StatusCounts .}}{{if $n}}<li class="status {{.}}">{{$n}} {{.}}</li>{{end}}{{end}}{{if not $k.StatusCounts}}<li>—</li>{{end}}</ul>
   </div>
 </section>
@@ -27,17 +27,17 @@
     <th class="sel"><span class="sr">Select</span></th>
     <th>Worker</th>
     <th>Status</th>
-    <th>Concurrency (per pod)</th>
+    <th>Concurrency (per {{$.Noun.One}})</th>
     <th class="num">Busy</th>
     <th class="num">Idle</th>
-    <th class="num">Pending (max/pod)</th>
+    <th class="num">Pending (max/{{$.Noun.One}})</th>
     <th>Completed /s (10 min)</th>
   </tr></thead>
   <tbody>{{range .Rows}}
   <tr id="{{.ID}}">
     <td class="sel"><input type="checkbox" id="sel-{{.ID}}" form="bulk" name="names" value="{{.Name}}" aria-label="Select {{.Name}}" hx-preserve></td>
     <td class="name"><a href="{{workerURL .Name $.Server $.Pod}}">{{.Name}}</a></td>
-    <td><span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} pods</span>{{end}}</td>
+    <td><span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}</td>
     <td>{{.Concurrency}}</td>
     <td class="num">{{.Busy}}</td>
     <td class="num">{{.Idle}}</td>

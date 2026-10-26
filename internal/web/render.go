@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/goptics/vartop/internal/config"
 )
 
 // assets holds the HTML templates and the static files (vendored htmx, CSS).
@@ -16,6 +18,33 @@ import (
 //go:embed templates static
 var assets embed.FS
 
+// Noun is what the pages call one unit of a server: "pod" on Kubernetes,
+// "instance" on every other server. Article goes before One ("a pod", "an
+// instance").
+type Noun struct{ One, Many, Article string }
+
+// Cap is One with a capital first letter.
+func (n Noun) Cap() string { return capitalize(n.One) }
+
+// CapMany is Many with a capital first letter.
+func (n Noun) CapMany() string { return capitalize(n.Many) }
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// NounFor is the noun of srv's units: a Kubernetes server's are pods, any
+// other server's (static endpoints, DNS) are instances, and so are nil's.
+func NounFor(srv *config.Server) Noun {
+	if srv != nil && srv.Kubernetes != nil {
+		return Noun{One: "pod", Many: "pods", Article: "a"}
+	}
+	return Noun{One: "instance", Many: "instances", Article: "an"}
+}
+
 // PodOption is one entry of the pod select. Tip is the hover text of Label.
 type PodOption struct{ Key, Label, Tip string }
 
@@ -23,6 +52,7 @@ type PodOption struct{ Key, Label, Tip string }
 // compute anything the view models do not already carry.
 type Page struct {
 	Title, Server, Pod, SelfURL string // SelfURL = current path + query, used by the poller
+	Noun                        Noun   // what the server's units are called
 	Servers                     []string
 	Pods                        []PodOption
 	IntervalSec                 int
@@ -43,11 +73,11 @@ type Page struct {
 	Detail    *DetailView
 }
 
-// Scope names what an action on this page touches: the selected pod's label,
-// or "all pods".
+// Scope names what an action on this page touches: the selected unit's label,
+// or "all pods" ("all instances" off Kubernetes).
 func (p Page) Scope() string {
 	if p.Pod == "" {
-		return "all pods"
+		return "all " + p.Noun.Many
 	}
 	for _, o := range p.Pods {
 		if o.Key == p.Pod {
@@ -63,10 +93,18 @@ func (p Page) Scope() string {
 // worker when one response covers several (bulk).
 type ActionResult struct{ Worker, Pod, Key, Tip, Outcome, Msg string }
 
+// ResultsView is what the "results" template renders: the outcome of every
+// unit an action reached. Noun words the notice for an action that reached none.
+type ResultsView struct {
+	Results []ActionResult
+	Noun    Noun
+}
+
 // ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
 // on Server. A down pod's column carries its Err.
 type ConfirmView struct {
 	Action, Server, Pod string
+	Noun                Noun
 	Pods                []PodColumn
 	Rows                []ConfirmRow
 }
@@ -99,7 +137,7 @@ var funcs = template.FuncMap{
 //   - dashboard, grid, detail: ExecuteTemplate(w, "layout", Page) renders the
 //     full document. The dashboard and detail sets also define "live_oob"
 //     (Page): the #live region as an out-of-band swap, for action responses.
-//   - results: ExecuteTemplate(w, "results", []ActionResult).
+//   - results: ExecuteTemplate(w, "results", ResultsView).
 //   - confirm: ExecuteTemplate(w, "confirm", ConfirmView).
 func parseTemplates() (map[string]*template.Template, error) {
 	sets := make(map[string]*template.Template)

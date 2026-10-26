@@ -18,7 +18,7 @@
   <figcaption>Failed /s <span class="peak">peak {{printf "%.1f" (peak .Failed1h)}}/s</span></figcaption>
   {{template "spark" (sparkline .Failed1h 720 120)}}
 </figure>
-<p class="pods">Pods reporting: {{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}</p>
+<p class="pods">{{$.Noun.CapMany}} reporting: {{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}</p>
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
@@ -28,17 +28,17 @@
 {{template "live" .}}
 {{with .Detail}}{{$name := pathEscape .Name}}
 <section class="controls" aria-label="Controls">
-  <h3>Concurrency <span class="sub">per pod, on {{$.Scope}}</span></h3>
+  <h3>Concurrency <span class="sub">per {{$.Noun.One}}, on {{$.Scope}}</span></h3>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
     <input type="hidden" name="pod" value="{{$.Pod}}">
-    <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per pod">
+    <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}">
     <span class="sub">1 – {{.ConcurrencyMax}}, applied on release</span>
   </form>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
     <input type="hidden" name="pod" value="{{$.Pod}}">
-    <input type="number" name="n" min="1" value="{{.ConcurrencyStart}}" aria-label="Concurrency per pod, exact">
+    <input type="number" name="n" min="1" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}, exact">
     <button type="submit">Set</button>
   </form>
   <h3>Actions <span class="sub">on {{$.Scope}}</span></h3>
