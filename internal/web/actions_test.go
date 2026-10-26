@@ -107,7 +107,11 @@ func TestActionAllPods(t *testing.T) {
 		t.Errorf("%d ok results, want 2:\n%s", n, body)
 	}
 	// One line per pod, labelled as the pages label it.
-	for _, want := range []string{`title="a via ` + aSrv.URL + `">a</span>`, `title="b via ` + bSrv.URL + `">b</span>`} {
+	labels := staticLabels(aSrv.URL, bSrv.URL)
+	for _, want := range []string{
+		`title="a via ` + aSrv.URL + `">` + labels[aSrv.URL] + `</span>`,
+		`title="b via ` + bSrv.URL + `">` + labels[bSrv.URL] + `</span>`,
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("results lack %q", want)
 		}
@@ -565,12 +569,13 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("confirm step = %d, want 200", resp.StatusCode)
 	}
+	labels := staticLabels(aSrv.URL, bSrv.URL)
 	for _, want := range []string{
 		"Confirm pause on multi",
 		`<th scope="row" class="name">emails</th>`,
 		`<th scope="row" class="name">orders</th>`,
-		`<th title="a via ` + aSrv.URL + `">a</th>`,
-		`<th title="b via ` + bSrv.URL + `">b</th>`,
+		`<th title="a via ` + aSrv.URL + `">` + labels[aSrv.URL] + `</th>`,
+		`<th title="b via ` + bSrv.URL + `">` + labels[bSrv.URL] + `</th>`,
 		`<input type="hidden" name="confirm" value="1">`,
 		`<input type="hidden" name="server" value="multi">`,
 	} {

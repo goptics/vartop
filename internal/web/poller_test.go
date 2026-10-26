@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -52,6 +53,16 @@ func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 	}
 }
 
+// staticLabels is how a session first labels the units of a non-Kubernetes
+// server over the endpoints urls: instance-1, instance-2, … in URL order.
+func staticLabels(urls ...string) map[string]string {
+	labels := make(map[string]string, len(urls))
+	for i, u := range slices.Sorted(slices.Values(urls)) {
+		labels[u] = fmt.Sprintf("instance-%d", i+1)
+	}
+	return labels
+}
+
 func podByEndpoint(t *testing.T, s *Snapshot, endpoint string) PodSnapshot {
 	t.Helper()
 	for _, p := range s.Pods {
@@ -96,7 +107,7 @@ func TestPollOnceBuildsSnapshot(t *testing.T) {
 	pool := staticPool(t, b.URL, a.URL)
 
 	start := time.Now()
-	s := pollOnce(context.Background(), pool)
+	s := pollOnce(context.Background(), pool, newTracker(time.Second, false))
 	end := time.Now()
 
 	if s.At.Before(start) || s.At.After(end) {
@@ -109,9 +120,9 @@ func TestPollOnceBuildsSnapshot(t *testing.T) {
 	if !slices.Equal(gotEPs, wantEPs) {
 		t.Fatalf("pods = %v, want sorted %v", gotEPs, wantEPs)
 	}
-	for _, p := range s.Pods {
-		// Both pods report instance "host": the shared label falls back to host:port.
-		if want := strings.TrimPrefix(p.Key, "http://"); p.Label != want {
+	for i, p := range s.Pods {
+		// Not a Kubernetes server: numbered in endpoint order.
+		if want := fmt.Sprintf("instance-%d", i+1); p.Label != want {
 			t.Errorf("%s: Label = %q, want %q", p.Key, p.Label, want)
 		}
 		if p.Err != "" || p.Balanced {
@@ -148,7 +159,7 @@ func TestPollOnceSkipsWorkerGoneBeforeGet(t *testing.T) {
 		"w2": nil, // listed, then 404 on GET
 	})
 
-	pod := podByEndpoint(t, pollOnce(context.Background(), staticPool(t, srv.URL)), srv.URL)
+	pod := podByEndpoint(t, pollOnce(context.Background(), staticPool(t, srv.URL), newTracker(time.Second, false)), srv.URL)
 
 	if countCalls(f.calls(), "GET /workers/w2") != 1 {
 		t.Fatalf("w2 was not fetched: calls %v", f.calls())
@@ -175,7 +186,7 @@ func TestPollOnceWorkerFetchErrorMarksPod(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	pod := podByEndpoint(t, pollOnce(context.Background(), staticPool(t, srv.URL)), srv.URL)
+	pod := podByEndpoint(t, pollOnce(context.Background(), staticPool(t, srv.URL), newTracker(time.Second, false)), srv.URL)
 
 	// Not a 404: the worker may still exist, so the pod is unknown rather
 	// than healthy-without-w2.
@@ -193,7 +204,7 @@ func TestPollOnceSlowPodTimesOut(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	s := pollOnce(ctx, pool)
+	s := pollOnce(ctx, pool, newTracker(time.Second, true))
 	if elapsed := time.Since(start); elapsed >= 400*time.Millisecond {
 		t.Errorf("pollOnce took %v, want it bounded by the 100ms deadline", elapsed)
 	}
@@ -205,7 +216,8 @@ func TestPollOnceSlowPodTimesOut(t *testing.T) {
 	if pa.Err != "" || !slices.Equal(sampleNames(pa), []string{"orders"}) {
 		t.Errorf("fast pod: Err = %q, workers %v; want healthy with orders", pa.Err, sampleNames(pa))
 	}
-	// Captured after its requests, so the label is the instance that answered.
+	// Labelled as on a Kubernetes server: captured after its requests, the
+	// pod name falls back to the instance that answered.
 	if pa.Label != "a" {
 		t.Errorf("fast pod Label = %q, want its instance %q", pa.Label, "a")
 	}
@@ -214,7 +226,7 @@ func TestPollOnceSlowPodTimesOut(t *testing.T) {
 func TestPollOnceEscapesNames(t *testing.T) {
 	f, srv := newFakeVarmq(t, "i", map[string]*fakeWorker{"a/b c": {Status: "Running"}})
 
-	pod := podByEndpoint(t, pollOnce(context.Background(), staticPool(t, srv.URL)), srv.URL)
+	pod := podByEndpoint(t, pollOnce(context.Background(), staticPool(t, srv.URL), newTracker(time.Second, false)), srv.URL)
 
 	if !slices.Contains(f.calls(), "GET /workers/a%2Fb%20c") {
 		t.Errorf("calls = %v, want the escaped name", f.calls())
@@ -258,12 +270,15 @@ func TestLabelCollisionsFallBackOnVia(t *testing.T) {
 }
 
 // An empty worker list still says which instance answered.
-func TestPollPodEmptyListNamesInstance(t *testing.T) {
+func TestPollDirectEmptyListNamesInstance(t *testing.T) {
 	_, srv := newFakeVarmq(t, "idle-host", map[string]*fakeWorker{})
-	pod := pollPod(context.Background(), staticPool(t, srv.URL).Clients()[0])
+	pod, answered := pollDirect(context.Background(), staticPool(t, srv.URL).Clients()[0])
 
 	if pod.Key != srv.URL || pod.Via != srv.URL || pod.Instance != "idle-host" || pod.Err != "" || len(pod.Workers) != 0 {
 		t.Errorf("pod = %+v, want a healthy direct unit of instance idle-host with no workers", pod)
+	}
+	if !slices.Equal(answered, []string{"idle-host"}) {
+		t.Errorf("answered = %v, want [idle-host]", answered)
 	}
 }
 

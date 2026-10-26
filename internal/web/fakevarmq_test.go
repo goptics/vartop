@@ -21,13 +21,17 @@ type fakeWorker struct {
 	// ActionStatus, when non-zero, makes every PATCH on this worker reply
 	// with this status and {"error":"..."} without changing anything.
 	ActionStatus int
+	// GetStatus, when non-zero, makes GET /workers/{name} reply with this
+	// status and {"error":"..."}.
+	GetStatus int
 }
 
 // fakeVarmq is an in-memory varmq REST API (the routes of varmq's mux.go)
 // for tests. Lock mu to read or change its fields while it is serving.
 type fakeVarmq struct {
-	Instance string        // sent as X-Varmq-Instance on every response
-	Delay    time.Duration // added before every reply; abandoned if the client goes away
+	Instance   string        // sent as X-Varmq-Instance on every response
+	Delay      time.Duration // added before every reply; abandoned if the client goes away
+	ListStatus int           // when non-zero, GET /workers replies with it and {"error":"..."}
 
 	mu sync.Mutex
 	// Workers by name. A nil entry is listed by GET /workers but answers
@@ -112,6 +116,11 @@ func (f *fakeVarmq) maxListConcurrency() int {
 
 func (f *fakeVarmq) list(w http.ResponseWriter, _ *http.Request) {
 	f.mu.Lock()
+	if status := f.ListStatus; status != 0 {
+		f.mu.Unlock()
+		writeFakeError(w, status, http.StatusText(status))
+		return
+	}
 	names := make([]string, 0, len(f.Workers))
 	for name := range f.Workers {
 		names = append(names, name)
@@ -129,8 +138,10 @@ func (f *fakeVarmq) get(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	f.mu.Lock()
 	fw := f.Workers[name]
+	failWith := 0
 	var body map[string]any
 	if fw != nil {
+		failWith = fw.GetStatus
 		body = fakeSummary(name, fw)
 		body["metrics"] = map[string]uint64{
 			"submitted":  fw.Submitted,
@@ -140,11 +151,14 @@ func (f *fakeVarmq) get(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f.mu.Unlock()
-	if body == nil {
+	switch {
+	case body == nil:
 		writeFakeError(w, http.StatusNotFound, "worker not found")
-		return
+	case failWith != 0:
+		writeFakeError(w, failWith, http.StatusText(failWith))
+	default:
+		writeFakeJSON(w, http.StatusOK, body)
 	}
-	writeFakeJSON(w, http.StatusOK, body)
 }
 
 // fakeActionStatus maps each action to the status the worker ends up in.

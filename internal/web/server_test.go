@@ -557,7 +557,7 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	waitUntil(t, 3*time.Second, "a snapshot without a", func() bool { return len(m.Current().History.Latest().Pods) == 1 })
 
 	// Labelled from the last snapshot that had it.
-	banner := `<p class="banner">Instance a is no longer reported — reload</p>`
+	banner := `<p class="banner">Instance ` + staticLabels(aSrv.URL, bSrv.URL)[aSrv.URL] + ` is no longer reported — reload</p>`
 	for _, path := range []string{dash, detail} {
 		for _, hx := range []bool{true, false} { // a poll, a full load
 			status, body := fetch(t, srv, path, hx)

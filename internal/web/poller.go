@@ -25,6 +25,7 @@ type Session struct {
 	History  *History
 
 	pool    *api.Pool
+	tracker *tracker        // the poller goroutine's
 	ctx     context.Context // cancelled by Close
 	cancel  context.CancelFunc
 	pollNow chan chan struct{} // the poller closes each received channel once its snapshot is appended
@@ -41,6 +42,7 @@ func NewSession(srv *config.Server, pool *api.Pool) *Session {
 		Interval: interval,
 		History:  NewHistory(interval),
 		pool:     pool,
+		tracker:  newTracker(interval, srv.Kubernetes != nil),
 		ctx:      ctx,
 		cancel:   cancel,
 		pollNow:  make(chan chan struct{}),
@@ -111,7 +113,7 @@ func (s *Session) run() {
 func (s *Session) tick() bool {
 	ctx, cancel := context.WithTimeout(s.ctx, s.Interval*8/10)
 	defer cancel()
-	snap := pollOnce(ctx, s.pool)
+	snap := pollOnce(ctx, s.pool, s.tracker)
 	if s.ctx.Err() != nil {
 		return false
 	}
@@ -119,50 +121,116 @@ func (s *Session) tick() bool {
 	return true
 }
 
-// pollOnce polls every pod in the pool concurrently, within ctx, and returns
-// the snapshot with At set to when the poll started. Every Sample in it is
-// freshly allocated, as History.Append requires.
-func pollOnce(ctx context.Context, pool *api.Pool) *Snapshot {
-	snap := &Snapshot{At: time.Now()}
-	clients := pool.Clients()
-	snap.Pods = make([]PodSnapshot, len(clients))
+// pollOnce polls every unit of the pool within ctx, tracking instances
+// across ticks in t, and returns the snapshot with At set to when the poll
+// started. Every Sample in it is freshly allocated, as History.Append
+// requires.
+func pollOnce(ctx context.Context, pool *api.Pool, t *tracker) *Snapshot {
+	return pollAt(ctx, pool, t, time.Now())
+}
 
+// pollAt is pollOnce for a tick that started at now. The pool's direct
+// endpoints are polled concurrently, one unit each; one whose replies came
+// from more than one instance joins the balancers and its unit is dropped.
+// Then every instance behind the balancers becomes a unit of its own. now
+// dates the tracker's sightings, so tests can step past its window.
+func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Snapshot {
+	snap := &Snapshot{At: now}
+	var directs, balancers []*api.Client
+	for _, c := range pool.Clients() {
+		if t.balancer(c.PrimaryEndpoint(), now) {
+			balancers = append(balancers, c)
+		} else {
+			directs = append(directs, c)
+		}
+	}
+
+	pods := make([]PodSnapshot, len(directs))
+	answered := make([][]string, len(directs))
 	var wg sync.WaitGroup
-	for i, c := range clients {
-		wg.Go(func() { snap.Pods[i] = pollPod(ctx, c) })
+	for i, c := range directs {
+		wg.Go(func() { pods[i], answered[i] = pollDirect(ctx, c) })
 	}
 	wg.Wait()
 
-	for i := range snap.Pods {
-		p := &snap.Pods[i]
-		// After the requests: PodName may name the instance that just answered.
-		p.Label = pool.PodName(p.Via)
+	behind := make(map[string]map[string]bool) // endpoint → instances that answered through it
+	heard := func(endpoint, instance string) {
+		if instance == "" {
+			return
+		}
+		t.saw(endpoint, instance, now)
+		if behind[endpoint] == nil {
+			behind[endpoint] = make(map[string]bool)
+		}
+		behind[endpoint][instance] = true
 	}
-	dedupeLabels(snap.Pods)
+	direct := make(map[string]bool) // instances shown as a direct unit
+	for i, c := range directs {
+		for _, id := range answered[i] {
+			heard(c.PrimaryEndpoint(), id)
+		}
+		if len(answered[i]) > 1 {
+			balancers = append(balancers, c)
+			continue
+		}
+		snap.Pods = append(snap.Pods, pods[i])
+		if id := pods[i].Instance; id != "" {
+			direct[id] = true
+		}
+	}
+	if len(balancers) > 0 {
+		snap.Pods = append(snap.Pods, pollBalanced(ctx, balancers, t, direct, now, heard)...)
+	}
+	for _, c := range balancers {
+		if n := len(behind[c.PrimaryEndpoint()]); n > 0 {
+			if snap.Behind == nil {
+				snap.Behind = make(map[string]int)
+			}
+			snap.Behind[c.PrimaryEndpoint()] = n
+		}
+	}
+
+	if t.kubernetes {
+		for i := range snap.Pods {
+			p := &snap.Pods[i]
+			if p.Balanced && p.Instance != "" {
+				p.Label = p.Instance
+			} else {
+				// After the requests: PodName may name the instance that just answered.
+				p.Label = pool.PodName(p.Via)
+			}
+		}
+		dedupeLabels(snap.Pods)
+	} else {
+		t.label(snap.Pods)
+	}
 	slices.SortFunc(snap.Pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
+	t.prune(now)
 	return snap
 }
 
-// pollPod lists one pod's workers, then fetches every worker concurrently. The
-// pod is a direct unit: its key and the endpoint it was reached through are the
-// same, and its instance is the one that answered the list. A failed or
-// timed-out list marks the pod errored. A worker that answers 404 was removed
-// since the list and is skipped; any other fetch error also marks the pod
-// errored, naming the worker, since its state is unknown, not absent.
+// pollDirect lists one endpoint's workers on a new connection, so that a
+// balancer picking per connection is seen sending it elsewhere, then fetches
+// every worker concurrently. The endpoint is a direct unit: its key and the
+// endpoint it was reached through are the same, and its instance is the one
+// that answered the list. A failed or timed-out list marks the unit errored.
+// A worker that answers 404 was removed since the list and is skipped; any
+// other fetch error also marks the unit errored, naming the worker, since its
+// state is unknown, not absent. answered is the distinct instances that
+// replied to the list or with a sample, sorted.
 //
 // ponytail: no per-pod request limit; add a semaphore of ~4 if TIME_WAIT
 // build-up or tick latency shows up.
-func pollPod(ctx context.Context, c *api.Client) PodSnapshot {
+func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered []string) {
 	endpoint := c.PrimaryEndpoint()
-	pod := PodSnapshot{Key: endpoint, Via: endpoint}
-	list, err := c.ListWorkersCtx(ctx)
+	list, instance, err := c.ListWorkersFresh(ctx)
+	pod = PodSnapshot{Key: endpoint, Via: endpoint, Instance: instance}
+	if instance != "" {
+		answered = append(answered, instance)
+	}
 	if err != nil {
 		pod.Err = err.Error()
-		return pod
-	}
-	pod.Instance = c.LastInstance() // an empty list carries no instance of its own
-	if len(list) > 0 {
-		pod.Instance = list[0].Instance
+		return pod, answered
 	}
 
 	samples := make([]*Sample, len(list))
@@ -186,13 +254,17 @@ func pollPod(ctx context.Context, c *api.Client) PodSnapshot {
 		switch {
 		case errs[i] == nil:
 			pod.Workers[w.Name] = samples[i]
+			if samples[i].Instance != "" {
+				answered = append(answered, samples[i].Instance)
+			}
 		case errors.As(errs[i], &apiErr) && apiErr.StatusCode == http.StatusNotFound:
 			// removed since the list: skip
 		case pod.Err == "":
 			pod.Err = "worker " + w.Name + ": " + errs[i].Error()
 		}
 	}
-	return pod
+	slices.Sort(answered)
+	return pod, slices.Compact(answered)
 }
 
 // dedupeLabels makes pod labels distinct within a snapshot: pods sharing a
