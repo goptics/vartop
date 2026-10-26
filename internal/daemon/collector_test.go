@@ -5,9 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -380,10 +384,18 @@ func TestCorruptFileSetAside(t *testing.T) {
 	h.waitSnaps("b", nb+1, 3*time.Second) // its history kept, and added to
 }
 
-// TestDroppedTickKeepsLabels: the label state of a tick dropped with the
-// writer behind is saved with the next tick written, unless a tick queued
-// after it brings a newer one.
-func TestDroppedTickKeepsLabels(t *testing.T) {
+// labelsFixture is a collector of server a over a fresh store, and its
+// writer, neither running: a test hands ticks to the sink and has the
+// writer write them itself. saved is the label number of #i the file has.
+type labelsFixture struct {
+	t   *testing.T
+	dir string
+	c   *collector
+	w   *writer
+}
+
+func newLabelsFixture(t *testing.T) *labelsFixture {
+	t.Helper()
 	dir := t.TempDir()
 	ctl, err := store.OpenControl(dir)
 	if err != nil {
@@ -398,56 +410,221 @@ func TestDroppedTickKeepsLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 	d := &daemon{o: Options{DataDir: dir, Log: slog.New(slog.DiscardHandler)}, ctl: ctl, token: token, exit: make(chan exit, 1)}
-	c := &collector{d: d, name: "a", queue: make(chan fleet.Tick, queueLen)}
-	w := &writer{c: c, db: db}
-
-	tick := func(n int) fleet.Tick {
-		t := fleet.Tick{Snap: &fleet.Snapshot{At: time.Now().Round(0)}}
-		if n > 0 {
-			t.Labels = &fleet.LabelState{Numbers: map[string]fleet.LabelNumber{"#i": {N: n, Seen: time.UnixMilli(60000)}}}
+	f := &labelsFixture{t: t, dir: dir, c: &collector{d: d, name: "a", queue: make(chan queued, queueLen)}}
+	f.w = &writer{c: f.c, db: db}
+	t.Cleanup(func() {
+		if f.w.db != nil {
+			_ = f.w.db.Close()
 		}
-		return t
+	})
+	return f
+}
+
+// sink hands the sink a tick whose label state numbers #i n, or none when
+// n is 0.
+func (f *labelsFixture) sink(n int) {
+	t := fleet.Tick{Snap: &fleet.Snapshot{At: time.Now().Round(0)}}
+	if n > 0 {
+		t.Labels = &fleet.LabelState{Numbers: map[string]fleet.LabelNumber{"#i": {N: n, Seen: time.UnixMilli(60000)}}}
 	}
-	saved := func() int {
-		t.Helper()
-		l, ok, err := db.Labels()
-		if err != nil || !ok {
-			t.Fatalf("Labels = %v, %v", ok, err)
+	_ = f.c.sink(t)
+}
+
+// drain has the writer write the next n ticks queued.
+func (f *labelsFixture) drain(n int) {
+	for range n {
+		f.w.write(<-f.c.queue)
+	}
+}
+
+// saved is the number of #i in the label state the file has.
+func (f *labelsFixture) saved() int {
+	f.t.Helper()
+	db, err := store.OpenServer(f.dir, "a", false)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer db.Close()
+	l, ok, err := db.Labels()
+	if err != nil || !ok {
+		f.t.Fatalf("Labels = %v, %v", ok, err)
+	}
+	return l.Numbers["#i"].N
+}
+
+// TestDroppedTickKeepsLabels: the label state of a tick dropped with the
+// writer behind is saved with the next tick written, and the newest label
+// state the poller made is what the file ends with, whatever the order the
+// writer meets them in.
+func TestDroppedTickKeepsLabels(t *testing.T) {
+	t.Run("dropped after the queue's head", func(t *testing.T) {
+		f := newLabelsFixture(t)
+		f.sink(1)
+		for range queueLen - 1 {
+			f.sink(0)
 		}
-		return l.Numbers["#i"].N
+		f.sink(2) // dropped: the queue is full
+		f.drain(1)
+		if n := f.saved(); n != 2 {
+			t.Errorf("after a tick with state 2 was dropped, state %d saved, want 2", n)
+		}
+		f.drain(queueLen - 1)
+		if n := f.saved(); n != 2 {
+			t.Errorf("state %d saved, want 2 kept", n)
+		}
+	})
+	t.Run("older state queued behind", func(t *testing.T) {
+		f := newLabelsFixture(t)
+		f.sink(0)
+		f.sink(1)
+		for range queueLen - 2 {
+			f.sink(0)
+		}
+		f.sink(2) // dropped
+		f.drain(queueLen)
+		if n := f.saved(); n != 2 {
+			t.Errorf("state %d saved, want the newest, 2", n)
+		}
+	})
+	t.Run("write failed, older state queued behind", func(t *testing.T) {
+		f := newLabelsFixture(t)
+		f.sink(0)
+		f.sink(1)
+		for range queueLen - 2 {
+			f.sink(0)
+		}
+		f.sink(2) // dropped
+		_ = f.w.db.Close()
+		f.drain(1) // fails: the file is closed
+		f.w.db = nil
+		f.drain(queueLen - 1)
+		if n := f.saved(); n != 2 {
+			t.Errorf("state %d saved, want the newest, 2", n)
+		}
+	})
+	t.Run("newer state queued after a drop", func(t *testing.T) {
+		f := newLabelsFixture(t)
+		f.sink(1)
+		f.drain(1)
+		for range queueLen {
+			f.sink(0)
+		}
+		f.sink(3) // dropped
+		for range queueLen {
+			<-f.c.queue // taken, not written
+		}
+		f.sink(4) // queued: newer than the state kept
+		f.drain(1)
+		if n := f.saved(); n != 4 {
+			t.Errorf("state %d saved, want the newest, 4", n)
+		}
+	})
+}
+
+// breaker makes the requests a fresh connection sends to its hosts panic,
+// while on is set, on the goroutine that sends them: a stand-in for a reply
+// that breaks whatever reads it, in a goroutine a tick fans out to. It
+// works through the transport's Proxy func, which the api package's fresh
+// connections copy from http.DefaultTransport when their client is made,
+// and which a transport calls on the sending goroutine.
+type breaker struct {
+	on    atomic.Bool
+	mu    sync.Mutex
+	hosts map[string]bool
+}
+
+// newBreaker installs a breaker until the test ends. Make it before the
+// servers it breaks, so that it is removed after they have stopped.
+func newBreaker(t *testing.T) *breaker {
+	t.Helper()
+	b := &breaker{hosts: make(map[string]bool)}
+	tr := http.DefaultTransport.(*http.Transport)
+	orig := tr.Proxy
+	tr.Proxy = func(req *http.Request) (*url.URL, error) {
+		b.mu.Lock()
+		broken := b.hosts[req.URL.Host]
+		b.mu.Unlock()
+		if broken && b.on.Load() {
+			panic("reply broke")
+		}
+		return orig(req)
 	}
-	drain := func(n int) {
-		for range n {
-			w.write(<-c.queue)
+	t.Cleanup(func() { tr.Proxy = orig })
+	return b
+}
+
+// add breaks the host of the URL u.
+func (b *breaker) add(t *testing.T, u string) {
+	t.Helper()
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.hosts[parsed.Host] = true
+}
+
+// TestFanOutPanicIsolated (R14): a panic in a goroutine a tick fans out
+// to (a direct endpoint's poll; a balancer pass's attempt) stores an error
+// snapshot for that server, logged once with the stack it was raised on,
+// while the daemon runs on and other servers are collected.
+func TestFanOutPanicIsolated(t *testing.T) {
+	b := newBreaker(t)
+	_, direct := fleettest.NewVarmq(t, "d", nil)
+	_, behind := fleettest.NewInstances(t, "c1", "c2")
+	lb := fleettest.NewRoundRobinLB(t, behind...)
+	_, ok := fleettest.NewVarmq(t, "ok", nil)
+	b.add(t, direct.URL)
+	b.add(t, lb.URL)
+	h := newHarness(t)
+	h.writeConfig(map[string]*config.Server{
+		"d":  {Interval: 1, Endpoints: []string{direct.URL}},
+		"lb": {Interval: 1, Endpoints: []string{lb.URL}},
+		"ok": {Interval: 1, Endpoints: []string{ok.URL}},
+	})
+	r := h.start("d")
+	// Once lb is known as a balancer, its polls go through the balancer
+	// pass and its reacher's attempts.
+	fleettest.WaitUntil(t, 5*time.Second, "lb polled as a balancer", func() bool {
+		s := h.latest("lb")
+		return s != nil && slices.Equal(labelList(s), []string{"instance-1", "instance-2"})
+	})
+
+	b.on.Store(true)
+	const internal = "internal error (see daemon log)"
+	for _, name := range []string{"d", "lb"} {
+		fleettest.WaitUntil(t, 3*time.Second, name+"'s error snapshot", func() bool {
+			s := h.latest(name)
+			return s != nil && s.Err == internal
+		})
+	}
+	n := len(h.snaps("ok"))
+	h.waitSnaps("ok", n+2, 3*time.Second)
+	select {
+	case <-r.done:
+		t.Fatalf("Run ended: %d, %v", r.code, r.err)
+	default:
+	}
+	if errs, _ := h.control().ServerErrs(); errs["d"] != internal || errs["lb"] != internal || errs["ok"] != "" {
+		t.Errorf("ServerErrs = %v, want d and lb %q, ok none", errs, internal)
+	}
+	for name, frame := range map[string]string{"d": "pollDirect", "lb": "listFresh"} {
+		prefix := `msg="tick panicked" server=` + name + ` panic="reply broke" stack=`
+		if n := h.logs.count(prefix); n != 1 {
+			t.Errorf("%s's panic logged %d times, want once; log:\n%s", name, n, &h.logs)
+		}
+		if n := h.logs.count(prefix + `"goroutine`); n != 1 || !strings.Contains(h.logs.String(), frame) {
+			t.Errorf("%s's panic logged without the stack it was raised on (through %s)", name, frame)
 		}
 	}
 
-	_ = c.sink(tick(1))
-	for range queueLen - 1 {
-		_ = c.sink(tick(0))
-	}
-	_ = c.sink(tick(2)) // dropped: the queue is full
-	drain(1)
-	if n := saved(); n != 2 {
-		t.Errorf("after a tick with state 2 was dropped, state %d saved, want 2", n)
-	}
-	drain(queueLen - 1)
-	if n := saved(); n != 2 {
-		t.Errorf("state %d saved, want 2 kept", n)
-	}
-
-	for range queueLen {
-		_ = c.sink(tick(0))
-	}
-	_ = c.sink(tick(3)) // dropped
-	for range queueLen {
-		<-c.queue // taken, not written
-	}
-	_ = c.sink(tick(4)) // queued: newer than the state kept
-	drain(1)
-	if n := saved(); n != 4 {
-		t.Errorf("state %d saved, want the newest, 4", n)
+	b.on.Store(false)
+	for _, name := range []string{"d", "lb"} {
+		fleettest.WaitUntil(t, 3*time.Second, name+" collected again", func() bool {
+			s := h.latest(name)
+			return s != nil && s.Err == "" && len(s.Pods) > 0
+		})
 	}
 }

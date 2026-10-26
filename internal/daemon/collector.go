@@ -42,12 +42,27 @@ type collector struct {
 
 	poke  chan struct{}  // a poll asked for; one pending at most
 	prune chan time.Time // a prune asked for, at that time
-	queue chan fleet.Tick
-	// labels is the label state of the newest tick dropped since a tick
-	// that changed it was queued: newer than any queued tick's, so the
-	// writer saves it with the next tick it writes.
-	labels atomic.Pointer[fleet.LabelState]
-	seen   stateLog
+	queue chan queued
+	// labelSeq numbers the label states the sink is handed, in order.
+	labelSeq atomic.Uint64
+	// dropped is the label state of the newest tick dropped that had one,
+	// until the writer takes it to save with the next tick it writes.
+	dropped atomic.Pointer[labelled]
+	seen    stateLog
+}
+
+// labelled is a label state the sink was handed, numbered in the order it
+// was: the writer saves a state only if it is newer than the one it saved
+// last, whatever order it meets them in.
+type labelled struct {
+	state *fleet.LabelState
+	seq   uint64 // 1, 2, …; 0 with no state
+}
+
+// queued is a tick waiting for the writer, with its label state numbered.
+type queued struct {
+	tick   fleet.Tick
+	labels labelled
 }
 
 // start starts collecting srv, named name and encoded as enc, after delay.
@@ -59,7 +74,7 @@ func (d *daemon) start(name string, srv *config.Server, enc string, delay time.D
 		done:  make(chan struct{}),
 		poke:  make(chan struct{}, 1),
 		prune: make(chan time.Time, 1),
-		queue: make(chan fleet.Tick, queueLen),
+		queue: make(chan queued, queueLen),
 	}
 	prev := d.done[name]
 	d.collectors[name], d.done[name] = c, c.done
@@ -247,7 +262,9 @@ func (c *collector) serve(ctx context.Context, fc *fleet.Collector) {
 // the writer behind, the queue full, the tick is dropped but its label
 // state kept for the next tick written. The tick of a closed collector
 // that comes late (see fleet.Collector.Close) is queued for a writer that
-// no longer reads: dropped too.
+// no longer reads: dropped too. Its calls come one at a time (from the
+// poller, or from connect before the poller runs), so each label state it
+// numbers is newer than every one before.
 func (c *collector) sink(t fleet.Tick) error {
 	if t.Panic != nil {
 		t.Snap.Err = internalError
@@ -257,17 +274,18 @@ func (c *collector) sink(t fleet.Tick) error {
 	} else if t.Snap.Err == "" {
 		c.seen.changed("panic", "")
 	}
+	var l labelled
 	if t.Labels != nil {
-		c.labels.Store(nil) // older than t's
+		l = labelled{state: t.Labels, seq: c.labelSeq.Add(1)}
 	}
 	select {
-	case c.queue <- t:
+	case c.queue <- queued{tick: t, labels: l}:
 		if c.seen.changed("queue", "") {
 			c.d.o.Log.Info("writer caught up", "server", c.name)
 		}
 	default:
-		if t.Labels != nil {
-			c.labels.Store(t.Labels)
+		if l.state != nil {
+			c.dropped.Store(&l)
 		}
 		if c.seen.changed("queue", "full") {
 			c.d.o.Log.Warn("writer behind; dropping ticks", "server", c.name)
@@ -294,10 +312,11 @@ func (c *collector) setErr(msg string) {
 // the collector's writer goroutine.
 type writer struct {
 	c       *collector
-	db      *store.ServerDB   // nil after it could not be opened again: opened for the next tick
-	unsaved *fleet.LabelState // the label state of a tick whose write failed
-	errSet  bool              // err is recorded in control.db
-	err     string            // the server's error recorded last
+	db      *store.ServerDB // nil after it could not be opened again: opened for the next tick
+	saved   uint64          // the number of the label state saved last
+	unsaved labelled        // the newest label state a failed write did not save
+	errSet  bool            // err is recorded in control.db
+	err     string          // the server's error recorded last
 }
 
 // run writes the queued ticks, and prunes the file when asked, until ctx
@@ -323,22 +342,29 @@ func (w *writer) run(ctx context.Context) {
 			if w.c.seen.changed("prune", errString(err)) && err != nil {
 				w.c.d.o.Log.Warn("cannot prune the server file", "server", w.c.name, "err", err)
 			}
-		case t := <-w.c.queue:
-			if !w.write(t) {
+		case q := <-w.c.queue:
+			if !w.write(q) {
 				return
 			}
 		}
 	}
 }
 
-// write appends t, with the newest label state not saved yet, and records
-// a change of the server's error. It reports false when the lease is lost:
-// Run ends then.
-func (w *writer) write(t fleet.Tick) bool {
-	if l := w.c.labels.Swap(nil); l != nil {
-		t.Labels = l
-	} else if t.Labels == nil {
-		t.Labels = w.unsaved
+// write appends q's tick, with the newest label state of all those it has
+// met (q's own, a dropped tick's, one a failed write did not save) when
+// that is newer than the one saved last, and records a change of the
+// server's error. It reports false when the lease is lost: Run ends then.
+func (w *writer) write(q queued) bool {
+	t, newest := q.tick, q.labels
+	if d := w.c.dropped.Swap(nil); d != nil && d.seq > newest.seq {
+		newest = *d
+	}
+	if w.unsaved.seq > newest.seq {
+		newest = w.unsaved
+	}
+	t.Labels = nil
+	if newest.seq > w.saved {
+		t.Labels = newest.state
 	}
 	err := w.append(t)
 	if w.c.seen.changed("write", errString(err)) && err != nil && !errors.Is(err, store.ErrLeaseLost) {
@@ -352,11 +378,14 @@ func (w *writer) write(t fleet.Tick) bool {
 		return false
 	case err != nil:
 		if t.Labels != nil {
-			w.unsaved = t.Labels
+			w.unsaved = newest
 		}
 		return true
 	}
-	w.unsaved = nil
+	if t.Labels != nil {
+		w.saved = newest.seq
+	}
+	w.unsaved = labelled{}
 	if msg := t.Snap.Err; !w.errSet || msg != w.err {
 		switch {
 		case msg != "":
