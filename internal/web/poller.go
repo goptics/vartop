@@ -211,10 +211,10 @@ func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Sna
 			}
 		}
 		dedupeLabels(snap.Pods)
+		slices.SortFunc(snap.Pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
 	} else {
-		t.label(snap.Pods)
+		t.label(snap.Pods) // and lists them by number
 	}
-	slices.SortFunc(snap.Pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
 	t.prune(now)
 	return snap
 }

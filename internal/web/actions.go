@@ -62,16 +62,30 @@ func (e noChange) Error() string { return string(e) }
 // through the balancers' clients, which latest counts behind instances
 // behind; the dead ones, balancer endpoints no instance answered; and the
 // unrefreshed ones, clients latest has no unit for. Dead and unrefreshed
-// units are sent nothing. Units are sorted by key.
+// units are sent nothing. Units are sorted by key; place says where the
+// pages list them.
 type actScope struct {
 	direct, unrefreshed []*api.Client
 	balanced, dead      []PodSnapshot
 	balancers           []*api.Client
 	behind              int
+	place               map[string]int // unit key → its index in latest.Pods
 }
 
 // viaBalancer reports whether sc holds a unit behind a load balancer.
 func (sc actScope) viaBalancer() bool { return len(sc.balanced) > 0 || len(sc.dead) > 0 }
+
+// listed compares units by key the way the pages list them (see
+// Snapshot.Pods), units latest lacks last.
+func (sc actScope) listed(a, b string) int {
+	at := func(key string) int {
+		if i, ok := sc.place[key]; ok {
+			return i
+		}
+		return len(sc.place)
+	}
+	return cmp.Compare(at(a), at(b))
+}
 
 // scopeOf is what an action on pod reaches, as latest shows the server:
 // every unit when pod is "", else the direct unit whose endpoint is pod. An
@@ -83,7 +97,7 @@ func (sc actScope) viaBalancer() bool { return len(sc.balanced) > 0 || len(sc.de
 // or a balancer is refused with oneBalancedMsg: the balancer would pick the
 // instance. n words the error for a pod that is no unit of the server.
 func scopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (actScope, error) {
-	var sc actScope
+	sc := actScope{place: make(map[string]int)}
 	balancer := make(map[string]bool) // endpoint → it is a balancer
 	direct := make(map[string]bool)   // endpoint → it is a direct unit
 	one := false                      // pod is a balanced unit
@@ -91,7 +105,8 @@ func scopeOf(clients []*api.Client, latest *Snapshot, pod string, n Noun) (actSc
 		for ep := range latest.Behind {
 			balancer[ep] = true
 		}
-		for _, u := range latest.Pods {
+		for i, u := range latest.Pods {
+			sc.place[u.Key] = i
 			if !u.Balanced {
 				direct[u.Key] = true
 				continue
@@ -155,10 +170,11 @@ func actionSender(action string) sender {
 }
 
 // act sends send's request about each worker of names to every unit of sc
-// and returns, per name, one result per unit: the direct units' first, then the
-// balanced units' (see reachUnits), then the dead units', failed with their
-// error, then the unrefreshed ones', failed with notRefreshedMsg. Results
-// are labelled from units (see unitsOf); n words their messages.
+// and returns, per name, one result per unit, listed as the pages list the
+// units (see actScope.listed): the direct units' outcomes, the balanced
+// units' (see reachUnits), the dead units', failed with their error, and
+// the unrefreshed ones', failed with notRefreshedMsg. Results are labelled
+// from units (see unitsOf); n words their messages.
 func act(ctx context.Context, sc actScope, units map[string]PodSnapshot, n Noun, names []string, send sender) [][]ActionResult {
 	results := make([][]ActionResult, len(names))
 	var reached [][]ActionResult
@@ -185,6 +201,7 @@ func act(ctx context.Context, sc actScope, units map[string]PodSnapshot, n Noun,
 		for _, c := range sc.unrefreshed {
 			results[i] = append(results[i], outcome(c.PrimaryEndpoint(), units, n, errors.New(notRefreshedMsg)))
 		}
+		slices.SortStableFunc(results[i], func(a, b ActionResult) int { return sc.listed(a.Key, b.Key) })
 	}
 	return results
 }
@@ -445,22 +462,21 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 		for i, name := range names {
 			cv.Rows[i].Name = name
 		}
-		column := func(u PodSnapshot, seen bool) {
+		cols := slices.Concat(sc.balanced, sc.dead) // the units in scope, as act lists their results
+		for _, c := range sc.direct {
+			cols = append(cols, units[c.PrimaryEndpoint()])
+		}
+		for _, c := range sc.unrefreshed {
+			cols = append(cols, PodSnapshot{Key: c.PrimaryEndpoint(), Err: notRefreshedMsg})
+		}
+		slices.SortStableFunc(cols, func(a, b PodSnapshot) int { return sc.listed(a.Key, b.Key) })
+		for _, u := range cols {
 			cv.Pods = append(cv.Pods, PodColumn{Key: u.Key, Label: cmp.Or(u.Label, config.ShortOrigin(u.Key)), Err: u.Err, Tip: u.Tip()})
 			for i := range cv.Rows {
 				name := cv.Rows[i].Name
-				absent := seen && u.Err == "" && u.Workers[name] == nil && !u.unreached(name)
+				absent := u.Err == "" && u.Workers[name] == nil && !u.unreached(name)
 				cv.Rows[i].Absent = append(cv.Rows[i].Absent, absent)
 			}
-		}
-		for _, c := range sc.direct {
-			column(units[c.PrimaryEndpoint()], true)
-		}
-		for _, u := range slices.Concat(sc.balanced, sc.dead) {
-			column(u, true)
-		}
-		for _, c := range sc.unrefreshed {
-			column(PodSnapshot{Key: c.PrimaryEndpoint(), Err: notRefreshedMsg}, false)
 		}
 		h.fragments(w, fragment{"confirm", "confirm", cv})
 		return

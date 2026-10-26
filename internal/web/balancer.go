@@ -1,6 +1,7 @@
 package web
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -369,10 +371,13 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[s
 			unit.Via, unit.Err = failed.Via, failed.Err.Error()
 		} else {
 			unit.Via = t.lastVia(id)
-			if !replied && lists.lastErr != nil {
+			switch age := now.Sub(known[id]).Round(time.Second); {
+			case !replied && lists.lastErr != nil:
 				unit.Err = lists.lastErr.Error()
-			} else {
-				unit.Err = "not reached this refresh · last seen " + now.Sub(known[id]).Round(time.Second).String() + " ago"
+			case age == 0: // seen this tick, by a direct pass
+				unit.Err = "not reached this refresh"
+			default:
+				unit.Err = "not reached this refresh · last seen " + age.String() + " ago"
 			}
 		}
 		units = append(units, unit)
@@ -386,14 +391,14 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[s
 }
 
 // tracker remembers, across a session's ticks, which instances answered
-// through which endpoint and when, and the labels units were given. It
+// through which endpoint and when, and the numbers units were given. It
 // belongs to the poller goroutine, which lends it to the balancer pass while
 // it waits for the direct endpoints.
 type tracker struct {
 	window     time.Duration                   // how long a sighting counts: max(1 minute, 3 × interval)
 	kubernetes bool                            // labels are pod names, not instance-N
 	seen       map[string]map[string]time.Time // endpoint → instance → last answer through it
-	labels     map[string]string               // unit key → instance-N; never forgotten, so never reused
+	numbers    map[string]int                  // what a unit's number follows (see label) → its instance-N; never forgotten, so never reused
 	direct     map[string]bool                 // instances shown as a direct unit by the latest tick
 }
 
@@ -403,7 +408,7 @@ func newTracker(interval time.Duration, kubernetes bool) *tracker {
 		window:     max(time.Minute, 3*interval),
 		kubernetes: kubernetes,
 		seen:       make(map[string]map[string]time.Time),
-		labels:     make(map[string]string),
+		numbers:    make(map[string]int),
 	}
 }
 
@@ -497,24 +502,35 @@ func (t *tracker) prune(now time.Time) {
 }
 
 // label names the units of a non-Kubernetes server instance-1, instance-2, …
-// in the order the session first saw their keys (new keys of one call in key
-// order), never reusing a number. On a Kubernetes server it leaves labels as
-// they are.
+// and lists them in that order. A unit's number follows its instance when
+// no other unit of pods has the same one, so it stays with the process
+// while its endpoint turns from direct to balancer or back; otherwise it
+// follows the unit's key. Numbers are given in the order the session first
+// saw what they follow (new ones of one call in unit key order, so a
+// static list numbers in endpoint order) and never reused. On a Kubernetes
+// server it leaves labels and order as they are.
 func (t *tracker) label(pods []PodSnapshot) {
 	if t.kubernetes {
 		return
 	}
-	var fresh []string
+	units := make(map[string]int, len(pods)) // instance → units of pods it answered for
 	for _, p := range pods {
-		if _, ok := t.labels[p.Key]; !ok {
-			fresh = append(fresh, p.Key)
+		units[p.Instance]++
+	}
+	follows := func(p PodSnapshot) string {
+		if p.Instance != "" && units[p.Instance] == 1 {
+			return "#" + p.Instance // a balanced unit's key; no endpoint URL starts with "#"
+		}
+		return p.Key
+	}
+	slices.SortFunc(pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
+	for _, p := range pods {
+		if f := follows(p); t.numbers[f] == 0 {
+			t.numbers[f] = len(t.numbers) + 1
 		}
 	}
-	slices.Sort(fresh)
-	for _, key := range fresh {
-		t.labels[key] = fmt.Sprintf("instance-%d", len(t.labels)+1)
-	}
+	slices.SortFunc(pods, func(a, b PodSnapshot) int { return cmp.Compare(t.numbers[follows(a)], t.numbers[follows(b)]) })
 	for i := range pods {
-		pods[i].Label = t.labels[pods[i].Key]
+		pods[i].Label = fmt.Sprintf("instance-%d", t.numbers[follows(pods[i])])
 	}
 }

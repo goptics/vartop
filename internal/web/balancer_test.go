@@ -349,15 +349,18 @@ func TestPollBalancerMissedInstance(t *testing.T) {
 	pollUntil(t, pool, tr, 3, "three units", hasKeys("#a", "#b", "#c"))
 
 	srvs[2].Close() // the balancer now answers c's turns with a bare 502
-	s := pollOnce(context.Background(), pool, tr)
+	// Seen under a second ago, which reads as no age at all.
+	if c := podByEndpoint(t, pollOnce(context.Background(), pool, tr), "#c"); c.Err != "not reached this refresh" {
+		t.Errorf("#c Err = %q, want not reached this refresh, with no 0s age", c.Err)
+	}
+	s := pollAt(context.Background(), pool, tr, time.Now().Add(5*time.Second))
 
 	if keys := unitKeys(s); !slices.Equal(keys, []string{"#a", "#b", "#c"}) {
 		t.Fatalf("units = %v, want #c kept while in the window", keys)
 	}
 	c := podByEndpoint(t, s, "#c")
-	if !strings.HasPrefix(c.Err, "not reached this refresh · last seen ") || !strings.HasSuffix(c.Err, " ago") ||
-		!c.Balanced || c.Instance != "c" || c.Via != lb.URL {
-		t.Errorf("#c = %+v, want balanced instance c via the balancer, not reached this refresh", c)
+	if c.Err != "not reached this refresh · last seen 5s ago" || !c.Balanced || c.Instance != "c" || c.Via != lb.URL {
+		t.Errorf("#c = %+v, want balanced instance c via the balancer, not reached this refresh, last seen 5s ago", c)
 	}
 	for _, key := range []string{"#a", "#b"} {
 		if p := podByEndpoint(t, s, key); p.Err != "" || p.Workers["w"] == nil {
@@ -711,14 +714,64 @@ func TestPollBalancerReachesEveryWorker(t *testing.T) {
 	}
 }
 
-func TestLabelsNeverReused(t *testing.T) {
-	labels := func(pods []PodSnapshot) map[string]string {
-		m := make(map[string]string, len(pods))
-		for _, p := range pods {
-			m[p.Key] = p.Label
-		}
-		return m
+// labels maps each unit key of pods to its label.
+func labels(pods []PodSnapshot) map[string]string {
+	m := make(map[string]string, len(pods))
+	for _, p := range pods {
+		m[p.Key] = p.Label
 	}
+	return m
+}
+
+// TestLabelsFollowTheInstance: a unit's number follows its instance while
+// no other unit shares that instance, so an endpoint found to be a balancer
+// hands its number on to the instance it showed, and units are listed by
+// number.
+func TestLabelsFollowTheInstance(t *testing.T) {
+	tr := newTracker(time.Second, false)
+	first := []PodSnapshot{{Key: "http://lb", Instance: "b"}}
+	tr.label(first)
+	second := []PodSnapshot{{Key: "#a", Instance: "a", Balanced: true}, {Key: "#b", Instance: "b", Balanced: true}}
+	tr.label(second)
+
+	if got, want := labels(first), map[string]string{"http://lb": "instance-1"}; !maps.Equal(got, want) {
+		t.Errorf("first tick labels = %v, want %v", got, want)
+	}
+	if got, want := labels(second), map[string]string{"#a": "instance-2", "#b": "instance-1"}; !maps.Equal(got, want) {
+		t.Errorf("second tick labels = %v, want %v (b keeps its number)", got, want)
+	}
+	if keys := unitKeys(&Snapshot{Pods: second}); !slices.Equal(keys, []string{"#b", "#a"}) {
+		t.Errorf("units listed %v, want by number: #b, #a", keys)
+	}
+
+	t.Run("a shared instance numbers by key", func(t *testing.T) {
+		pods := []PodSnapshot{{Key: "http://z", Instance: "x"}, {Key: "http://y", Instance: "x"}, {Key: "http://w"}}
+		newTracker(time.Second, false).label(pods)
+		want := map[string]string{"http://w": "instance-1", "http://y": "instance-2", "http://z": "instance-3"}
+		if got := labels(pods); !maps.Equal(got, want) {
+			t.Errorf("labels = %v, want %v", got, want)
+		}
+	})
+	t.Run("an idle fleet behind a balancer numbers from 1", func(t *testing.T) {
+		// No workers: the first ticks' lists each reach one instance, so the
+		// balancer looks like a direct unit until a second instance answers.
+		var srvs []*httptest.Server
+		for _, id := range []string{"a", "b", "c"} {
+			_, srv := newFakeVarmq(t, id, nil)
+			srvs = append(srvs, srv)
+		}
+		pool, tr := lbPoll(t, newRoundRobinLB(t, srvs...).URL)
+
+		s := pollUntil(t, pool, tr, 5, "three units", hasKeys("#a", "#b", "#c"))
+
+		want := map[string]string{"#a": "instance-1", "#b": "instance-2", "#c": "instance-3"}
+		if got := labels(s.Pods); !maps.Equal(got, want) {
+			t.Errorf("labels = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestLabelsNeverReused(t *testing.T) {
 	tr := newTracker(time.Second, false)
 
 	first := []PodSnapshot{{Key: "#b"}, {Key: "#a"}}

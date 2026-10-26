@@ -47,9 +47,14 @@ func (p PodSnapshot) Tip() string {
 // Snapshot is one full poll across all units. It is immutable once passed to
 // History.Append.
 type Snapshot struct {
-	At     time.Time
-	Pods   []PodSnapshot  // sorted by Key
-	Behind map[string]int // balancer endpoint → distinct instances that answered through it this tick
+	At time.Time
+	// Pods are in the order the pages list them: by label number
+	// (instance-N) off Kubernetes, by Key on it.
+	Pods []PodSnapshot
+	// Behind maps each balancer endpoint to the distinct instances that
+	// answered through it within the lifecycle window (tracker.window), not
+	// only this tick: one gone less than a window ago still counts.
+	Behind map[string]int
 }
 
 // History keeps the last hour of snapshots in a ring and derives per-worker

@@ -1147,16 +1147,29 @@ func TestOneBalancedUnitRefused(t *testing.T) {
 }
 
 // TestMixedScope: an instance with its own address is sent the action
-// there, once; the instances behind the balancer through it.
+// there, once; the instances behind the balancer through it. The confirm
+// panel and the results list the units by number, as the pages do.
 func TestMixedScope(t *testing.T) {
 	fakes, srvs := newFakes(t, "a", "b", "c")
 	lb := newRoundRobinLB(t, srvs[0], srvs[1])
 	srv, m := serveBalanced(t, []string{lb.URL, srvs[2].URL}, "#a", "#b", srvs[2].URL)
-	units := unitsOf(m.Current().History.Latest())
+	latest := m.Current().History.Latest()
+	units := unitsOf(latest)
+	var head strings.Builder
+	var want [][2]string
+	for i, u := range latest.Pods {
+		if label := fmt.Sprintf("instance-%d", i+1); u.Label != label {
+			t.Fatalf("unit %d is %s %s, want the units listed by number", i, u.Key, u.Label)
+		}
+		head.WriteString(`<th title="` + u.Tip() + `">` + u.Label + `</th>`)
+		want = append(want, [2]string{u.Key, "ok"})
+	}
 
+	if _, body := post(t, srv, "/bulk/pause", multi("names", "w"), true); !strings.Contains(body, head.String()) {
+		t.Errorf("confirm panel lacks the columns %q:\n%s", head.String(), body)
+	}
 	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
-	// Direct units first, then balanced ones.
-	wantResults(t, body, units, [2]string{srvs[2].URL, "ok"}, [2]string{"#a", "ok"}, [2]string{"#b", "ok"})
+	wantResults(t, body, units, want...)
 	wantPatches(t, fakes[2], "PATCH /workers/w/actions/pause")
 	wantWorker(t, "paused", paused, fakes...)
 }
