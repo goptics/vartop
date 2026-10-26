@@ -2,11 +2,13 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -508,5 +510,435 @@ func TestSelectionFollowsRow(t *testing.T) {
 	}
 	if got := rowsOf(m); len(got) != 1 || d.table.Cursor() != 0 {
 		t.Fatalf("rows %v, cursor %d; want the one row, selected", got, d.table.Cursor())
+	}
+}
+
+// rated is a healthy unit labelled label, at key, whose worker "orders"
+// completes rate a second and has pending waiting, as of at.
+func rated(at time.Time, label, key string, rate float64, pending int) fleet.PodSnapshot {
+	s := smp("Running", 4, 1, 3, pending)
+	s.At, s.RateOK, s.CompletedRate = at, true, rate
+	return unit(label, key, map[string]*fleet.Sample{"orders": s})
+}
+
+// trendFixture stores five minutes of history on the server "multi": 21
+// snapshots 15s apart, the newest at end, of two units that run "orders".
+// instance-1 completes j a second in the j-th (0 to 20) with 7 pending;
+// instance-2 a steady 5, with 3 pending.
+func trendFixture(t *testing.T, end time.Time) *fixture {
+	t.Helper()
+	f := newFixture(t, multiConfig("http://a.invalid", "http://b.invalid"))
+	f.claim()
+	end = end.Round(time.Millisecond)
+	for j := range 21 {
+		at := end.Add(-time.Duration(20-j) * 15 * time.Second)
+		f.write("multi", snapAt(at,
+			rated(at, "instance-1", "http://a.invalid", float64(j), 7),
+			rated(at, "instance-2", "http://b.invalid", 5, 3)))
+	}
+	return f
+}
+
+// trendCells is the Trend cell of each row of the dashboard, untrimmed.
+func trendCells(t *testing.T, m *Model) []string {
+	t.Helper()
+	d := m.dashboardScreen()
+	cols := d.table.Columns()
+	if len(cols) == 0 || cols[len(cols)-1].Title != "Trend" {
+		t.Fatalf("the table has no Trend column: %v", cols)
+	}
+	var cells []string
+	for _, r := range d.table.Rows() {
+		cells = append(cells, r[len(r)-1])
+	}
+	return cells
+}
+
+// ansi matches the escape sequences that colour a view.
+var ansi = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// kpiLineOf is the KPI line of m's dashboard view, plain; "" when there is none.
+func kpiLineOf(m *Model) string {
+	for _, line := range strings.Split(ansi.ReplaceAllString(m.View(), ""), "\n") {
+		if strings.Contains(line, "completed/s") {
+			return strings.TrimRight(line, " ")
+		}
+	}
+	return ""
+}
+
+// TestTrendFromFeed: each row's Trend is the completed/s of its worker on
+// its unit over the last 10 minutes of the feed, one column per slice of
+// that time; where the feed has no snapshots the column is blank.
+func TestTrendFromFeed(t *testing.T) {
+	f := trendFixture(t, time.Now())
+	m := f.model("multi")
+	deliver(m, tea.WindowSizeMsg{Width: 160, Height: 40}) // 20 columns of Trend
+	syncNow(t, m)
+
+	// Five minutes of history: the left half of the 10-minute window is blank.
+	// instance-1 climbs 0 to 20 a second: pairs of snapshots 30s apart.
+	want := []string{
+		strings.Repeat(" ", 10) + "▁▂▃▃▄▅▆▆▇█",
+		strings.Repeat(" ", 10) + strings.Repeat("█", 10),
+	}
+	if got := trendCells(t, m); !slices.Equal(got, want) {
+		t.Fatalf("Trend cells = %q, want %q", got, want)
+	}
+
+	// Only the unit's own series in the view of one unit.
+	m.selectedLabel, m.showNodeColumn = "instance-2", false
+	m.dashboardScreen().rebuildTable(m)
+	syncNow(t, m)
+	if got := trendCells(t, m); len(got) != 1 || got[0] != want[1] {
+		t.Errorf("instance-2's Trend cells = %q, want %q", got, want[1:])
+	}
+
+	// A narrower Trend draws the same time in fewer columns.
+	deliver(m, tea.WindowSizeMsg{Width: 92, Height: 40}) // 12 columns
+	if got := trendCells(t, m); len(got) != 1 || got[0] != strings.Repeat(" ", 6)+strings.Repeat("█", 6) {
+		t.Errorf("instance-2's Trend at 12 columns = %q", got)
+	}
+}
+
+// TestTrendHasNoRates: a snapshot that has no rate yet (the first one, a
+// restarted counter) is a gap, which the Trend leaves blank, and the row is
+// no shorter for it.
+func TestTrendHasNoRates(t *testing.T) {
+	f := newFixture(t, multiConfig("http://a.invalid"))
+	f.claim()
+	f.write("multi", fresh(unit("instance-1", "http://a.invalid", map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 7)})))
+	m := f.model("multi")
+	if got, want := trendCells(t, m), []string{strings.Repeat(" ", 20)}; !slices.Equal(got, want) {
+		t.Errorf("Trend cells = %q, want %q", got, want)
+	}
+	if got, want := rowsOf(m), []string{"orders|instance-1|Running|4|1|7|3"}; !slices.Equal(got, want) {
+		t.Errorf("rows = %v, want %v", got, want)
+	}
+	// Nor has the KPI line a rate to give: — as on the web pages, not 0.0.
+	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s — ") || !strings.Contains(line, "  failed/min — ") || !strings.Contains(line, "  pending 7 ") {
+		t.Errorf("KPI line = %q, want — for the rates it has none of, and pending 7", line)
+	}
+}
+
+// TestKPILineOfDownUnit: the view of a unit that answered nothing in the
+// newest snapshot has no current values — not zeros — and its history from
+// the snapshots it answered is drawn.
+func TestKPILineOfDownUnit(t *testing.T) {
+	f := newFixture(t, multiConfig("http://a.invalid", "http://b.invalid"))
+	f.claim()
+	end := time.Now().Round(time.Millisecond)
+	for j := range 5 {
+		at := end.Add(-time.Duration(5-j) * 15 * time.Second)
+		f.write("multi", snapAt(at, rated(at, "instance-1", "http://a.invalid", 3, 1), rated(at, "instance-2", "http://b.invalid", float64(j+1), 2)))
+	}
+	f.write("multi", snapAt(end, rated(end, "instance-1", "http://a.invalid", 3, 1), downUnit("instance-2", "http://b.invalid", "connection refused")))
+
+	m := f.model("multi")
+	m.selectedLabel, m.showNodeColumn = "instance-2", false
+	m.dashboardScreen().rebuildTable(m)
+	syncNow(t, m)
+	if got := rowsOf(m); len(got) != 0 {
+		t.Fatalf("rows of a unit that answered nothing: %v", got)
+	}
+	line := kpiLineOf(m)
+	if !regexp.MustCompile(`^  completed/s — [▁-█ ]{12}  failed/min — [▁-█ ]{12}  pending — [▁-█ ]{12}$`).MatchString(line) {
+		t.Fatalf("KPI line = %q, want — for each value, then 12 columns each", line)
+	}
+	if !strings.ContainsAny(line, "▁▂▃▄▅▆▇█") {
+		t.Errorf("KPI line = %q, want the history from before the unit went down drawn", line)
+	}
+
+	// The merged view has the unit that answered: its values are current.
+	m.selectedLabel, m.showNodeColumn = "", true
+	m.dashboardScreen().rebuildTable(m)
+	syncNow(t, m)
+	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s ") || strings.HasPrefix(line, "  completed/s — ") {
+		t.Errorf("merged KPI line = %q, want a current completed/s", line)
+	}
+}
+
+// TestTrendColumnThresholds: the Trend column follows the first fixed
+// columns: it takes the width left over once the name has its 12 and the
+// column its padding — at most 20 — and is left out when that is under 8.
+func TestTrendColumnThresholds(t *testing.T) {
+	f := trendFixture(t, time.Now())
+	for _, tc := range []struct {
+		width int
+		node  bool // merged view, with the Node column; else one unit's
+		want  int  // the Trend column's width; 0: none
+	}{
+		{92, true, 0}, {101, true, 0}, {102, true, 8}, {106, true, 12}, {113, true, 19}, {114, true, 20}, {200, true, 20},
+		{80, false, 0}, {87, false, 0}, {88, false, 8}, {96, false, 16}, {100, false, 20}, {200, false, 20},
+	} {
+		name := fmt.Sprintf("%d columns", tc.width)
+		if !tc.node {
+			name += ", one unit"
+		}
+		t.Run(name, func(t *testing.T) {
+			m := f.modelFor(t, "multi")
+			if !tc.node {
+				m.selectedLabel, m.showNodeColumn = "instance-1", false
+			}
+			deliver(m, tea.WindowSizeMsg{Width: tc.width, Height: 40})
+			syncNow(t, m)
+
+			d := m.dashboardScreen()
+			cols := d.table.Columns()
+			fixed := 6 // Name, Status, Concurrency, Processing, Pending, Idle
+			if tc.node {
+				fixed++
+			}
+			if tc.want == 0 && len(cols) != fixed || tc.want > 0 && len(cols) != fixed+1 {
+				t.Fatalf("%d columns, want %d + Trend %d: %v", len(cols), fixed, tc.want, cols)
+			}
+			var sum int
+			for _, c := range cols {
+				sum += c.Width + 2
+			}
+			if sum > tc.width {
+				t.Errorf("the columns take %d of %d columns: %v", sum, tc.width, cols)
+			}
+			if cols[0].Width < 12 {
+				t.Errorf("the Name column is %d wide, want at least 12", cols[0].Width)
+			}
+			rows := d.table.Rows()
+			if len(rows) == 0 {
+				t.Fatal("no rows")
+			}
+			for _, r := range rows {
+				if len(r) != len(cols) {
+					t.Fatalf("a row has %d cells for %d columns: %q", len(r), len(cols), r)
+				}
+			}
+			view := m.View()
+			if tc.want == 0 {
+				if strings.Contains(view, "Trend") {
+					t.Errorf("the view has a Trend column:\n%s", view)
+				}
+				return
+			}
+			if last := cols[len(cols)-1]; last.Title != "Trend" || last.Width != tc.want {
+				t.Fatalf("last column = %+v, want Trend, %d wide", last, tc.want)
+			}
+			if !strings.Contains(view, "Trend") {
+				t.Errorf("the view has no Trend column:\n%s", view)
+			}
+			for _, cell := range trendCells(t, m) {
+				if n := utf8.RuneCountInString(cell); n != tc.want {
+					t.Errorf("Trend cell %q is %d columns, want %d", cell, n, tc.want)
+				}
+				if strings.Trim(cell, " ▁▂▃▄▅▆▇█") != "" {
+					t.Errorf("Trend cell %q is not plain sparkline", cell)
+				}
+			}
+		})
+	}
+}
+
+// TestTrendASCIIFallback: where block runes are wide the Trend is ASCII.
+func TestTrendASCIIFallback(t *testing.T) {
+	t.Setenv("RUNEWIDTH_EASTASIAN", "1")
+	f := trendFixture(t, time.Now())
+	m := f.model("multi")
+	for _, cell := range trendCells(t, m) {
+		if strings.Trim(cell, " _.-=#") != "" || strings.TrimSpace(cell) == "" {
+			t.Errorf("Trend cell %q is not an ASCII sparkline", cell)
+		}
+	}
+	if line := kpiLineOf(m); strings.ContainsAny(line, "▁▂▃▄▅▆▇█") || !strings.HasSuffix(line, "#") {
+		t.Errorf("the KPI line is not ASCII, or draws no sparkline: %q", line)
+	}
+}
+
+// TestTrendStaleKeepsHistory: a stale feed's values are —, its history is
+// still drawn.
+func TestTrendStaleKeepsHistory(t *testing.T) {
+	f := trendFixture(t, time.Now().Add(-time.Minute))
+	m := f.model("multi")
+	if got, want := rowsOf(m), []string{"orders|instance-1|—|—|—|—|—", "orders|instance-2|—|—|—|—|—"}; !slices.Equal(got, want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	cells := trendCells(t, m)
+	if len(cells) != 2 || !strings.HasSuffix(cells[0], "▇█") || !strings.HasSuffix(cells[1], "██") {
+		t.Errorf("Trend cells = %q, want the history drawn", cells)
+	}
+}
+
+// TestKPILine: under the header, the fleet's completed/s, failed/min and
+// pending, each its current value and a sparkline of the last 10 minutes,
+// as wide as the line has room for — at most 12 columns, none below 4.
+func TestKPILine(t *testing.T) {
+	f := trendFixture(t, time.Now())
+	m := f.model("multi")
+	deliver(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	syncNow(t, m)
+
+	// 12 columns of 50s: the 5 minutes of history fill the right 6.
+	const blank = "      "
+	re := regexp.MustCompile(`^  completed/s 25\.0 ([▁-█ ]{12})  failed/min 0\.0 ([▁-█ ]{12})  pending 7 ([▁-█ ]{12})$`)
+	line := kpiLineOf(m)
+	sub := re.FindStringSubmatch(line)
+	if sub == nil {
+		t.Fatalf("KPI line = %q, want completed/s, failed/min and pending, each a value and 12 columns", line)
+	}
+	if !strings.HasPrefix(sub[1], blank) || !strings.HasSuffix(sub[1], "█") || strings.Contains(sub[1][len(blank):], " ") {
+		t.Errorf("completed/s sparkline = %q, want its right half drawn, rising", sub[1])
+	}
+	if sub[2] != blank+"▁▁▁▁▁▁" {
+		t.Errorf("failed/min sparkline = %q, want its right half at the lowest level", sub[2])
+	}
+	if sub[3] != blank+"██████" {
+		t.Errorf("pending sparkline = %q, want its right half at the top level", sub[3])
+	}
+
+	// It sits between the header and the table, which is a line shorter.
+	lines := strings.Split(ansi.ReplaceAllString(m.View(), ""), "\n")
+	at := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, "completed/s") })
+	if head := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, "vartop [multi]") }); head < 0 || at <= head {
+		t.Errorf("the KPI line is at %d, the header at %d", at, head)
+	}
+	if hdr := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, "Status") }); hdr <= at {
+		t.Errorf("the table header is at %d, the KPI line at %d", hdr, at)
+	}
+	if got, want := m.dashboardScreen().table.Height(), 40-14; got != want {
+		t.Errorf("table height = %d, want %d: the screen's less the header's 12, the KPI line and the table's own header", got, want)
+	}
+
+	// Its sparklines take a third each of what the text leaves, to 12 and
+	// from 4: the text of this line is 48 columns with the sparklines' gaps,
+	// 45 without them.
+	for _, tc := range []struct{ width, spark int }{{47, 0}, {59, 0}, {60, 4}, {63, 5}, {84, 12}, {200, 12}} {
+		deliver(m, tea.WindowSizeMsg{Width: tc.width, Height: 40})
+		line := kpiLineOf(m)
+		want := 45
+		if tc.spark > 0 {
+			want = 48 + 3*tc.spark
+		}
+		if got := utf8.RuneCountInString(line); got != want {
+			t.Errorf("at %d columns the KPI line is %d wide, want %d: %q", tc.width, got, want, line)
+		}
+		if drawn := strings.ContainsAny(line, "▁▂▃▄▅▆▇█"); drawn != (tc.spark > 0) {
+			t.Errorf("at %d columns the KPI line draws sparklines = %v, want %v: %q", tc.width, drawn, tc.spark > 0, line)
+		}
+	}
+}
+
+// TestKPILineOfOneUnit: the view of one unit has that unit's KPIs.
+func TestKPILineOfOneUnit(t *testing.T) {
+	f := trendFixture(t, time.Now())
+	m := f.model("multi")
+	m.selectedLabel, m.showNodeColumn = "instance-2", false
+	m.dashboardScreen().rebuildTable(m)
+	syncNow(t, m)
+	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s 5.0 ") || !strings.Contains(line, "  pending 3 ") {
+		t.Errorf("instance-2's KPI line = %q, want 5.0 completed/s and 3 pending", line)
+	}
+}
+
+// TestKPILineStale: while the newest snapshot is stale its values are —; its
+// history stays drawn.
+func TestKPILineStale(t *testing.T) {
+	f := trendFixture(t, time.Now().Add(-time.Minute))
+	m := f.model("multi")
+	line := kpiLineOf(m)
+	if !regexp.MustCompile(`^  completed/s — [▁-█ ]{12}  failed/min — [▁-█ ]{12}  pending — [▁-█ ]{12}$`).MatchString(line) {
+		t.Errorf("stale KPI line = %q, want — for each value and the sparklines drawn", line)
+	}
+	if !strings.HasSuffix(line, "██████") {
+		t.Errorf("stale KPI line = %q, want its history drawn", line)
+	}
+}
+
+// TestKPILineOnlyWithData: no KPI line where there is nothing to chart: no
+// snapshot yet, a server not configured, a unit no longer reported.
+func TestKPILineOnlyWithData(t *testing.T) {
+	empty := newFixture(t, multiConfig("http://a.invalid"))
+	if line := kpiLineOf(empty.model("multi")); line != "" {
+		t.Errorf("KPI line before the first snapshot: %q", line)
+	}
+
+	f := trendFixture(t, time.Now())
+	m := f.model("multi")
+	m.selectedLabel, m.showNodeColumn = "instance-9", false
+	m.dashboardScreen().rebuildTable(m)
+	syncNow(t, m)
+	if line := kpiLineOf(m); line != "" {
+		t.Errorf("KPI line of a unit that is gone: %q", line)
+	}
+
+	m = f.model("multi")
+	deliver(m, configMsg{cfg: &config.Config{Servers: map[string]*config.Server{}}})
+	if line := kpiLineOf(m); line != "" {
+		t.Errorf("KPI line of a server not configured: %q", line)
+	}
+}
+
+// TestResizeKeepsSelectionAcrossTrend: a resize that brings the Trend column
+// in or out rebuilds the rows with it, and the cursor stays on its row.
+func TestResizeKeepsSelectionAcrossTrend(t *testing.T) {
+	f := trendFixture(t, time.Now())
+	m := f.model("multi")
+	press(m, tea.KeyMsg{Type: tea.KeyDown})
+	d := m.dashboardScreen()
+	if d.selectedLabel() != "instance-2" {
+		t.Fatalf("selected %q, want instance-2", d.selectedLabel())
+	}
+	for _, width := range []int{92, 106, 92, 200, 20, 120} {
+		deliver(m, tea.WindowSizeMsg{Width: width, Height: 40})
+		rows := d.table.Rows()
+		if len(rows) != 2 {
+			t.Fatalf("%d columns: %d rows, want 2", width, len(rows))
+		}
+		for _, r := range rows {
+			if len(r) != len(d.table.Columns()) {
+				t.Fatalf("%d columns: a row has %d cells for %d columns", width, len(r), len(d.table.Columns()))
+			}
+		}
+		if d.table.Cursor() != 1 || d.selectedLabel() != "instance-2" || d.selectedWorkerName() != "orders" {
+			t.Errorf("%d columns: cursor %d on %q %q, want 1 on instance-2 orders", width, d.table.Cursor(), d.selectedLabel(), d.selectedWorkerName())
+		}
+	}
+}
+
+// TestTrendsBuiltPerSnapshot: the sparklines' series are built when a
+// snapshot comes, not at every sync, resize or View: a sync of the same
+// snapshot, a resize and a frame draw the series already built.
+func TestTrendsBuiltPerSnapshot(t *testing.T) {
+	end := time.Now()
+	f := trendFixture(t, end)
+	m := f.model("multi")
+	d := m.dashboardScreen()
+	built := d.built
+	if built == 0 {
+		t.Fatal("no series built")
+	}
+
+	for range 3 {
+		_ = m.View()
+		syncNow(t, m)
+	}
+	for _, width := range []int{92, 106, 160} {
+		deliver(m, tea.WindowSizeMsg{Width: width, Height: 40})
+		_ = m.View()
+	}
+	m.selectedLabel, m.showNodeColumn = "instance-1", false
+	d.rebuildTable(m)
+	m.selectedLabel, m.showNodeColumn = "", true
+	d.rebuildTable(m)
+	if d.built != built+2 { // instance-1's series, then the merged ones again
+		t.Errorf("series built %d times, want %d: once for each of the two views", d.built, built+2)
+	}
+
+	// A new snapshot is charted: instance-1 is at 40 a second now.
+	at := end.Add(15 * time.Second).Round(time.Millisecond)
+	f.write("multi", snapAt(at, rated(at, "instance-1", "http://a.invalid", 40, 7), rated(at, "instance-2", "http://b.invalid", 5, 3)))
+	built = d.built
+	syncNow(t, m)
+	if d.built != built+1 {
+		t.Errorf("series built %d times after a new snapshot, want %d", d.built, built+1)
+	}
+	if line := kpiLineOf(m); !strings.HasPrefix(line, "  completed/s 45.0 ") {
+		t.Errorf("KPI line = %q, want the new snapshot's 45.0 completed/s", line)
 	}
 }

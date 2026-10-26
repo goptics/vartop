@@ -385,7 +385,7 @@ func TestKPIsPendingIsMaxPerPodSummedOverWorkers(t *testing.T) {
 		t.Errorf("pending point = %+v, want title %q", k.Pending[0], want)
 	}
 
-	// Series cover the trendWindow before the newest snapshot, by time: a
+	// Series cover the TrendWindow before the newest snapshot, by time: a
 	// shorter history gives all of it...
 	var snaps []*Snapshot
 	for n := range 8 {

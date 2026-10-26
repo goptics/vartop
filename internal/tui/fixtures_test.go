@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/goptics/vartop/internal/config"
@@ -291,10 +293,16 @@ func waitRows(t *testing.T, m *Model, want int) {
 	})
 }
 
-// rowsOf is the dashboard's rows, each its cells joined by "|", trimmed.
+// rowsOf is the dashboard's rows, each its cells joined by "|", trimmed,
+// the Trend cell left out: the sparklines have tests of their own.
 func rowsOf(m *Model) []string {
 	var rows []string
-	for _, r := range m.dashboardScreen().table.Rows() {
+	d := m.dashboardScreen()
+	trend := slices.ContainsFunc(d.table.Columns(), func(c table.Column) bool { return c.Title == "Trend" })
+	for _, r := range d.table.Rows() {
+		if trend {
+			r = r[:len(r)-1]
+		}
 		cells := make([]string, len(r))
 		for i, c := range r {
 			cells[i] = strings.TrimSpace(c)

@@ -29,8 +29,9 @@ import (
 //     point partial instead of plotting a solid dip.
 
 const (
-	// trendWindow is how far back row and KPI sparklines reach.
-	trendWindow = 10 * time.Minute
+	// TrendWindow is how far back row and KPI sparklines reach, the 10 minutes
+	// up to the newest snapshot (the TUI buckets it by time).
+	TrendWindow = 10 * time.Minute
 	// concurrencyFloor is the smallest upper bound of the concurrency slider.
 	concurrencyFloor = 64
 	// tipSep separates per-pod lines in tooltips (title attributes render \n
@@ -188,7 +189,7 @@ func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) Dash
 		return v
 	}
 	pods := PodsOf(snaps[len(snaps)-1], pod)
-	window := newest(snaps, trendWindow)
+	window := newest(snaps, TrendWindow)
 
 	for _, name := range workerNames(pods) {
 		m := mergeWorker(pods, name)

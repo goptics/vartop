@@ -353,11 +353,12 @@ func TestDetailRefreshPokes(t *testing.T) {
 }
 
 func TestResizeAllScreensDoesNotPanic(t *testing.T) {
-	widths := []int{20, 80, 200}
+	widths := []int{20, 80, 92, 106, 200}
 	heights := []int{5, 24, 60}
 
 	// The stores, made once; each subtest gets a model of its own.
 	detail, switcher, empty := detailFixture(t), switcherFixture(t), newFixture(t, localConfig())
+	trend := trendFixture(t, time.Now())
 	stale := newFixture(t, localConfig())
 	stale.claim()
 	stale.write("local", snapAt(time.Now().Add(-time.Minute),
@@ -375,6 +376,16 @@ func TestResizeAllScreensDoesNotPanic(t *testing.T) {
 		{"dashboard-unit", func(t *testing.T) *Model {
 			m := detail.modelFor(t, "local")
 			m.selectedLabel, m.showNodeColumn = "instance-3", false
+			m.dashboardScreen().rebuildTable(m)
+			syncNow(t, m)
+			return m
+		}},
+		{"dashboard-trend", func(t *testing.T) *Model {
+			return trend.modelFor(t, "multi")
+		}},
+		{"dashboard-trend-unit", func(t *testing.T) *Model {
+			m := trend.modelFor(t, "multi")
+			m.selectedLabel, m.showNodeColumn = "instance-1", false
 			m.dashboardScreen().rebuildTable(m)
 			syncNow(t, m)
 			return m
