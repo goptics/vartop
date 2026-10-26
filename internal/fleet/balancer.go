@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/goptics/vartop/internal/api"
@@ -69,7 +68,7 @@ const minHedge = 10 * time.Millisecond
 type reachJob interface {
 	load(eps, budget int) (owed, target, active, left int)
 	settled(eps, budget int) bool
-	start(ctx context.Context, r *reacher, wg *sync.WaitGroup)
+	start(ctx context.Context, r *reacher, g *panicGroup)
 	stall() // presume every attempt in flight stuck
 }
 
@@ -154,26 +153,40 @@ func (j *job[T]) settled(eps, budget int) bool {
 	return j.sent >= budget && j.flying == 0
 }
 
-// start sends one attempt of j through the next endpoint in j's turn.
-func (j *job[T]) start(ctx context.Context, r *reacher, wg *sync.WaitGroup) {
+// start sends one attempt of j through the next endpoint in j's turn. An
+// attempt that panics still comes back to the loop, with no reply, once g
+// has kept its panic, which g raises again once the run is over.
+func (j *job[T]) start(ctx context.Context, r *reacher, g *panicGroup) {
 	c := r.eps[j.sent%len(r.eps)]
 	j.sent++
 	j.flying++
 	r.flying++
 	gen, began := r.gen, time.Now()
-	wg.Go(func() {
-		v, instance, err := j.send(ctx, c)
-		a := answer[T]{V: v, Err: err, Via: c.PrimaryEndpoint(), At: time.Now().Round(0)}
-		r.replies <- func() {
-			j.flying--
-			if gen < r.gen {
-				j.stuck--
+	g.Go(func() {
+		var instance string
+		var a answer[T]
+		replied := false
+		defer func() {
+			if v := recover(); v != nil {
+				g.keep(v) // before the loop hears back, so that it stops
 			}
-			if instance != "" {
-				r.slowest = max(r.slowest, a.At.Sub(began))
+			r.replies <- func() {
+				j.flying--
+				if gen < r.gen {
+					j.stuck--
+				}
+				if !replied {
+					return
+				}
+				if instance != "" {
+					r.slowest = max(r.slowest, a.At.Sub(began))
+				}
+				j.record(instance, a)
 			}
-			j.record(instance, a)
-		}
+		}()
+		v, id, err := j.send(ctx, c)
+		instance, replied = id, true
+		a = answer[T]{V: v, Err: err, Via: c.PrimaryEndpoint(), At: time.Now().Round(0)}
 	})
 }
 
@@ -204,18 +217,19 @@ func (j *job[T]) record(instance string, a answer[T]) {
 
 // run sends the jobs' attempts until every job has settled or ctx is done,
 // then cancels the attempts still in flight and returns once every one has
-// returned. Replies recorded by then stay in the jobs.
+// returned. Replies recorded by then stay in the jobs. An attempt that
+// panics ends the run as ctx would; run then raises its panic again.
 func (r *reacher) run(ctx context.Context) {
 	if len(r.eps) == 0 {
 		return
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	var wg sync.WaitGroup
+	var g panicGroup
 	for {
 		if ctx.Err() == nil {
-			r.launch(ctx, &wg)
+			r.launch(ctx, &g)
 		}
-		if r.flying == 0 || r.settled() {
+		if r.flying == 0 || r.settled() || g.panicked() {
 			break
 		}
 		var hedge <-chan time.Time
@@ -237,14 +251,14 @@ func (r *reacher) run(ctx context.Context) {
 	for ; r.flying > 0; r.flying-- {
 		<-r.replies // every job has settled: late replies are dropped
 	}
-	wg.Wait()
+	g.Wait()
 }
 
 // launch starts the attempts owed outright, then fills the free slots (the
 // targets of the jobs missing someone, less their attempts in flight) with
 // jobs drawn at random, weighted by target, within their budgets. The batch
 // goes out in random order.
-func (r *reacher) launch(ctx context.Context, wg *sync.WaitGroup) {
+func (r *reacher) launch(ctx context.Context, g *panicGroup) {
 	type candidate struct {
 		job          reachJob
 		weight, left int
@@ -277,7 +291,7 @@ func (r *reacher) launch(ctx context.Context, wg *sync.WaitGroup) {
 	}
 	rand.Shuffle(len(batch), func(i, k int) { batch[i], batch[k] = batch[k], batch[i] })
 	for _, j := range batch {
-		j.start(ctx, r, wg)
+		j.start(ctx, r, g)
 	}
 }
 

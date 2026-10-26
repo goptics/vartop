@@ -1145,3 +1145,36 @@ func TestBalancerEndpointDown(t *testing.T) {
 		}
 	})
 }
+
+// TestReacherAttemptPanic: an attempt that panics ends the reacher's run,
+// which raises the panic again, as raised, once every attempt in flight
+// has returned.
+func TestReacherAttemptPanic(t *testing.T) {
+	_, a := fleettest.NewVarmq(t, "a", nil)
+	_, b := fleettest.NewVarmq(t, "b", nil)
+	r := newReacher(fleettest.StaticPool(t, a.URL, b.URL).Clients(), 8)
+	var calls atomic.Int32
+	j := addJob(r, func(ctx context.Context, _ *api.Client) (int, string, error) {
+		if calls.Add(1) == 1 {
+			panic("attempt broke")
+		}
+		<-ctx.Done() // the others hang until the run gives up on them
+		return 0, "", ctx.Err()
+	}, nil)
+	j.want("x")
+
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		r.run(context.Background())
+	}()
+	select {
+	case v := <-done:
+		p, ok := v.(*TickPanic)
+		if !ok || p.Value != "attempt broke" || !strings.Contains(string(p.Stack), "TestReacherAttemptPanic") {
+			t.Errorf("run raised %v, want the attempt's panic with the stack it was raised on", v)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run still running 3s after an attempt panicked")
+	}
+}

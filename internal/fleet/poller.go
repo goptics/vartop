@@ -148,14 +148,17 @@ func (c *Collector) run() {
 // tick polls every unit with a deadline of 0.8 × the interval, rates the
 // snapshot and hands it to the sink. It reports false, handing over
 // nothing, once the collector is closed, and false when the sink fails. A
-// panic on the poller goroutine is recovered into an error snapshot (see
-// Tick.Panic); one on a goroutine a poll starts is not.
+// panic of the tick, on the poller goroutine or on one its polls fan out to
+// (see panicGroup), is recovered into an error snapshot (see Tick.Panic).
 func (c *Collector) tick() (ok bool) {
 	ctx, cancel := context.WithTimeout(c.ctx, c.interval*8/10)
 	defer cancel()
 	defer func() {
 		if v := recover(); v != nil {
-			p := &TickPanic{Value: v, Stack: debug.Stack()}
+			p, raisedAgain := v.(*TickPanic)
+			if !raisedAgain {
+				p = &TickPanic{Value: v, Stack: debug.Stack()}
+			}
 			ok = c.ctx.Err() == nil &&
 				c.sink(Tick{Snap: &Snapshot{At: time.Now().Round(0), Err: "internal error"}, Panic: p}) == nil
 		}
@@ -170,6 +173,62 @@ func (c *Collector) tick() (ok bool) {
 		tick.Labels = &labels
 	}
 	return c.sink(tick) == nil
+}
+
+// panicGroup is a WaitGroup that carries a panic of one of its goroutines
+// to Wait, which raises it again once they have all returned: a poll's
+// goroutines panic on the goroutine that waits for them, and so, through
+// any number of groups, on the poller goroutine, where tick recovers it.
+type panicGroup struct {
+	wg sync.WaitGroup
+	mu sync.Mutex
+	p  *TickPanic // the first panic of a goroutine
+}
+
+// Go runs f on a goroutine of its own.
+func (g *panicGroup) Go(f func()) {
+	g.wg.Go(func() {
+		defer g.catch()
+		f()
+	})
+}
+
+// catch recovers a panic of the goroutine it is deferred on and keeps it.
+func (g *panicGroup) catch() {
+	if v := recover(); v != nil {
+		g.keep(v)
+	}
+}
+
+// keep keeps v, a panic of one of g's goroutines recovered by a function it
+// deferred, unless one was kept before. Called while that goroutine is
+// still panicking, it keeps the stack the panic was raised on.
+func (g *panicGroup) keep(v any) {
+	p, raisedAgain := v.(*TickPanic) // by a group further down, whose stack it has
+	if !raisedAgain {
+		p = &TickPanic{Value: v, Stack: debug.Stack()}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.p == nil {
+		g.p = p
+	}
+}
+
+// panicked reports whether a goroutine has panicked.
+func (g *panicGroup) panicked() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.p != nil
+}
+
+// Wait waits for every goroutine to return, then raises again the panic of
+// one, if any did.
+func (g *panicGroup) Wait() {
+	g.wg.Wait()
+	if g.p != nil {
+		panic(g.p)
+	}
 }
 
 // pollOnce polls every unit of the pool within ctx, tracking instances
@@ -204,18 +263,18 @@ func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Sna
 		}
 	}
 
-	// Until wg.Wait, only the balancer pass uses t.
+	// Until g.Wait, only the balancer pass uses t.
 	var balanced []PodSnapshot
 	pods := make([]PodSnapshot, len(directs))
 	answered := make([][]string, len(directs))
-	var wg sync.WaitGroup
+	var g panicGroup
 	if len(balancers) > 0 {
-		wg.Go(func() { balanced = pollBalanced(ctx, balancers, t, t.direct, now) })
+		g.Go(func() { balanced = pollBalanced(ctx, balancers, t, t.direct, now) })
 	}
 	for i, c := range directs {
-		wg.Go(func() { pods[i], answered[i] = pollDirect(ctx, c) })
+		g.Go(func() { pods[i], answered[i] = pollDirect(ctx, c) })
 	}
-	wg.Wait()
+	g.Wait()
 
 	direct := make(map[string]bool) // instances shown as a direct unit this tick
 	var moved []*api.Client
@@ -302,9 +361,9 @@ func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered [
 
 	samples := make([]*Sample, len(list))
 	errs := make([]error, len(list))
-	var wg sync.WaitGroup
+	var g panicGroup
 	for i, w := range list {
-		wg.Go(func() {
+		g.Go(func() {
 			d, err := c.GetWorkerCtx(ctx, url.PathEscape(w.Name))
 			if err != nil {
 				errs[i] = err
@@ -313,7 +372,7 @@ func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered [
 			samples[i] = &Sample{At: time.Now().Round(0), WorkerDetails: *d}
 		})
 	}
-	wg.Wait()
+	g.Wait()
 
 	pod.Workers = make(map[string]*Sample, len(list))
 	for i, w := range list {

@@ -532,3 +532,51 @@ func TestTicksDoNotOverlap(t *testing.T) {
 		t.Error("latest pod is healthy; want it errored by the tick deadline")
 	}
 }
+
+// raised runs f and returns what it panicked with, nil if nothing.
+func raised(f func()) (v any) {
+	defer func() { v = recover() }()
+	f()
+	return nil
+}
+
+// TestPanicGroupReraises: Wait waits for every goroutine, then raises the
+// panic of one again, with the stack it was raised on, through any number
+// of groups.
+func TestPanicGroupReraises(t *testing.T) {
+	var f panicGroup
+	var finished atomic.Int32
+	for i := range 3 {
+		f.Go(func() {
+			if i == 1 {
+				panic("worker broke")
+			}
+			time.Sleep(50 * time.Millisecond)
+			finished.Add(1)
+		})
+	}
+	p, ok := raised(f.Wait).(*TickPanic)
+	if !ok || p.Value != "worker broke" || !strings.Contains(string(p.Stack), "TestPanicGroupReraises.func1") {
+		t.Errorf("Wait raised %+v, want the goroutine's panic and stack", p)
+	}
+	if n := finished.Load(); n != 2 {
+		t.Errorf("%d goroutines finished before Wait raised, want the other 2", n)
+	}
+
+	var outer panicGroup
+	outer.Go(func() {
+		var inner panicGroup
+		inner.Go(func() { panic("deep") })
+		inner.Wait()
+	})
+	p, ok = raised(outer.Wait).(*TickPanic)
+	if !ok || p.Value != "deep" || strings.Contains(string(p.Stack), "panicGroup).Wait") {
+		t.Errorf("outer Wait raised %+v, want the innermost panic and its own stack", p)
+	}
+
+	var calm panicGroup
+	calm.Go(func() {})
+	if v := raised(calm.Wait); v != nil {
+		t.Errorf("Wait with no panic raised %v", v)
+	}
+}
