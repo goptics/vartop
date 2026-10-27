@@ -12,6 +12,7 @@
   <a href="#installation"><strong>Installation</strong></a> ·
   <a href="#quick-start"><strong>Quick Start</strong></a> ·
   <a href="#usage"><strong>Usage</strong></a> ·
+  <a href="#daemon"><strong>Daemon</strong></a> ·
   <a href="#configuration"><strong>Configuration</strong></a> ·
   <a href="#kubernetes"><strong>Kubernetes</strong></a> ·
   <a href="#load-balancers"><strong>Load balancers</strong></a> ·
@@ -33,18 +34,20 @@
 ### Features
 
 - **Live Dashboard** — colour-coded table of all workers showing status, concurrency, queue depth, and idle count with auto-refresh
+- **Always-On Collector** — the [vartop daemon](#daemon) polls every configured server in the background into a local store (24 hours of history), so the TUI and the web UI open with their trends already drawn and always show the same numbers
+- **Trends** — a completed/s trend per worker row and sparklines in the KPI line, plus 1 h completed/failed charts on the worker detail screen
 - **Web UI** — `vartop web` serves the same dashboard in your browser on a loopback address: an auto-refreshing worker grid with trend sparklines, per-worker charts, and pause/resume/restart/stop and concurrency controls
 - **Worker Detail View** — drill into a single worker to see full configuration, runtime metrics (submitted, completed, successful, failed), and success rate
 - **Multi-Server & Multi-Pod Support** — configure multiple varmq servers, each with a static list of pod endpoints. View merged worker stats across all pods, or drill into a single pod via the Switch view
 - **Kubernetes Discovery** — point a server at a Service or label selector and vartop watches its EndpointSlices, following pods as they scale, restart, or roll out; pods are labelled by pod name
 - **DNS Discovery** — point a server at a hostname that resolves to every instance (headless Service, Docker Compose service, Consul) and vartop re-resolves it every few seconds
-- **Load-Balancer Detection** — varmq names the instance behind every response; if one URL is answered by several instances, the TUI warns that it is a load balancer and labels each row with the instance that served it, and the web UI shows every instance behind it
+- **Load-Balancer Detection** — varmq names the instance behind every response; if one URL is answered by several instances, the daemon reaches each of them and both UIs list every instance behind it
 - **Worker Control** — pause, resume, restart, and stop workers directly from the TUI or CLI
 - **Concurrency Tuning** — adjust worker pool size in real time without restarting, via `vartop concurrency` (CLI)
-- **Interactive Onboarding** — guided first-run wizard to configure your first server connection
+- **Interactive Onboarding** — guided first-run wizard to configure your first server connection; it also offers to start the daemon at login
 - **Responsive Layout** — adapts to narrow and wide terminal windows with compact and side-by-side layouts
 - **Action Mode** — press <kbd>a</kbd> on the selected worker (dashboard row or detail view), then one key to pause, resume, restart, or stop it; in the merged view the action goes to that row's pod
-- **Server Health Monitoring** — connection status indicator and automatic background polling with configurable interval
+- **Server Health Monitoring** — connection status indicator and automatic background polling with a configurable interval; a banner says so when the data goes stale
 
 ## Installation
 
@@ -64,7 +67,7 @@ make build   # binary at bin/vartop
 
 ## Quick Start
 
-1. **Launch vartop**. On first run, an interactive wizard will help you set up your first server:
+1. **Launch vartop**. On first run, an interactive wizard will help you set up your first server, then offers to start the [daemon](#daemon) at login:
 
    ```bash
    vartop
@@ -100,6 +103,8 @@ make build   # binary at bin/vartop
    vartop -s staging
    ```
 
+vartop starts its [daemon](#daemon) by itself when none is running; there is nothing to set up for it.
+
 ## Usage
 
 ### CLI Commands
@@ -110,6 +115,7 @@ make build   # binary at bin/vartop
 | `vartop -s <name>` | Connect to a specific configured server |
 | `vartop --server <name>` | Same as `-s` |
 | `vartop web` | Open the dashboard in your browser, see [Web UI](#web-ui) |
+| `vartop daemon` | Run or manage the background collector, see [Daemon](#daemon) |
 
 #### Server Management
 
@@ -142,7 +148,7 @@ vartop -s staging concurrency orders 8
 
 ### Web UI
 
-`vartop web` serves the dashboard in your browser and opens it. It uses the same configuration and the same discovery as the TUI, and shows the same data with trend charts; workers can be controlled from the page too.
+`vartop web` serves the dashboard in your browser and opens it. It uses the same configuration as the TUI and reads the same store the [daemon](#daemon) fills, so it shows the same data and the same labels, with trend charts; workers can be controlled from the page too. It starts the daemon when none is running.
 
 ```bash
 vartop web                          # http://127.0.0.1:7070, default server
@@ -159,13 +165,36 @@ vartop web --no-open                # print the URL, don't launch a browser
 
 - **Loopback only.** vartop refuses any other `--addr`, and the server only answers requests addressed to its own loopback host name.
 - **The token stays on the server.** vartop calls varmq on the page's behalf; the bearer token is never sent to the browser.
-- **History lives in memory.** Charts cover what vartop has seen since `vartop web` started (up to the last hour) and are gone when it stops.
+- **History comes from the daemon.** Charts cover the last hour of what the daemon stored, so they are already there when the page opens and survive restarting `vartop web`. The page reads the store and never calls varmq to show data.
+- **A stopped daemon is visible.** When no new data has arrived for twice the polling interval plus 2 seconds, a banner says how old the data is and why (the daemon is not running, or the server's error), the current values show `—`, and the history stays drawn. When no daemon is running the banner has a **Start collector** button.
 
-Outside Kubernetes the web UI says **instance** where the TUI says pod, and labels each one instance-1, instance-2, … in the order it first sees them, static and DNS endpoints included; hover a label for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number.
+Outside Kubernetes the UIs say **instance** where Kubernetes says pod, and label each one instance-1, instance-2, … in the order the daemon first sees them, static and DNS endpoints included; hover a label in the web UI for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number. Labels are stored per server, so the TUI and the web UI show the same ones and they survive daemon restarts; a number not seen for 24 hours is freed, and a new instance takes the lowest free number.
 
 **Behind a load balancer**, each instance that answers through the balancer URL gets its own entry, and actions on **All instances (merged)** go through the balancer until every instance has answered or the retry limit is reached (at most 15 seconds), one result line each. Since the balancer picks which instance answers, an instance reached only through it has no actions of its own, and **Restart** is hidden on the merged view whenever such an instance is in it: restart an instance listed by its own address from its own entry, list the instances' own addresses in `endpoints`, or use [`kubernetes`](#kubernetes) or [`dns`](#dns) discovery. To reach every instance, vartop opens roughly K·(1 + ln K) short-lived connections per worker per refresh through a balancer with K instances behind it; for large fleets prefer `kubernetes` or `dns` discovery, or an interval of 5 seconds or more.
 
 Press <kbd>Ctrl+C</kbd> to stop.
+
+#### URL parameters
+
+A page's address says what it shows, by the names the page shows:
+
+| Parameter | Meaning |
+| --- | --- |
+| `server=<name>` | The configured server to show, by the key it is listed under in the config (the default server when absent) |
+| `instance=<label>` | Off Kubernetes: only that instance, e.g. `?instance=instance-2` |
+| `pod=<pod name>` | On Kubernetes: only that pod |
+
+Without `instance` or `pod` the page shows every instance (on Kubernetes, every pod) merged. An old `pod=` link opens the merged view: that is a `pod=` on a server that is not on Kubernetes, or on a Kubernetes one a value that is an endpoint key (`#…` or a URL), not a pod name. A label the server never had says so; one that is no longer reported says that, with a link to the merged view.
+
+### Trends in the TUI
+
+The TUI reads the same store as the web UI, so it shows the same numbers and labels, and draws trends from it:
+
+- a **Trend** column on the dashboard: each row's completed/s over the last 10 minutes, as a sparkline
+- sparklines in the KPI line above the table
+- two 1 h charts (completed and failed) on the worker detail screen
+
+The sparklines and charts need room, so they appear only when the terminal is wide enough. When the newest data is stale (no new snapshot for twice the polling interval plus 2 seconds) the header says how old it is and why (the daemon is not running, or the server's error), current values show `—`, and the history stays drawn.
 
 ### Keyboard Shortcuts
 
@@ -178,7 +207,7 @@ Every screen shows its available keys in a help footer at the bottom.
 | <kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>k</kbd> / <kbd>j</kbd> | Navigate worker rows |
 | <kbd>Enter</kbd> | View worker details |
 | <kbd>a</kbd> | Enter action mode (pause, resume, stop, restart); <kbd>Esc</kbd> leaves it |
-| <kbd>r</kbd> | Refresh data (also retries a server connection that failed, e.g. a bad kube context) |
+| <kbd>r</kbd> | Refresh now: ask the daemon to poll this server at once (starts the daemon if it is stopped) |
 | <kbd>Tab</kbd> | Open Switch view (servers and pods) |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | Quit |
 
@@ -190,7 +219,7 @@ Every screen shows its available keys in a help footer at the bottom.
 | <kbd>PgUp</kbd> / <kbd>b</kbd>, <kbd>PgDn</kbd> / <kbd>Space</kbd> | Scroll one page |
 | <kbd>g</kbd> / <kbd>Home</kbd>, <kbd>G</kbd> / <kbd>End</kbd> | Jump to top / bottom |
 | <kbd>a</kbd> | Enter action mode |
-| <kbd>r</kbd> | Refresh worker details |
+| <kbd>r</kbd> | Refresh now (as on the dashboard) |
 | <kbd>Esc</kbd> | Return to dashboard |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | Quit |
 
@@ -206,7 +235,7 @@ Every screen shows its available keys in a help footer at the bottom.
 
 #### Switch View
 
-Servers are listed alphabetically. The active Kubernetes server lists its live pods by pod name (other Kubernetes servers show their pods once selected); static servers list their configured endpoints.
+Servers are listed alphabetically, each with its health from its newest stored snapshot, so switching is instant. A server with more than one pod or instance lists them under it by label: the pod name on Kubernetes, instance-1, instance-2, … elsewhere.
 
 | Key | Action |
 | --- | --- |
@@ -216,11 +245,77 @@ Servers are listed alphabetically. The active Kubernetes server lists its live p
 | <kbd>Esc</kbd> | Collapse the expanded server, or close the Switch view if nothing is expanded |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | Quit |
 
-While a server connection is being set up (a Kubernetes watcher can take a few seconds to sync), the dashboard shows a *Connecting to …* panel. If the connection fails, the real cause (for example an RBAC `forbidden` error) is shown in place of the worker table.
+While the daemon is still connecting to a server (a Kubernetes watcher can take a few seconds to sync), the dashboard says it is waiting for the server's first snapshot. If the connection fails, the real cause the daemon recorded (for example an RBAC `forbidden` error) is shown with the server's name.
+
+## Daemon
+
+`vartop daemon` is a small background process that polls **every configured server**, all the time, and writes what it sees to a local SQLite store with 24 hours of history. `vartop` and `vartop web` don't poll varmq themselves: they read that store. That is why both show the same numbers and the same instance labels, why trends are already drawn when you open either one, and why history survives closing them.
+
+The daemon never exits on its own, and idles when no server is configured. It follows the config file, so adding, editing or removing a server takes effect within a few seconds without restarting it. You rarely start it yourself:
+
+- the first time you run vartop, after the onboarding wizard, it offers to install the [login service](#login-service)
+- `vartop` and `vartop web` start a daemon when none is running — through the login service when that is installed, otherwise as a detached process of their own
+
+| Command | Description |
+| --- | --- |
+| `vartop daemon` | Same as `vartop daemon run` |
+| `vartop daemon run` | Collect in the foreground until stopped (<kbd>Ctrl+C</kbd>), unless another daemon already collects; the log goes to the terminal too |
+| `vartop daemon start` | Start the daemon unless it is running |
+| `vartop daemon stop` | Stop the daemon until your next login or the next time you open vartop |
+| `vartop daemon restart` | Restart the daemon with this vartop's build and environment |
+| `vartop daemon status` | Show the daemon's state and each server's newest data; exits with code 3 when it is not running |
+| `vartop daemon install` | Start the daemon at login, and again after a crash (a login service) |
+| `vartop daemon uninstall` | Remove the login service; vartop then starts the daemon itself |
+
+`vartop daemon stop` says so when it is done: *vartop daemon stopped. It starts again at your next login or the next time you open vartop.* `status` shows the daemon's pid, uptime, build, config path, `KUBECONFIG` and `PATH`, the data directory and its size, the log file, whether the login service is installed, and for each server how old its newest snapshot is, its units (and how many of them are healthy) and its last error.
+
+### Login service
+
+`vartop daemon install` registers a per-user service of your OS that runs `vartop daemon run` at login and starts it again after a crash. It does not start it again after a deliberate `vartop daemon stop`.
+
+| OS | Service | Restarts |
+| --- | --- | --- |
+| Linux | systemd user unit `vartop.service` in `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`) | `Restart=on-failure` |
+| macOS | LaunchAgent `dev.goptics.vartop` in `~/Library/LaunchAgents` | `RunAtLoad`; `KeepAlive` on failure |
+| Windows | Scheduled task `vartop daemon` | At logon; restarts on failure |
+
+The service file holds the absolute path of the vartop that installed it and a small part of its environment (see below), and is written with mode `0600`. While the service is installed, starting and restarting the daemon goes through your service manager, so the daemon stays supervised; `vartop daemon stop` makes it exit cleanly, which the service manager does not restart.
+
+> **Tested on Linux.** The macOS and Windows service paths were only built and vetted on the development machine, not run.
+
+> **Windows:** run `vartop daemon stop` before upgrading vartop. The running daemon locks the executable.
+
+### Environment
+
+What the daemon can reach depends on the environment it starts with: the config path (`XDG_CONFIG_HOME` or `HOME`), `KUBECONFIG`, the credential plugins on `PATH` that EKS, GKE and AKS kubeconfigs call, proxies, `VARTOP_DATA_DIR`. **The environment of the vartop you run wins.** When `vartop` or `vartop web` finds a daemon built from another binary, or one reading another config path or `KUBECONFIG`, it stops that daemon and starts one with its own environment, so the daemon follows whichever vartop you started last. `PATH` is not compared, so ordinary differences between shells restart nothing. With the login service installed, vartop first rewrites the environment the service saved, then restarts it through the service manager.
+
+The service saves only an allow-list of non-secret variables: `PATH`, `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `VARTOP_DATA_DIR`, `KUBECONFIG`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms), `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `CLOUDSDK_CONFIG`, `CLOUDSDK_ACTIVE_CONFIG_NAME`, `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_CONFIG_DIR`. A name containing `KEY`, `SECRET` or `TOKEN` is never written. `KUBECONFIG`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `VARTOP_DATA_DIR` are always written, empty when unset, so the service manager's own values never take the place of yours.
+
+### Data directory
+
+The store lives in `VARTOP_DATA_DIR` when that is set, else in `vartop` under your OS user cache directory:
+
+| OS | Default path |
+| --- | --- |
+| Linux | `$XDG_CACHE_HOME/vartop` (default `~/.cache/vartop`) |
+| macOS | `~/Library/Caches/vartop` |
+| Windows | `%LocalAppData%\vartop` |
+
+| File | Holds |
+| --- | --- |
+| `control.db` | The daemon's lease, the UIs' requests to poll now, and each server's last collection error |
+| `servers/<name>-<hash>.db` | One file per configured server: its snapshots (24 hours) and its instance labels |
+| `daemon.log`, `daemon.log.1` | The daemon's log; renamed to `.1` when it passes 5 MiB as a daemon starts |
+
+The directory is created `0700` and its files `0600`. Tokens are never stored there: the daemon reads them from the [config](#configuration) when it polls. A server's file is deleted 24 hours after the server leaves the config, so removing a server by mistake and adding it back under the same name within a day keeps its history.
+
+### Disk use
+
+A busy server, with 10 instances of 20 workers each, polled every 5 seconds, takes about **149 MB a day** (roughly 8.6 KB on disk per poll). History is kept for 24 hours, and each server's file is capped at **256 MB**: past that, the oldest rows go first. A server about 1.7 times busier than that one, by workers, instances or a shorter interval, therefore keeps less than 24 hours; the charts only cover the last hour, so they are not affected. Smaller fleets and longer intervals scale the figure down roughly in proportion: per day, bytes per poll × 86,400 ÷ the interval in seconds.
 
 ## Configuration
 
-Configuration lives in your OS user config directory, created on first run (directory `0755`, file `0600` since it may hold tokens):
+Configuration lives in your OS user config directory, created on first run (directory `0755`, file `0600` since it may hold tokens). The [daemon](#daemon) watches the file and picks up changes to it:
 
 | OS | Path |
 | --- | --- |
@@ -272,13 +367,13 @@ Each server uses **exactly one** of `endpoints` (static list), `kubernetes` or `
 | `servers.<name>.kubernetes` | Kubernetes discovery block, see [Kubernetes](#kubernetes) | *(one of endpoints / kubernetes / dns)* |
 | `servers.<name>.dns` | DNS discovery block, see [DNS](#dns) | *(one of endpoints / kubernetes / dns)* |
 | `servers.<name>.token` | Bearer token for authentication (sent as `Authorization` header) | *(none)* |
-| `servers.<name>.interval` | Polling interval in seconds | `5` |
+| `servers.<name>.interval` | How often the daemon polls the server, in seconds | `5` |
 
 ### Kubernetes
 
 | Field | Description | Default |
 | --- | --- | --- |
-| `context` | kubeconfig context to use (kubeconfig is read from `$KUBECONFIG` or `~/.kube/config`) | *(required)* |
+| `context` | kubeconfig context to use (kubeconfig is read from `$KUBECONFIG` or `~/.kube/config`, in the [environment](#environment) of the vartop that started the daemon) | *(required)* |
 | `namespace` | Namespace of the varmq pods | *(required)* |
 | `service` | Service name; pods are found via its EndpointSlices (`kubernetes.io/service-name=<service>`) | *(one of service / selector)* |
 | `selector` | EndpointSlice label selector, e.g. `app=varmq-mux` | *(one of service / selector)* |
@@ -289,7 +384,7 @@ Only **ready** endpoints are used, so pods that are starting up or terminating a
 
 **Requirements**
 
-- **Reachable pod IPs.** vartop dials each pod directly at `http://<pod-ip>:<port><path>`. There is no port-forward or API-server proxy, so run it from inside the cluster network or over a VPN or route that reaches pod IPs.
+- **Reachable pod IPs.** vartop's daemon dials each pod directly at `http://<pod-ip>:<port><path>`. There is no port-forward or API-server proxy, so run it from inside the cluster network or over a VPN or route that reaches pod IPs.
 - **RBAC.** Your kube identity needs `list` and `watch` on EndpointSlices in the namespace:
 
   ```yaml
@@ -306,7 +401,7 @@ Only **ready** endpoints are used, so pods that are starting up or terminating a
 
 - **Plain HTTP.** Pods are dialed over `http://`. If you set a `token`, it travels unencrypted on the pod network, so only use it where that network is trusted.
 
-If the watcher can't sync within 10 seconds (wrong context, no access, API server unreachable), vartop shows the underlying error. Press <kbd>r</kbd> to retry.
+If the watcher can't sync within 10 seconds (wrong context, no access, API server unreachable), vartop shows the underlying error, and the daemon tries again with a growing delay (5 seconds, doubling up to 5 minutes).
 
 ### DNS
 
@@ -326,19 +421,15 @@ An unresolvable host fails at connect time with the lookup error; a failed refre
 
 ## Load balancers
 
-If a server is configured with a single **load-balancer URL** (an ingress, nginx, a cloud LB, or a normal ClusterIP Service), every request reaches *one* instance chosen by the balancer. In the TUI and the CLI:
+If a server is configured with a single **load-balancer URL** (an ingress, nginx, a cloud LB, or a normal ClusterIP Service), every request reaches *one* instance chosen by the balancer. For the CLI that means:
 
-- the dashboard shows only that instance's workers, and it can change on every refresh
 - an action (pause, stop, …) reaches one random instance, not all of them; a `pause` and the following `resume` can land on different instances
 
-The TUI and the CLI can't aggregate through a balancer, so instead they make the situation visible. varmq (with this feature) adds an `X-Varmq-Instance` header naming the process that answered every API request, defaulting to the hostname (the pod name on Kubernetes) and settable via `varmq.InstanceID`. vartop uses it to:
+The CLI can't aggregate through a balancer, so it makes the situation visible. varmq (with this feature) adds an `X-Varmq-Instance` header naming the process that answered every API request, defaulting to the hostname (the pod name on Kubernetes) and settable via `varmq.InstanceID`. vartop uses it to label each CLI result line (`ok (instance pod-c)`) with the instance that served it.
 
-- label each worker row, and each CLI result line (`ok (instance pod-c)`), with the instance that served it
-- show a **Load-balanced endpoint** warning in the TUI once one URL has been answered by more than one instance
+The daemon, which does the polling for the TUI and the web UI, goes further: it sends requests through the balancer on new connections until every instance it knows of has answered or a retry limit is reached. Both UIs then list every instance behind the balancer as an entry of its own, labelled like any other, and the TUI header says how many answered behind each balancer endpoint. Detection is best-effort: a balancer that keeps a client on one backend per connection (most L4 balancers, kube-proxy) is still noticed, since every attempt is a new connection, but only instances that answered can be reported.
 
-Detection is best-effort: a balancer that keeps a client on one backend per connection (most L4 balancers, kube-proxy) may never reveal a second instance to the TUI. The [web UI](#web-ui) opens a new connection to every URL on each refresh, so it notices those balancers too, and shows each instance behind a balancer instead of warning.
-
-**To see every instance in the TUI, or to restart or act on one instance from the web UI, skip the balancer:** use [`kubernetes`](#kubernetes) discovery, [`dns`](#dns) with a headless Service or service-discovery name, or list the instance URLs in `endpoints`. A cloud load balancer's own hostname resolves to the balancer's nodes, not your instances, so `dns` doesn't help there.
+An instance reached only through a balancer has no actions of its own in the TUI: it says that a load balancer picks which instance answers, and sends nothing. **To restart or act on one instance from the TUI or the web UI, skip the balancer:** use [`kubernetes`](#kubernetes) discovery, [`dns`](#dns) with a headless Service or service-discovery name, or list the instance URLs in `endpoints`. A cloud load balancer's own hostname resolves to the balancer's nodes, not your instances, so `dns` doesn't help there.
 
 > **Distributed queues:** with a shared (e.g. Redis) queue, every instance reports the same queue length as *Pending*, so don't add Pending up across rows.
 
@@ -347,7 +438,11 @@ Detection is best-effort: a balancer that keeps a client on one backend per conn
 ```
 vartop
 ├── cmd/                    # Cobra CLI commands
-│   ├── root.go             # Root command — launches the TUI
+│   ├── root.go             # Root command — launches the TUI, a reader of the store
+│   ├── daemon.go           # `vartop daemon` subcommands, ensureDaemon, build identity, status
+│   ├── service.go          # Login service: unit/plist/task files, environment allow-list
+│   ├── service_*.go        # The login service per OS: systemd (Linux), launchd (macOS), Task Scheduler (Windows)
+│   ├── detach_*.go         # Detached daemon process (Unix, Windows)
 │   ├── server.go           # Server management subcommands
 │   ├── web.go              # `vartop web` — serves the browser dashboard
 │   └── workers.go          # Worker action & concurrency subcommands (fan out to all pods)
@@ -363,26 +458,40 @@ vartop
 │   │   ├── static.go       # Fixed endpoint list from config
 │   │   ├── kubernetes.go   # EndpointSlice informer (client-go) for a service or selector
 │   │   └── dns.go          # Re-resolves a hostname to every instance address
+│   ├── fleet/              # Model of a varmq fleet, no HTTP
+│   │   ├── poller.go       # Collector: polls every unit of a server into snapshots
+│   │   ├── history.go      # Snapshot types, rate calculator, 1 h ring
+│   │   ├── balancer.go     # Reaches every instance behind a load balancer
+│   │   ├── view.go         # Snapshots → dashboard, grid and detail view models
+│   │   ├── act.go          # Worker action core, and the notices both UIs share
+│   │   ├── noun.go         # pod / instance wording and the URL parameter
+│   │   └── fleettest/      # Fake varmq servers and load balancers for tests
+│   ├── store/              # SQLite store the daemon writes and the UIs read
+│   │   ├── dir.go          # Data dir, file names, pragmas, retention and size cap
+│   │   ├── control.go      # control.db: daemon lease, pokes, server errors
+│   │   ├── server.go       # One file per server: snapshots, labels, pruning
+│   │   ├── codec.go        # Snapshot ↔ compressed record
+│   │   └── feed.go         # Reader: loads the 1 h window, then tails new rows
+│   ├── daemon/
+│   │   ├── daemon.go       # Run: lease, config watcher, pokes, pruning
+│   │   ├── collector.go    # One per server: poll → writer → the server's file
+│   │   └── config.go       # Watches the config file for changes
 │   ├── tui/
 │   │   ├── model.go        # Root Bubble Tea model — shared state, update loop, screen stack
 │   │   ├── screen.go       # Screen interface + push/pop navigation
-│   │   ├── dashboard.go    # Worker table, status bar, offline/connecting states
-│   │   ├── detail.go       # Single worker detail: config, metrics, scrolling
+│   │   ├── dashboard.go    # Worker table, trend column, KPI line, status bar, stale/waiting states
+│   │   ├── detail.go       # Single worker detail: config, metrics, 1 h charts, scrolling
 │   │   ├── switcher.go     # Server / pod switcher
+│   │   ├── chart.go        # Sparklines and block charts
 │   │   ├── keys.go         # Per-screen key bindings
 │   │   ├── help.go         # Help footer rendering
-│   │   ├── handlers.go     # Async message handlers (health, workers, server switch, resize)
-│   │   ├── commands.go     # Bubble Tea commands (tick, fetch, actions, pool build)
+│   │   ├── handlers.go     # Async message handlers (feed sync, config, actions, resize)
+│   │   ├── commands.go     # Bubble Tea commands (tick, sync, refresh/poke, actions)
 │   │   ├── styles.go       # Tokyo Night colour theme & table styles
 │   │   └── types.go        # Message types, switcher items, helpers
 │   └── web/
 │       ├── server.go       # Loopback listener, Host/CSRF guards, page handlers
-│       ├── session.go      # Switches the active server in the background
-│       ├── poller.go       # Polls every pod each interval into the history
-│       ├── balancer.go     # Reaches every instance behind a load balancer
-│       ├── history.go      # In-memory ring of snapshots (last hour) and rates
-│       ├── view.go         # Snapshots → dashboard, grid and detail view models
-│       ├── actions.go      # Worker action, concurrency and bulk POST routes
+│       ├── actions.go      # Worker action, concurrency, bulk and daemon-start POST routes
 │       ├── render.go       # Template loading and page model
 │       ├── templates/      # HTML pages (htmx-driven, server-rendered)
 │       └── static/         # Embedded CSS and vendored htmx
@@ -413,6 +522,7 @@ vartop
 | [Cobra](https://github.com/spf13/cobra) | CLI command parsing |
 | [pterm](https://github.com/pterm/pterm) | Big-text ASCII art banner |
 | [client-go](https://github.com/kubernetes/client-go) (+ `k8s.io/api`, `k8s.io/apimachinery`) | Kubernetes EndpointSlice discovery |
+| [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) | Pure-Go SQLite (no cgo) for the daemon's store |
 
 ## Development
 

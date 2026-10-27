@@ -135,3 +135,62 @@ Execution: spec doc → implementation plan (writing-plans) → subagent-driven 
 ## Calls I made (check these)
 
 SQLite as the only daemon↔UI channel (lease, beat, stop, pokes in `control.db`; no sockets/pid files) · one SQLite file per server, named sanitized-key + hash, deleted 24h after the server leaves the config · one compressed snapshot blob per tick (not row-per-sample) · daemon computes rates once · 256 MB hard cap per server · service install offered at onboarding, not forced · UIs auto-spawn too · tokens never in the store · web tabs bound to their own `?server=` (no "Server changed" race) · TUI actions stay single-row (no merged/bulk in TUI) · old `pod=` links fall back to merged.
+
+## Amendments during the build
+
+Rulings taken while building (plan tasks 1–10) where the build extended or departed from the design above; an amendment wins over the section it touches. `R1`…`R30` are the build's own ruling numbers (the order they were taken in); they are unrelated to the R-numbers of the earlier instances spec cited above (R18, R22, R27, R30). Each entry reads: what — why — cost if wrong.
+
+### Store
+
+- **R7** Label numbers are freed at last-seen + 24h + 1 min (last-seen is truncated to the minute), and `Followed` entries that point at a freed number are pruned — accepted as it fell out of the minute-coarsened last-seen — a number freed a minute late.
+- **R8** `store.IsCorrupt(err)` is exported; the daemon closes a server file whose `Append`/`Latest` returns a corrupt error and reopens it through `OpenServer`, which sets it aside — one corrupt file recovered without touching the others — one exported func.
+- **R9** `Feed` treats a 0-byte file like a missing one ("waiting"); `OpenServer` removes a file it just created when init fails — readers must not error-loop on a half-created file — none.
+- **R10** `ServerCapBytes` stays 256 MB. Measured ≈149 MB/day for a busy 10×20 server at 5s (see below), so a server ~1.7× busier keeps under 24h; charts only show 1h; the README documents the formula — less than 24h of history on very busy servers.
+- **R12** `store.SetAside` is exported: a corrupt table behind a readable header is set aside, not reopened forever (extends R8) — one exported func.
+- **R13** `store.RemoveStale` measures the 24h grace from the file's last write (mtime), not from how long the server has been absent from the daemon's config (amends "Server removed from config"): a configured server is written every tick, so mtime ≈ when it left the config, and it survives restarts. A daemon that was down >24h and starts on a config without X deletes X at once — its data is past retention anyway, only label numbers are lost — renumbered labels for a server re-added after >24h away.
+
+### Daemon
+
+- **R1** `(*fleet.Collector).Seed(*fleet.Snapshot)` (calls its `Rater.Seed`), fed the server file's `Latest()` at collector start — the spec requires rates to continue after a restart; the fleet split left the hook out — one exported method.
+- **R5** (refines R1) A collector receives its starting state before its goroutine runs: `NewCollector` takes a `CollectorInit` (saved `LabelState` + last stored `Snapshot` for seeding) instead of calling `LoadLabels`/`Seed` after start — avoids a first-tick race — one signature change.
+- **R6** When a server's writer drops a tick that carried label state, it keeps that state and attaches it to the next tick it writes (latest wins); the collector clears "changed" at hand-off — a dropped tick must not lose label numbers — none.
+- **R14** Per-tick panic recovery covers the poll fan-out goroutines: a panic is recovered there and re-raised on the poller goroutine, so the tick's recovery emits the error snapshot — "other servers unaffected" — a little recover plumbing.
+
+### cmd and login services
+
+- **R2** `ensureDaemon` calls went into `cmd/root.go` and `cmd/web.go` as they were when the daemon commands landed (the TUI and web still polled themselves); the later rewiring kept them — none.
+- **R15** (superseded by R17) `ensureDaemon` rewrites the service definition (`Install`) before `Start` whenever the service is installed and no daemon runs — never starts a stale exe or environment — one daemon-reload per UI start that finds no daemon.
+- **R16** `serviceEnv` always emits `KUBECONFIG`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `VARTOP_DATA_DIR` (empty when unset in the UI) — "the UI's environment wins": the service manager's own values must not stand in for them — four extra lines per service file.
+- **R17** (supersedes R15; amends Supervision) `Install` is the one call that (re)starts the service's daemon (Linux enable + restart; macOS bootout + bootstrap; Windows `/Create /F` + `/Run`); `launchDaemon` calls `Install` only; `uninstall` stops the daemon gracefully first; `Start`/`Restart` are removed from the supervisor — a single path that leaves one daemon running the new definition — none known.
+- **R18** `daemon stop` after a kill, with the service installed, calls `supervisor.Stop` to cancel the manager's automatic restart — the stop copy promises "starts again at your next login" — one method per OS.
+- **R19** `daemon run` rotates `daemon.log` only when it sees no fresh lease at start — a lease loser must not rename the live log — an over-5 MiB log may skip one rotation in a start race.
+
+### Web
+
+- **R20** `POST /daemon/start` answers an htmx request with `HX-Redirect` (a non-htmx request keeps the 303) — htmx follows a 303 itself and swaps the page in without its meta refresh or header — one header.
+- **R22** (amends "Builder's calls" on old `pod=` values) The rule that a key-shaped `pod=` value is absent applies to GET links only. POSTs take the parameter verbatim (a key → unknown label, 409), and a non-empty parameter of the other noun → 409, nothing sent — "POSTs resolve the label … nothing sent" — old tabs must reload before acting.
+- **R23** The server picker is a plain GET form (native navigation); htmx requests that land on a waiting page get a full reload — the controls must appear when the first snapshot lands — a full page load on server switch.
+- **R24** The reader copy — `WaitingMsg`, `NotConfiguredMsg`, `StaleMsg` (collection error from the control file, else the snapshot's own), `SyncErrMsg`, `GoneLabelMsg` — lives in `fleet`; web and TUI both call it — one source for copy that binds both UIs — a small `fleet` API.
+- **R11** (also TUI) The first feed `Sync` (~350 ms for a 1h window) runs off the UI goroutine in the TUI (a `tea.Cmd`) and once per feed in web (feeds are cached) — a slow first page.
+
+### TUI
+
+- **R21** `tui.NewModel` takes a fifth parameter, `start func() error` (`cmd` passes `ensureLocalDaemon`) — `tui` cannot import `cmd`, and `r` must start a stopped daemon — signature drift from the plan's Interfaces.
+- **R25** Row selection is kept by (label, worker). If the selected row is gone with the action menu open, the menu closes and nothing is sent — the second key must act on the unit the user chose — the menu closes on unit churn.
+- **R26** An `actedMsg` for the server on screen is applied whatever its generation; another server's is dropped — an action already sent must report its result — none known.
+- **R27** (in the spirit of R11) Trend series are built off the UI goroutine (a sync/build `Cmd`) from one `Snapshots()` read and delivered with a (feed, latest, label) key; `Update` installs them only on a key match; only what the TUI shows is built (one `BuildDashboard` for the KPIs + one series per visible row) — trends may be one message behind the rows.
+- **R28** Sparkline buckets = min(width, ⌊TrendWindow / (2·interval)⌋), right-aligned — long intervals must not draw holes that read as "no data" — narrower sparklines at intervals over 15 s.
+- **R29** (supersedes the plan's Task 7 deferred "action menu not reset") Any server switch closes the action menu (nothing sent), and the switcher calls `show()` before `rebuildTable` — a same-named (label, worker) on another server must not inherit an open menu — the menu closes on a switch.
+- **R30** The 1h chart's peak label and scale are the peak of the bucket means it draws (as the sparklines do), not the raw hourly maximum — the gutter must describe the bars drawn — a one-poll spike reads lower than its raw value.
+
+### Process
+
+- **R3** Models for the build: task 1 Sonnet; tasks 2–7 Opus; tasks 8–10 Sonnet. Reviewers: Sonnet for tasks 1, 8, 9, 10; Opus for 2–7. The final review is a multi-dimension workflow with an adversarial verify step, on Opus.
+- **R4** `GOTMPDIR` for every `go` command is the build's scratch dir under `.superpowers/sdd/2026-10-26-collector-daemon/gotmp` — the system temp quota was near full; scratch stays under the workspace.
+
+### Other amendments
+
+- **Lease check cost.** Every `Append` takes `control.db`'s write lock (ATTACH + IMMEDIATE transaction) to check the lease token, so writers, `Beat` and `Poke` serialize for milliseconds. "Servers never queue behind each other" (Store, pragmas) holds for the per-server files, not for that check.
+- **Measured size.** ≈149 MB/day for a 10×20 server at 5s (≈8.3 KB compressed, ≈8.6 KB on disk per tick), where the Store section estimated 70–100; under the 256 MB cap.
+- **Copy added during the build.** `This page is out of date — reload` (an old tab's POST naming a unit under the other noun's parameter, see R22); `No new data for {age}.` (stale, daemon running, no recorded error); `No servers are configured`.
+- **TUI KPI line.** Values use fixed 7-column fields; sparklines appear from 73 columns.
