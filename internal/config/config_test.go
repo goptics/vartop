@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -226,6 +227,113 @@ func TestSaveIsAtomic(t *testing.T) {
 	loaded, err := Load()
 	if err != nil || loaded.DefaultServer != "prod" || loaded.Servers["prod"] == nil {
 		t.Errorf("Load() = %+v, %v; want the saved config", loaded, err)
+	}
+}
+
+// saveProd saves a config of one server, prod, and returns it.
+func saveProd(t *testing.T) *Config {
+	t.Helper()
+	cfg := &Config{
+		DefaultServer: "prod",
+		Servers:       map[string]*Server{"prod": {Name: "prod", Endpoints: []string{"http://localhost:8080/varmq"}, Token: "s3cr3t"}},
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	return cfg
+}
+
+// TestSaveThroughSymlink: a config.json that links to a file elsewhere (a
+// dotfiles repo, say) stays a link; the file it links to gets the config,
+// 0600.
+func TestSaveThroughSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "vartop.json")
+	if err := os.WriteFile(target, []byte(`{"servers":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+
+	saveProd(t)
+
+	if mode := modeOf(t, path, os.Lstat); mode&os.ModeSymlink == 0 {
+		t.Errorf("config.json is %v after Save, want the symlink kept", mode)
+	}
+	if mode := modeOf(t, target, os.Stat); mode.Perm() != 0600 {
+		t.Errorf("link target is %v after Save, want mode 0600", mode)
+	}
+	if data, _ := os.ReadFile(target); !strings.Contains(string(data), `"default_server": "prod"`) {
+		t.Errorf("link target holds %s, want the saved config", data)
+	}
+	for _, d := range []string{dir, filepath.Dir(target)} {
+		if leftovers, _ := filepath.Glob(filepath.Join(d, "*.tmp")); len(leftovers) != 0 {
+			t.Errorf("Save left %v behind", leftovers)
+		}
+	}
+}
+
+// TestSaveIgnoresStaleTemp: a config.json.tmp left by an older vartop, of
+// another mode, neither lends config.json its mode nor stays behind.
+func TestSaveIgnoresStaleTemp(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".tmp", []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	saveProd(t)
+
+	if mode := modeOf(t, path, os.Stat); mode.Perm() != 0600 {
+		t.Errorf("config.json is %v, want mode 0600", mode)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(leftovers) != 0 {
+		t.Errorf("Save left %v behind", leftovers)
+	}
+}
+
+// modeOf is the mode stat (os.Stat or os.Lstat) gives path.
+func modeOf(t *testing.T, path string, stat func(string) (os.FileInfo, error)) os.FileMode {
+	t.Helper()
+	fi, err := stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode()
+}
+
+// TestSaveFailureLeavesNoTemp: a write that fails leaves no temporary
+// file (it holds the tokens) behind.
+func TestSaveFailureLeavesNoTemp(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	// A directory in config.json's place: the rename onto it fails.
+	if err := os.MkdirAll(filepath.Join(path, "x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{DefaultServer: "prod", Servers: map[string]*Server{"prod": {Name: "prod", Endpoints: []string{"http://localhost:8080/varmq"}}}}
+	if err := Save(cfg); err == nil {
+		t.Fatal("Save() = nil, want an error")
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(leftovers) != 0 {
+		t.Errorf("Save left %v behind", leftovers)
 	}
 }
 

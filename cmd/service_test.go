@@ -115,8 +115,31 @@ func TestWindowsArgsRoundTrip(t *testing.T) {
 
 // TestWindowsEnvRoundTrip: the task's --env pairs, applied by `daemon
 // run`, give the daemon the UI's environment: a name the UI has unset is
-// unset in the daemon, whatever the logon environment holds.
+// unset in the daemon, whatever the logon environment holds. What it sets
+// in this process is put back after it.
 func TestWindowsEnvRoundTrip(t *testing.T) {
+	names := []string{"PATH", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "VARTOP_DATA_DIR", "KUBECONFIG", "AWS_PROFILE"}
+	before := make(map[string]string)
+	for _, name := range names {
+		if v, set := os.LookupEnv(name); set {
+			before[name] = v
+		}
+	}
+	t.Run("roundtrip", windowsEnvRoundTrip)
+	for _, name := range names {
+		v, set := os.LookupEnv(name)
+		if want, wasSet := before[name]; set != wasSet || v != want {
+			t.Errorf("%s = %q (set %v) after the test, want %q (set %v): applyEnv's change leaked", name, v, set, want, wasSet)
+		}
+	}
+}
+
+func windowsEnvRoundTrip(t *testing.T) {
+	// applyEnv sets PATH and unsets the serviceAlways names the UI has
+	// empty: t.Setenv puts each back once the test ends.
+	for _, name := range []string{"PATH", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "VARTOP_DATA_DIR"} {
+		t.Setenv(name, os.Getenv(name))
+	}
 	t.Setenv("KUBECONFIG", "/from/the/logon/environment")
 	t.Setenv("AWS_PROFILE", "logon")
 	env := serviceEnv([]string{`PATH=C:\bin`, `AWS_PROFILE=ui profile`})

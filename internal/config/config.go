@@ -181,8 +181,10 @@ func Load() (*Config, error) {
 }
 
 // Save writes the configuration to os.UserConfigDir()/vartop/config.json. It
-// writes config.json.tmp beside it and renames that over it, so a reader
-// never sees a half-written file.
+// writes a new temporary file (0600: it holds the tokens) beside it and
+// renames that over it, so a reader never sees a half-written file; a
+// write that fails leaves no temporary file behind. A config.json that is
+// a symlink stays one: the file it links to is replaced.
 func Save(cfg *Config) error {
 	path, err := Path()
 	if err != nil {
@@ -198,12 +200,25 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("failed to encode config: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	// An older vartop wrote config.json.tmp, keeping the mode of one
+	// there; one it left behind may hold tokens others can read.
+	_ = os.Remove(path + ".tmp")
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		path = target
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
