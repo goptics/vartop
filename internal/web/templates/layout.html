@@ -1,6 +1,12 @@
 {{define "server_field"}}<input type="hidden" name="server" value="{{.Server}}">{{end}}
 {{define "label_field"}}<input type="hidden" name="{{.Noun.Param}}" value="{{.Pod}}">{{end}}
 {{define "spark"}}<svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>{{end}}
+{{define "history"}}<div class="history">
+  <div class="axis-y">{{range .YTicks}}<span style="top:{{.Pct}}%">{{.Label}}</span>{{end}}</div>
+  <svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .YTicks}}<line class="grid" x1="0" x2="{{$.PlotW}}" y1="{{.Grid}}" y2="{{.Grid}}"/>{{end}}{{range .XTicks}}<line class="grid" x1="{{.Grid}}" x2="{{.Grid}}" y1="0" y2="{{$.PlotH}}"/>{{end}}{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}<line class="cross" x1="0" x2="0" y1="0" y2="{{.PlotH}}"/>{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>
+  <div class="axis-x">{{range .XTicks}}<span style="left:{{.Pct}}%">{{.Label}}</span>{{end}}</div>
+  <div class="tip" hidden></div>
+</div>{{end}}
 {{define "layout"}}<!doctype html>
 <html lang="en">
 <head>
@@ -11,6 +17,8 @@
 {{end}}<title>{{or .Title "vartop"}}</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/htmx-2.0.4.min.js" defer></script>
+{{if .Detail}}<script src="/static/chart.js" defer></script>
+{{end}}
 </head>
 <body id="page">
 <header class="top">

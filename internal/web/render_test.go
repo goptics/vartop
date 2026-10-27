@@ -82,6 +82,133 @@ func series(start time.Time, interval time.Duration, n int, v float64) []fleet.P
 	return pts
 }
 
+// The 1h charts have a time axis at every 10 minutes of the clock in the
+// hour shown, and a scale of 0, half the peak and the peak, each with its
+// gridline; positions are percentages of the chart's box (pad included),
+// so labels set in HTML line up with the SVG at any width.
+func TestHistoryAxes(t *testing.T) {
+	end := time.Date(2026, 10, 27, 13, 27, 30, 0, time.Local)
+	pts := series(end.Add(-25*time.Minute), 5*time.Second, 301, 10) // 13:02:30 … 13:27:30
+	pts[150].V = 40
+
+	h := history(pts, time.Hour, 5*time.Second, 720, 120)
+
+	var xs []string
+	for _, tk := range h.XTicks {
+		xs = append(xs, tk.Label)
+	}
+	// The hour shown runs 12:27:30 … 13:27:30: ticks before the data are kept,
+	// the axis is the hour, not the stretch with points.
+	if want := []string{"12:30", "12:40", "12:50", "13:00", "13:10", "13:20"}; !slices.Equal(xs, want) {
+		t.Errorf("x ticks = %q, want %q", xs, want)
+	}
+	// 13:20 is 52.5 of the 60 minutes in: x 630 of 720, in a box padded by
+	// sparkPad on each side.
+	if last := h.XTicks[len(h.XTicks)-1]; last.Pct != "87.2" || last.Grid != "630.0" {
+		t.Errorf("13:20 tick at %s%% (grid x %s), want 87.2%% (630.0)", last.Pct, last.Grid)
+	}
+	var ys []string
+	for _, tk := range h.YTicks {
+		ys = append(ys, tk.Label)
+	}
+	if want := []string{"0", "20", "40"}; !slices.Equal(ys, want) {
+		t.Errorf("y ticks = %q, want %q", ys, want)
+	}
+	// The peak's gridline is the top of the plot, 0's the bottom; the labels
+	// sit at the same heights of the padded box.
+	if top, bottom := h.YTicks[2], h.YTicks[0]; top.Grid != "0.0" || bottom.Grid != "120.0" {
+		t.Errorf("y gridlines at %s (peak) and %s (0), want 0.0 and 120.0", top.Grid, bottom.Grid)
+	}
+	var yPct []string
+	for _, tk := range h.YTicks {
+		yPct = append(yPct, tk.Pct)
+	}
+	if want := []string{"97.6", "50.0", "2.4"}; !slices.Equal(yPct, want) {
+		t.Errorf("y label positions = %q%%, want %q%%", yPct, want)
+	}
+	// The chart itself is the sparkline's: same lines, same hover targets.
+	if s := sparkline(pts, time.Hour, 5*time.Second, 720, 120); !slices.Equal(h.Lines, s.Lines) || len(h.Hits) != len(s.Hits) {
+		t.Error("history draws another chart than sparkline")
+	}
+
+	t.Run("a flat zero series has one tick", func(t *testing.T) {
+		h := history(series(end.Add(-time.Minute), 5*time.Second, 13, 0), time.Hour, 5*time.Second, 720, 120)
+		if len(h.YTicks) != 1 || h.YTicks[0].Label != "0" {
+			t.Errorf("y ticks = %+v, want just 0", h.YTicks)
+		}
+	})
+	t.Run("no data, no axis", func(t *testing.T) {
+		h := history(nil, time.Hour, 5*time.Second, 720, 120)
+		if len(h.XTicks) != 0 || len(h.YTicks) != 0 {
+			t.Errorf("ticks = %+v %+v, want none", h.XTicks, h.YTicks)
+		}
+	})
+	t.Run("a window on the boundaries has both", func(t *testing.T) {
+		end := time.Date(2026, 10, 27, 13, 30, 0, 0, time.Local)
+		h := history(series(end.Add(-time.Hour), time.Minute, 61, 1), time.Hour, time.Minute, 720, 120)
+		if n := len(h.XTicks); n != 7 || h.XTicks[0].Pct != "0.4" || h.XTicks[n-1].Pct != "99.6" {
+			t.Errorf("x ticks = %+v, want 7 from 0.4%% to 99.6%%", h.XTicks)
+		}
+	})
+	// Small rates (a failure now and then) are the Failed chart's usual
+	// scale: its three labels must still be three values.
+	t.Run("a small peak keeps its labels apart", func(t *testing.T) {
+		for _, top := range []float64{0.0333, 0.0667, 0.1, 0.3} {
+			pts := series(end.Add(-time.Minute), 5*time.Second, 13, 0)
+			pts[6].V = top
+			var ys []string
+			for _, tk := range history(pts, time.Hour, 5*time.Second, 720, 120).YTicks {
+				ys = append(ys, tk.Label)
+			}
+			if len(ys) != 3 || ys[0] == ys[1] || ys[1] == ys[2] || ys[2] == "0" {
+				t.Errorf("peak %v: y ticks = %q, want 0, half the peak and the peak, all different", top, ys)
+			}
+		}
+	})
+	t.Run("labels", func(t *testing.T) {
+		for v, want := range map[float64]string{
+			0: "0", 0.0167: "0.017", 0.0333: "0.033", 0.05: "0.05", 0.1: "0.1", 0.15: "0.15", 0.26: "0.26", 0.5: "0.5", 0.75: "0.75",
+			3.5: "3.5", 12: "12", 34.9: "34.9", 150.4: "150", 2500: "2500",
+		} {
+			if got := tickLabel(v); got != want {
+				t.Errorf("tickLabel(%v) = %q, want %q", v, got, want)
+			}
+		}
+	})
+	// Ticks follow the local clock, in zones off the hour by a part of it
+	// and through the hour a fall-back repeats.
+	t.Run("zones", func(t *testing.T) {
+		local := time.Local
+		t.Cleanup(func() { time.Local = local })
+		for _, tc := range []struct {
+			zone   string
+			newest time.Time
+			want   []string
+		}{
+			{"Asia/Kathmandu", time.Date(2026, 10, 27, 7, 42, 30, 0, time.UTC), []string{"12:30", "12:40", "12:50", "13:00", "13:10", "13:20"}},
+			{"America/New_York", time.Date(2026, 11, 1, 7, 27, 30, 0, time.UTC), []string{"01:30", "01:40", "01:50", "02:00", "02:10", "02:20"}},
+			{"Europe/Berlin", time.Date(2026, 10, 25, 1, 27, 30, 0, time.UTC), []string{"02:30", "02:40", "02:50", "02:00", "02:10", "02:20"}},
+		} {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no zone data: %v", err)
+			}
+			time.Local = loc
+			h := history(series(tc.newest.Add(-time.Hour), time.Minute, 61, 1), time.Hour, time.Minute, 720, 120)
+			var xs []string
+			for _, tk := range h.XTicks {
+				xs = append(xs, tk.Label)
+				if g, _ := strconv.ParseFloat(tk.Grid, 64); g < 0 || g > 720 {
+					t.Errorf("%s: tick %s at x %s, outside the plot", tc.zone, tk.Label, tk.Grid)
+				}
+			}
+			if !slices.Equal(xs, tc.want) {
+				t.Errorf("%s: x ticks = %q, want %q", tc.zone, xs, tc.want)
+			}
+		}
+	})
+}
+
 func TestPolylines(t *testing.T) {
 	const iv = 5 * time.Second
 	t0 := viewT0
@@ -486,6 +613,14 @@ func TestDetailRenders(t *testing.T) {
 	body := run(t, "detail", "layout", p)
 	for _, want := range []string{
 		"87.5%",
+		// The 1h charts have axes, gridlines and the crosshair the hover
+		// script moves; the script is a static file, not inline.
+		`<div class="history">`,
+		`class="axis-y"`,
+		`class="axis-x"`,
+		`<line class="grid"`,
+		`<line class="cross"`,
+		`<script src="/static/chart.js" defer></script>`,
 		`hx-post="/workers/a%2Fb%20c/actions/pause"`,
 		`hx-post="/workers/a%2Fb%20c/actions/resume"`,
 		`hx-post="/workers/a%2Fb%20c/actions/restart"`,
@@ -658,6 +793,12 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 	css, err := assets.ReadFile("static/app.css")
 	if err != nil || len(css) == 0 {
 		t.Fatalf("app.css not embedded: %v", err)
+	}
+	// The chart hover script: it follows the pointer over a 1h chart and
+	// reads the hover target's text.
+	chart, err := assets.ReadFile("static/chart.js")
+	if err != nil || !strings.Contains(string(chart), "pointermove") || !strings.Contains(string(chart), ".history") {
+		t.Errorf("chart.js not embedded or not the chart hover script: %v", err)
 	}
 	for _, want := range []string{"#1A1B26", "#C0CAF5", "prefers-color-scheme: light", ".mixed"} {
 		if !strings.Contains(strings.ToUpper(string(css)), strings.ToUpper(want)) {

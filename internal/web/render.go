@@ -125,6 +125,8 @@ var funcs = template.FuncMap{
 	"workerURL":     workerURL,
 	"pathOf":        pathOf,
 	"sparkline":     sparkline,
+	"history":       history,
+	"tickLabel":     tickLabel,
 	"noData":        noData,
 	"trendWindow":   func() time.Duration { return fleet.TrendWindow },
 	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
@@ -377,4 +379,79 @@ func sparkline(pts []fleet.Point, window, interval time.Duration, w, h float64) 
 		lo = hi
 	}
 	return v
+}
+
+// historyTick is the step of a 1h chart's time axis, on the clock.
+const historyTick = 10 * time.Minute
+
+// axisTick is a labelled tick of a chart axis. Pct is where it sits along
+// the axis, in percent of the chart's box (sparkPad included), for its HTML
+// label; Grid is its coordinate in the plot, for its SVG gridline.
+type axisTick struct{ Label, Pct, Grid string }
+
+// historyView is what the "history" template draws: the sparkline of a
+// series with a time axis, a value scale and their gridlines. PlotW and
+// PlotH are the plot's size, the gridlines' and the crosshair's extent.
+type historyView struct {
+	sparkView
+	XTicks, YTicks []axisTick
+	PlotW, PlotH   string
+}
+
+// history is sparkline with axes: a tick at every historyTick of the clock
+// in the window up to the newest point, and 0, half the peak and the peak
+// (0 alone for a flat zero series). A series with nothing to draw has no
+// axes.
+func history(pts []fleet.Point, window, interval time.Duration, w, h float64) historyView {
+	v := historyView{sparkView: sparkline(pts, window, interval, w, h), PlotW: num(w), PlotH: num(h)}
+	a, shown := newChartArea(pts, window, interval, w, h)
+	if len(shown) == 0 {
+		return v
+	}
+	inBox := func(c, size float64) string { return num((c + sparkPad) / (size + 2*sparkPad) * 100) }
+
+	// Ticks on the local clock, so a zone off the hour by a part of it
+	// still gets :00, :10, …: the start floored in its own zone offset, not
+	// rebuilt from its wall clock, which a fall-back hour makes ambiguous.
+	// Every offset change is a multiple of historyTick, so later ticks stay
+	// on the clock too.
+	_, off := a.start.Local().Zone()
+	shift := time.Duration(off) * time.Second
+	t := a.start.Add(shift).Truncate(historyTick).Add(-shift)
+	if t.Before(a.start) {
+		t = t.Add(historyTick)
+	}
+	for end := a.start.Add(window); !t.After(end); t = t.Add(historyTick) {
+		x := a.xAt(t)
+		v.XTicks = append(v.XTicks, axisTick{Label: t.Local().Format("15:04"), Pct: inBox(x, w), Grid: num(x)})
+	}
+
+	scale := []float64{0}
+	if v.Peak > 0 {
+		scale = append(scale, v.Peak/2, v.Peak)
+	}
+	for _, val := range scale {
+		y := yAt(val, v.Peak, h)
+		v.YTicks = append(v.YTicks, axisTick{Label: tickLabel(val), Pct: inBox(y, h), Grid: num(y)})
+	}
+	return v
+}
+
+// tickLabel is a scale value as short as reads well: whole from 100, one
+// decimal from 1, and two significant digits below, so that the small
+// rates a Failed chart is mostly made of (a failure now and then) do not
+// all round to 0. Trailing zeros are dropped.
+func tickLabel(v float64) string {
+	decimals := 1
+	switch {
+	case v >= 100:
+		decimals = 0
+	case v > 0 && v < 1:
+		decimals = 1 - int(math.Floor(math.Log10(v)))
+	}
+	s := strconv.FormatFloat(v, 'f', decimals, 64)
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	}
+	return s
 }

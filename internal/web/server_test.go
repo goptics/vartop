@@ -864,7 +864,7 @@ func TestDetailChartIsTheHourByTime(t *testing.T) {
 		t.Errorf("lines span x %v–%v and %v–%v, want 0–60 and 540–720 (a gap 480 wide: 40 minutes)",
 			before[0][0], before[len(before)-1][0], after[0][0], after[len(after)-1][0])
 	}
-	if !strings.Contains(chart, `<span class="peak">peak 3.0/s</span>`) {
+	if !strings.Contains(chart, `<span class="peak">peak 3/s</span>`) {
 		t.Errorf("the chart's peak is not the hour's 3.0/s:\n%s", chart)
 	}
 }
