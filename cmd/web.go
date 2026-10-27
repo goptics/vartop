@@ -193,21 +193,16 @@ func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(stri
 	return err
 }
 
-// ownLease is this vartop as a daemon's lease records it: its build, and
+// ownLease is this vartop as the lease records its collector: its pid, and
 // the environment collection depends on.
 func ownLease() store.Lease {
-	path, _ := config.Path() // "" when there is no config dir: the daemon reads no config either
-	return store.Lease{
-		PID:        os.Getpid(),
-		Build:      buildID(),
-		ConfigPath: path,
-		Kubeconfig: os.Getenv("KUBECONFIG"),
-		PathEnv:    os.Getenv("PATH"),
-	}
+	path, _ := config.Path() // "" when there is no config dir: the collector reads no config either
+	return store.Lease{PID: os.Getpid(), ConfigPath: path, Kubeconfig: os.Getenv("KUBECONFIG")}
 }
 
-// readConfig is the daemon's Options.Config: the config, and where its file
-// is even when it cannot be read, so that the daemon watches it still.
+// readConfig is the collector's Options.Config: the config, and where its
+// file is even when it cannot be read, so that the collector watches it
+// still.
 func readConfig() (*config.Config, string, error) {
 	path, err := config.Path()
 	if err != nil {
@@ -217,26 +212,19 @@ func readConfig() (*config.Config, string, error) {
 	return cfg, path, err
 }
 
-// sameDaemon reports whether the daemon of lease l collects as want would:
-// the same build, config path and KUBECONFIG. PATH is not compared, so
-// that ordinary differences between shells restart nothing.
-func sameDaemon(l, want store.Lease) bool {
-	return l.Build == want.Build && sameEnv(l, want)
-}
-
-// sameEnv reports whether the daemons of leases a and b collect in the same
-// environment: the same config path and KUBECONFIG, whatever their build
-// (or PATH). A UI acts on a server only while the daemon collects in its
-// environment (R31): the token it sends must not go to endpoints
-// discovered under another config.
+// sameEnv reports whether the collectors of leases a and b collect in the
+// same environment: the same config path and KUBECONFIG. vartop web acts
+// on a server only while the collector collects in its environment (R31):
+// the token it sends must not go to endpoints discovered under another
+// config.
 func sameEnv(a, b store.Lease) bool {
 	return a.ConfigPath == b.ConfigPath && a.Kubeconfig == b.Kubeconfig
 }
 
-// sameEnvAsOwn returns the UIs' check of a lease (R31): whether its daemon
-// collects in this vartop's environment, sameEnv with ownLease (read
-// once). The UIs check the lease whether it is fresh, released or stale:
-// the snapshots stored under it are of its daemon's environment (R44).
+// sameEnvAsOwn returns vartop web's check of a lease (R31): whether its
+// collector collects in this vartop's environment, sameEnv with ownLease
+// (read once). It checks the lease whether it is fresh, released or stale:
+// the snapshots stored under it are of its collector's environment (R44).
 func sameEnvAsOwn() func(store.Lease) bool {
 	own := ownLease()
 	return func(l store.Lease) bool { return sameEnv(l, own) }

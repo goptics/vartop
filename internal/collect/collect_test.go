@@ -113,9 +113,9 @@ type daemonRun struct {
 	err    error
 }
 
-// start runs a daemon claiming the lease as build; it is stopped when the
+// start runs a collector claiming the lease as pid; it is stopped when the
 // test ends, before the fakes it polls shut down.
-func (h *harness) start(build string) *daemonRun {
+func (h *harness) start(pid int) *daemonRun {
 	h.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &daemonRun{cancel: cancel, done: make(chan struct{})}
@@ -123,7 +123,7 @@ func (h *harness) start(build string) *daemonRun {
 		DataDir:   h.dir,
 		Config:    h.readConfig,
 		BuildPool: h.build,
-		Lease:     store.Lease{PID: os.Getpid(), Build: build},
+		Lease:     store.Lease{PID: pid},
 		Now:       h.now,
 		Sleep:     h.sleep,
 		Log:       slog.New(slog.NewTextHandler(&h.logs, nil)),
@@ -260,16 +260,16 @@ func TestSecondDaemonExitsZero(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", nil)
 	h := newHarness(t)
 	h.writeConfig(oneServer(srv.URL))
-	h.start("first")
+	h.start(1)
 	n := len(h.waitSnaps("a", 1, 3*time.Second))
 
 	// It watches the first one beat (once, BeatEvery at most), and leaves
 	// it the lease.
-	second := h.start("second")
+	second := h.start(2)
 	if code, err := second.wait(t, store.DeadAfter); code != 0 || err != nil {
 		t.Errorf("second daemon: Run = %d, %v; want 0, nil", code, err)
 	}
-	if l, fresh, err := h.control().Lease(); err != nil || !fresh || l.Build != "first" {
+	if l, fresh, err := h.control().Lease(); err != nil || !fresh || l.PID != 1 {
 		t.Errorf("Lease = %+v, fresh %v, %v; want the first daemon's, fresh", l, fresh, err)
 	}
 	h.waitSnaps("a", n+1, 3*time.Second) // the first one collects on
@@ -303,7 +303,7 @@ func (h *harness) fakeWatch() {
 // its token.
 func (h *harness) deadLease() string {
 	h.t.Helper()
-	token, ok, err := h.control().Claim(store.Lease{PID: 1, Build: "dead"}, h.now())
+	token, ok, err := h.control().Claim(store.Lease{PID: 9}, h.now())
 	if !ok || err != nil {
 		h.t.Fatalf("Claim = %v, %v", ok, err)
 	}
@@ -320,9 +320,9 @@ func TestCrashedHolderTakenOver(t *testing.T) {
 	h.writeConfig(oneServer(srv.URL))
 	h.fakeWatch()
 	dead := h.deadLease()
-	h.start("new")
+	h.start(3)
 	h.waitSnaps("a", 1, 5*time.Second)
-	if l, _, err := h.control().Lease(); err != nil || l.Build != "new" || l.Token == dead {
+	if l, _, err := h.control().Lease(); err != nil || l.PID != 3 || l.Token == dead {
 		t.Errorf("Lease = %+v, %v; want the new daemon's", l, err)
 	}
 	if watched := time.Duration(h.offset.Load()); watched < store.DeadAfter || watched > store.DeadAfter+time.Second {
@@ -336,7 +336,7 @@ func TestWatchEndsWithCtx(t *testing.T) {
 	h := newHarness(t)
 	h.writeConfig(map[string]*config.Server{})
 	dead := h.deadLease()
-	r := h.start("new")
+	r := h.start(3)
 	began := time.Now()
 	if code, err := r.stop(t); code != 0 || err != nil {
 		t.Errorf("Run = %d, %v; want 0, nil", code, err)
@@ -361,13 +361,13 @@ func TestTwoWatchersOneWins(t *testing.T) {
 	h.writeConfig(oneServer(srv.URL))
 	h.fakeWatch()
 	h.deadLease()
-	runs := map[string]*daemonRun{"x": h.start("x"), "y": h.start("y")}
-	var loser, winner string
+	runs := map[int]*daemonRun{4: h.start(4), 5: h.start(5)}
+	var loser, winner int
 	fleettest.WaitUntil(t, 5*time.Second, "one daemon to exit", func() bool {
-		for build, r := range runs {
+		for pid, r := range runs {
 			select {
 			case <-r.done:
-				loser = build
+				loser = pid
 				return true
 			default:
 			}
@@ -375,17 +375,17 @@ func TestTwoWatchersOneWins(t *testing.T) {
 		return false
 	})
 	if code, err := runs[loser].wait(t, time.Second); code != 0 || err != nil {
-		t.Errorf("daemon %s: Run = %d, %v; want 0, nil", loser, code, err)
+		t.Errorf("collector %d: Run = %d, %v; want 0, nil", loser, code, err)
 	}
-	winner = map[string]string{"x": "y", "y": "x"}[loser]
+	winner = map[int]int{4: 5, 5: 4}[loser]
 	n := len(h.waitSnaps("a", 1, 5*time.Second))
-	if l, _, err := h.control().Lease(); err != nil || l.Build != winner {
-		t.Errorf("Lease = %+v, %v; want %s's", l, err, winner)
+	if l, _, err := h.control().Lease(); err != nil || l.PID != winner {
+		t.Errorf("Lease = %+v, %v; want %d's", l, err, winner)
 	}
 	h.waitSnaps("a", n+1, 5*time.Second)
 	select {
 	case <-runs[winner].done:
-		t.Errorf("daemon %s exited too: Run = %d, %v", winner, runs[winner].code, runs[winner].err)
+		t.Errorf("collector %d exited too: Run = %d, %v", winner, runs[winner].code, runs[winner].err)
 	default:
 	}
 }
@@ -400,7 +400,7 @@ func TestDataDirRemovedExits(t *testing.T) {
 			_, srv := fleettest.NewVarmq(t, "i", nil)
 			h := newHarness(t)
 			h.writeConfig(oneServer(srv.URL))
-			r := h.start("d")
+			r := h.start(7)
 			h.waitSnaps("a", 1, 3*time.Second)
 			if err := os.RemoveAll(h.dir); err != nil {
 				t.Fatal(err)
@@ -427,7 +427,7 @@ func TestConfigDeletedStopsCollecting(t *testing.T) {
 	fa, a := fleettest.NewVarmq(t, "a", nil)
 	h := newHarness(t)
 	h.writeConfig(oneServer(a.URL))
-	h.start("d")
+	h.start(7)
 	h.waitSnaps("a", 1, 3*time.Second)
 
 	if err := os.Remove(h.cfgPath); err != nil {
@@ -461,11 +461,11 @@ func TestTakeoverEndsOldDaemon(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", nil)
 	h := newHarness(t)
 	h.writeConfig(oneServer(srv.URL))
-	old := h.start("old")
+	old := h.start(6)
 	h.waitSnaps("a", 1, 3*time.Second)
 
 	ctl := h.control()
-	if _, ok, err := ctl.Claim(store.Lease{Build: "new"}, time.Now().Add(store.LeaseTTL+time.Second)); !ok || err != nil {
+	if _, ok, err := ctl.Claim(store.Lease{PID: 3}, time.Now().Add(store.LeaseTTL+time.Second)); !ok || err != nil {
 		t.Fatalf("Claim = %v, %v; want the lease", ok, err)
 	}
 	n := len(h.snaps("a"))
@@ -475,27 +475,8 @@ func TestTakeoverEndsOldDaemon(t *testing.T) {
 	if got := len(h.snaps("a")); got != n {
 		t.Errorf("old daemon stored %d snapshots after losing its lease", got-n)
 	}
-	if l, _, err := ctl.Lease(); err != nil || l.Build != "new" || l.Token == "" {
+	if l, _, err := ctl.Lease(); err != nil || l.PID != 3 || l.Token == "" {
 		t.Errorf("Lease = %+v, %v; want the new claimant's, still held", l, err)
-	}
-}
-
-func TestStopRequestExits(t *testing.T) {
-	_, srv := fleettest.NewVarmq(t, "i", nil)
-	h := newHarness(t)
-	h.writeConfig(oneServer(srv.URL))
-	r := h.start("d")
-	h.waitSnaps("a", 1, 3*time.Second)
-
-	ctl := h.control()
-	if err := ctl.RequestStop(); err != nil {
-		t.Fatal(err)
-	}
-	if code, err := r.wait(t, time.Second); code != 0 || err != nil {
-		t.Errorf("Run = %d, %v; want 0, nil", code, err)
-	}
-	if l, fresh, err := ctl.Lease(); err != nil || fresh || l.Token != "" {
-		t.Errorf("Lease = %+v, fresh %v, %v; want it released", l, fresh, err)
 	}
 }
 
@@ -507,7 +488,7 @@ func TestConfigAddRemoveEdit(t *testing.T) {
 	_, b := fleettest.NewVarmq(t, "b", nil)
 	h := newHarness(t)
 	h.writeConfig(map[string]*config.Server{})
-	h.start("d")
+	h.start(7)
 	h.waitLog(`msg=collecting`, time.Second)
 
 	h.writeConfig(map[string]*config.Server{"a": {Interval: 1, Endpoints: []string{a.URL}}})
@@ -562,7 +543,7 @@ func TestBadConfigKeepsLastGood(t *testing.T) {
 		"a": {Interval: 1, Endpoints: []string{a.URL}},
 		"b": {Interval: 1, Endpoints: []string{b.URL}},
 	})
-	h.start("d")
+	h.start(7)
 	h.waitSnaps("a", 1, 3*time.Second)
 	h.waitSnaps("b", 1, 3*time.Second)
 
@@ -592,7 +573,7 @@ func TestBadConfigAtStartDeletesNothing(t *testing.T) {
 	_, a := fleettest.NewVarmq(t, "a", nil)
 	h := newHarness(t)
 	h.writeConfig(oneServer(a.URL))
-	first := h.start("first")
+	first := h.start(1)
 	h.waitSnaps("a", 1, 3*time.Second)
 	if code, err := first.stop(t); code != 0 || err != nil {
 		t.Fatalf("Run = %d, %v; want 0, nil", code, err)
@@ -600,7 +581,7 @@ func TestBadConfigAtStartDeletesNothing(t *testing.T) {
 
 	h.writeRaw([]byte(`{"servers": {"a": `))
 	h.offset.Store(int64(RemovedGrace + time.Hour))
-	h.start("second")
+	h.start(2)
 	h.waitLog(`msg="config error; no servers`, time.Second)
 	time.Sleep(ConfigEvery + 500*time.Millisecond) // past a sweep
 	if !h.exists("a") {
@@ -625,7 +606,7 @@ func TestRemovedServerFileDeletedAfterGrace(t *testing.T) {
 		"a": {Interval: 1, Endpoints: []string{a.URL}},
 		"b": {Interval: 1, Endpoints: []string{b.URL}},
 	})
-	h.start("d")
+	h.start(7)
 	h.waitSnaps("a", 1, 3*time.Second)
 	h.waitSnaps("b", 1, 3*time.Second)
 	h.writeConfig(map[string]*config.Server{"b": {Interval: 1, Endpoints: []string{b.URL}}})

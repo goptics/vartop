@@ -74,13 +74,12 @@ func AllowedHosts(ln net.Listener) []string {
 
 // Source is what vartop web shows and acts through.
 type Source struct {
-	DataDir string // the store the daemon collects into
+	DataDir string // the store the collector collects into
 	// Config reads the config. It is called on every request: the servers
-	// can change while vartop web runs, as they do for the daemon.
+	// can change while vartop web runs, as they do for the collector.
 	Config  func() (*config.Config, error)
-	Control *store.Control // the daemon's lease, the servers' errors and pokes
-	Start   func() error   // starts the daemon (ensureDaemon); the "Start collector" button
-	// SameEnv reports whether a daemon's lease is of this vartop's
+	Control *store.Control // the collector's lease, the servers' errors and pokes
+	// SameEnv reports whether a collector's lease is of this vartop's
 	// environment: its config file and KUBECONFIG (R31). Nil: every lease
 	// is.
 	SameEnv func(store.Lease) bool
@@ -134,7 +133,6 @@ func (h *handler) routes(hosts []string) http.Handler {
 	mux.HandleFunc("POST /workers/{name}/actions/{action}", h.action)
 	mux.HandleFunc("POST /workers/{name}/concurrency", h.concurrency)
 	mux.HandleFunc("POST /bulk/{action}", h.bulk)
-	mux.HandleFunc("POST /daemon/start", h.startDaemon)
 
 	return denyFraming(allowHosts(hosts, http.NewCrossOriginProtection().Handler(requireHTMX(recoverPanics(h.logf, mux)))))
 }
@@ -220,10 +218,6 @@ func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" 
 
 // noServersMsg is the notice of a config with no server at all.
 const noServersMsg = "No servers are configured"
-
-// otherConfigMsg is the notice of a daemon collecting in another
-// environment than vartop web's, whose button starts this one's.
-var otherConfigMsg = fleet.OtherConfigMsg("Start collector")
 
 // unknownLabelMsg is the notice of a label no snapshot of the hour has.
 func unknownLabelMsg(label, server string, n fleet.Noun) string {
@@ -345,13 +339,12 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	d := h.daemon()
 	if d.Other {
 		// Another environment's snapshots: no current value, and no
-		// action (see bind) until this environment's daemon collects.
-		p.Stale, p.OtherEnv = otherConfigMsg, true
+		// action (see bind) until this environment's collector collects.
+		p.Stale = fleet.OtherConfigMsg(d.Lease.PID)
 	}
 	switch now := time.Now(); {
 	case latest == nil:
 		p.Waiting = fleet.WaitingMsg(p.Server)
-		p.DaemonDown = !d.Running()
 		if msg := h.serverErr(p.Server, nil); msg != "" && d.Running() && !d.Other {
 			p.Banner = p.Server + ": " + msg
 		}
@@ -359,7 +352,7 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	case d.Other:
 	case !d.Current(latest, interval, now):
 		// Stale, or a previous daemon's: this one has not written yet.
-		p.Stale, p.DaemonDown = h.staleMsg(p.Server, latest, now)
+		p.Stale = h.staleMsg(p.Server, latest, now)
 	case latest.Err != "":
 		p.Banner = p.Server + ": " + latest.Err
 	}
@@ -448,13 +441,13 @@ func (h *handler) serverErr(key string, latest *fleet.Snapshot) string {
 // staleMsg says how old latest, the stale newest snapshot of the server
 // keyed key, is at now, and why there is none newer (see fleet.StaleMsg):
 // the daemon is not running (down), or the server's collection error.
-func (h *handler) staleMsg(key string, latest *fleet.Snapshot, now time.Time) (msg string, down bool) {
-	down = !h.daemonRunning()
+func (h *handler) staleMsg(key string, latest *fleet.Snapshot, now time.Time) string {
+	down := !h.daemonRunning()
 	var srvErr string
 	if !down {
 		srvErr = h.serverErr(key, latest)
 	}
-	return fleet.StaleMsg(key, latest, now, down, srvErr), down
+	return fleet.StaleMsg(key, latest, now, down, srvErr)
 }
 
 // fill sets p's header, its unit options and whether its scope holds a

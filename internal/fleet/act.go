@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,28 +46,26 @@ func SyncErrMsg(server string, err error) string {
 	return "cannot read the history of " + server + ": " + err.Error()
 }
 
-// LeaseErrMsg is the refusal of an action while the daemon's lease cannot
-// be read: whose units the newest snapshot names is not known (R44).
-func LeaseErrMsg(err error) string { return "cannot read the vartop daemon's lease: " + err.Error() }
+// LeaseErrMsg is the refusal of an action while the collector's lease
+// cannot be read: whose units the newest snapshot names is not known (R44).
+func LeaseErrMsg(err error) string { return "cannot read the collector's lease: " + err.Error() }
 
 // GoneLabelMsg is the notice of a unit label the newest snapshot lacks.
 func GoneLabelMsg(label string, n Noun) string {
 	return n.Cap() + " " + label + " is no longer reported"
 }
 
-// OtherConfigMsg is the notice of a daemon collecting in another
-// environment than the reader's — another config file or KUBECONFIG — whose
-// snapshots the reader shows no current value of and acts on none of
-// (R31). start says how the reader starts a daemon of its own: "Start
-// collector" in vartop web, which then reads "… — Start collector to use
-// this one."
-func OtherConfigMsg(start string) string {
-	return "The vartop daemon is collecting with another configuration — " + start + " to use this one."
+// OtherConfigMsg is the notice of another vartop, pid, collecting in
+// another environment than vartop web's — another config file or
+// KUBECONFIG — whose snapshots it shows no current value of and acts on
+// none of (R31). vartop web collects once that one lets the lease go.
+func OtherConfigMsg(pid int) string {
+	return "Another vartop (pid " + strconv.Itoa(pid) + ") is collecting with another configuration; this vartop web collects once it stops."
 }
 
 // StaleMsg says how old latest, the stale newest snapshot of the server
-// keyed key, is at now, and why there is none newer: no daemon is running
-// (down), or the server's collection error — srvErr, the one the daemon
+// keyed key, is at now, and why there is none newer: nothing collects
+// (down), or the server's collection error — srvErr, the one the collector
 // recorded, else latest's own. With neither known it says only how old.
 func StaleMsg(key string, latest *Snapshot, now time.Time, down bool, srvErr string) string {
 	msg := "No new data for " + now.Sub(latest.At).Round(time.Second).String()
@@ -75,7 +74,7 @@ func StaleMsg(key string, latest *Snapshot, now time.Time, down bool, srvErr str
 	}
 	switch {
 	case down:
-		return msg + " — the vartop daemon is not running."
+		return msg + " — vartop web is not collecting."
 	case srvErr != "":
 		return msg + " — " + key + ": " + srvErr
 	}

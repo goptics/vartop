@@ -56,7 +56,7 @@ func TestCollectsEveryServer(t *testing.T) {
 		"b":  {Interval: 1, Endpoints: []string{b.URL}},
 		"lb": {Interval: 1, Endpoints: []string{lb.URL}},
 	})
-	h.start("d")
+	h.start(7)
 
 	want := map[string][]string{"a": {"instance-1"}, "b": {"instance-1"}, "lb": {"instance-1", "instance-2"}}
 	for name, labels := range want {
@@ -94,7 +94,7 @@ func TestHungDiscoveryIsolated(t *testing.T) {
 		"b":    {Interval: 1, Endpoints: []string{b.URL}},
 		"hung": {Interval: 1, Endpoints: []string{"http://127.0.0.1:1"}},
 	})
-	r := h.start("d")
+	r := h.start(7)
 
 	time.Sleep(4 * time.Second)
 	for _, name := range []string{"a", "b"} {
@@ -121,10 +121,7 @@ func TestHungDiscoveryIsolated(t *testing.T) {
 		t.Errorf("ServerErrs = %v, want hung connecting…", errs)
 	}
 
-	if err := h.control().RequestStop(); err != nil {
-		t.Fatal(err)
-	}
-	if code, err := r.wait(t, time.Second); code != 0 || err != nil {
+	if code, err := r.stop(t); code != 0 || err != nil {
 		t.Errorf("Run = %d, %v; want 0, nil", code, err)
 	}
 }
@@ -135,7 +132,7 @@ func TestDiscoveryFailureRetries(t *testing.T) {
 	h := newHarness(t)
 	h.build = func(*config.Server) (*api.Pool, error) { return nil, errors.New("no such context") }
 	h.writeConfig(oneServer("http://127.0.0.1:1"))
-	h.start("d")
+	h.start(7)
 
 	const want = "discovery failed: no such context — retrying in 5s"
 	fleettest.WaitUntil(t, 2*time.Second, "the failure stored", func() bool {
@@ -153,7 +150,7 @@ func TestPokeTriggersPoll(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", nil)
 	h := newHarness(t)
 	h.writeConfig(map[string]*config.Server{"a": {Interval: 10, Endpoints: []string{srv.URL}}})
-	h.start("d")
+	h.start(7)
 	h.waitSnaps("a", 1, 3*time.Second)
 
 	ctl := h.control()
@@ -222,7 +219,7 @@ func TestPanicBecomesErrorSnapshot(t *testing.T) {
 		"boom": {Interval: 1, Endpoints: []string{boom.URL}},
 		"ok":   {Interval: 1, Endpoints: []string{ok.URL}},
 	})
-	h.start("d")
+	h.start(7)
 
 	const internal = "internal error (see daemon log)"
 	snaps := h.waitSnaps("boom", 2, 3*time.Second)
@@ -260,7 +257,7 @@ func TestLabelsSurviveRestart(t *testing.T) {
 	h := newHarness(t)
 
 	h.writeConfig(map[string]*config.Server{"s": {Interval: 1, Endpoints: urls[1:]}})
-	first := h.start("first")
+	first := h.start(1)
 	want := map[string]string{urls[1]: "instance-1", urls[2]: "instance-2"}
 	fleettest.WaitUntil(t, 3*time.Second, "the first daemon's labels", func() bool {
 		s := h.latest("s")
@@ -273,7 +270,7 @@ func TestLabelsSurviveRestart(t *testing.T) {
 	// urls[0] sorts first: numbered afresh, it would be instance-1.
 	h.writeConfig(map[string]*config.Server{"s": {Interval: 1, Endpoints: urls}})
 	n := len(h.snaps("s"))
-	h.start("second")
+	h.start(2)
 	snaps := h.waitSnaps("s", n+1, 3*time.Second)
 	want[urls[0]] = "instance-3"
 	if got := labels(snaps[n]); !equalMaps(got, want) {
@@ -303,14 +300,14 @@ func TestRatesContinueAfterRestart(t *testing.T) {
 		return s != nil && len(s.Pods) == 1 && s.Pods[0].Workers["w"] != nil && s.Pods[0].Workers["w"].RateOK
 	}
 
-	first := h.start("first")
+	first := h.start(1)
 	fleettest.WaitUntil(t, 5*time.Second, "a rated snapshot", func() bool { return rated(h.latest("a")) })
 	if code, err := first.stop(t); code != 0 || err != nil {
 		t.Fatalf("first daemon: Run = %d, %v; want 0, nil", code, err)
 	}
 
 	n := len(h.snaps("a"))
-	h.start("second")
+	h.start(2)
 	snaps := h.waitSnaps("a", n+1, 3*time.Second)
 	if gap := snaps[n].At.Sub(snaps[n-1].At); gap > 3*time.Second {
 		t.Fatalf("restart took %v, want the first snapshot within 3 intervals", gap)
@@ -362,7 +359,7 @@ func TestCorruptFileSetAside(t *testing.T) {
 		"a": {Interval: 1, Endpoints: []string{a.URL}},
 		"b": {Interval: 1, Endpoints: []string{b.URL}},
 	})
-	first := h.start("first")
+	first := h.start(1)
 	h.waitSnaps("a", 2, 3*time.Second)
 	h.waitSnaps("b", 2, 3*time.Second)
 	if code, err := first.stop(t); code != 0 || err != nil {
@@ -371,7 +368,7 @@ func TestCorruptFileSetAside(t *testing.T) {
 	nb := len(h.snaps("b"))
 	corruptTable(t, store.PathFor(h.dir, "a"), "snapshots")
 
-	h.start("second")
+	h.start(2)
 	fleettest.WaitUntil(t, 3*time.Second, "a collected afresh", func() bool {
 		s := h.latest("a")
 		return s != nil && s.Err == "" && len(s.Pods) == 1
@@ -403,7 +400,7 @@ func newLabelsFixture(t *testing.T) *labelsFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ctl.Close() })
-	token, _, err := ctl.Claim(store.Lease{Build: "test"}, time.Now())
+	token, _, err := ctl.Claim(store.Lease{PID: 1}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -751,7 +748,7 @@ func TestFanOutPanicIsolated(t *testing.T) {
 		"lb": {Interval: 1, Endpoints: []string{lb.URL}},
 		"ok": {Interval: 1, Endpoints: []string{ok.URL}},
 	})
-	r := h.start("d")
+	r := h.start(7)
 	// Once lb is known as a balancer, its polls go through the balancer
 	// pass and its reacher's attempts.
 	fleettest.WaitUntil(t, 5*time.Second, "lb polled as a balancer", func() bool {

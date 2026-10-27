@@ -297,7 +297,7 @@ func TestActionRejectsUnknown(t *testing.T) {
 
 func TestPOSTWithoutHXRequest(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
-	srv, f := newTestServer(t, aSrv, bSrv)
+	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, c := range []struct {
 		path string
@@ -306,21 +306,17 @@ func TestPOSTWithoutHXRequest(t *testing.T) {
 		{"/workers/orders/actions/pause", multi()},
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
-		{"/daemon/start", multi()},
 	} {
 		if resp, _ := post(t, srv, c.path, c.form, false); resp.StatusCode != http.StatusForbidden {
 			t.Errorf("POST %s without HX-Request = %d, want 403", c.path, resp.StatusCode)
 		}
 	}
 	noPatches(t, fa, fb)
-	if n := f.started(); n != 0 {
-		t.Errorf("a refused POST /daemon/start started the daemon %d times", n)
-	}
 }
 
 func TestCrossOriginPOST(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
-	srv, f := newTestServer(t, aSrv, bSrv)
+	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, headers := range []map[string]string{
 		{"Sec-Fetch-Site": "cross-site"},
@@ -334,7 +330,6 @@ func TestCrossOriginPOST(t *testing.T) {
 			{"/workers/orders/actions/pause", multi()},
 			{"/workers/orders/concurrency", multi("n", "9")},
 			{"/bulk/pause", multi("names", "orders", "confirm", "1")},
-			{"/daemon/start", multi()},
 		} {
 			req := postRequest(t, srv, c.path, c.form)
 			for k, v := range headers {
@@ -350,20 +345,16 @@ func TestCrossOriginPOST(t *testing.T) {
 		}
 	}
 	noPatches(t, fa, fb)
-	if n := f.started(); n != 0 {
-		t.Errorf("a cross-origin POST /daemon/start started the daemon %d times", n)
-	}
 }
 
 func TestGETOnMutatingRoute(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
-	srv, f := newTestServer(t, aSrv, bSrv)
+	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, path := range []string{
 		"/workers/orders/actions/pause?server=multi",
 		"/workers/orders/concurrency?server=multi&n=3",
 		"/bulk/pause?server=multi&names=orders&confirm=1",
-		"/daemon/start?server=multi",
 	} {
 		for _, hx := range []bool{false, true} {
 			if status, _ := fetch(t, srv, path, hx); status != http.StatusMethodNotAllowed {
@@ -372,9 +363,6 @@ func TestGETOnMutatingRoute(t *testing.T) {
 		}
 	}
 	noPatches(t, fa, fb)
-	if n := f.started(); n != 0 {
-		t.Errorf("GET /daemon/start started the daemon %d times", n)
-	}
 }
 
 // TestNonPOSTMethodsNeedHTMX: the HX-Request guard covers every method that
@@ -1179,7 +1167,7 @@ func TestActionRefusedWhenStale(t *testing.T) {
 	f.release()
 
 	// About a minute old: the age is rounded to the second when refused.
-	down := regexp.MustCompile(`^<p class="banner">No new data for 1m\ds — the vartop daemon is not running\.</p>$`)
+	down := regexp.MustCompile(`^<p class="banner">No new data for 1m\ds — vartop web is not collecting\.</p>$`)
 	for _, c := range []struct {
 		path string
 		form url.Values

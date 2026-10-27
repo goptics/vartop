@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -87,8 +86,6 @@ type fixture struct {
 
 	mu       sync.Mutex
 	cfg      *config.Config // what the daemon and the UI read; replaced whole, never changed
-	startErr error          // what Source.Start returns
-	starts   int            // Source.Start calls
 	run      *daemonRun     // the daemon running, nil if none
 	token    string         // the lease the test holds, "" if none
 	feeds    map[string]*store.Feed
@@ -111,7 +108,7 @@ func newFixture(t *testing.T, cfg *config.Config) *fixture {
 	t.Cleanup(func() { _ = ctl.Close() })
 	f.ctl = ctl
 
-	h, err := newHandler(Source{DataDir: f.dir, Config: f.config, Control: ctl, Start: f.start, SameEnv: f.sameEnv})
+	h, err := newHandler(Source{DataDir: f.dir, Config: f.config, Control: ctl, SameEnv: f.sameEnv})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,13 +162,6 @@ func (f *fixture) setConfig(cfg *config.Config) {
 	f.cfg = cfg
 }
 
-func (f *fixture) start() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.starts++
-	return f.startErr
-}
-
 // sameEnv is Source.SameEnv: what the test set (see setEnvCheck).
 func (f *fixture) sameEnv(l store.Lease) bool {
 	f.mu.Lock()
@@ -196,14 +186,7 @@ func (f *fixture) envChecks() int {
 
 // lease is the lease of the daemon the fixture runs, or of the test.
 func (f *fixture) lease() store.Lease {
-	return store.Lease{PID: os.Getpid(), Build: "test", ConfigPath: f.leaseConfig}
-}
-
-// started is how many times Source.Start was called.
-func (f *fixture) started() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.starts
+	return store.Lease{PID: os.Getpid(), ConfigPath: f.leaseConfig}
 }
 
 // daemonRun is a collect.Run in progress.
@@ -536,6 +519,3 @@ func checkPages(t *testing.T, srv *httptest.Server, other string, pages map[stri
 		}
 	}
 }
-
-// errStart is what a failing Source.Start says.
-var errStart = errors.New("vartop daemon did not start; see /data/daemon.log")

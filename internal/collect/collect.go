@@ -95,7 +95,7 @@ func Run(ctx context.Context, o Options) (code int, err error) {
 	if !ok {
 		return 0, nil // the caller says who collects: it would be said on every call
 	}
-	o.Log.Info("collecting", "pid", o.Lease.PID, "build", o.Lease.Build, "data", o.DataDir)
+	o.Log.Info("collecting", "data", o.DataDir)
 
 	d := &holder{
 		o:          o,
@@ -210,28 +210,18 @@ func (d *holder) run(ctx context.Context) (int, error) {
 			if d.seen.changed("replaced", errString(err)) && err != nil {
 				d.o.Log.Warn("cannot check the data directory", "err", err)
 			}
-			stop, err := d.ctl.Beat(d.token, d.o.Now())
-			switch {
+			switch err := d.ctl.Beat(d.token, d.o.Now()); {
 			case errors.Is(err, store.ErrLeaseLost):
-				d.o.Log.Warn("lease lost: another daemon collects")
+				d.o.Log.Warn("lease lost: another vartop collects")
 				return 0, nil
 			case err != nil:
 				return 1, fmt.Errorf("renew the lease: %w", err)
-			case stop:
-				d.o.Log.Info("stop requested")
-				return 0, nil
 			}
 		case <-poke.C:
 			// Beat tells too, but up to BeatEvery late.
-			if l, _, err := d.ctl.Lease(); err == nil {
-				switch {
-				case l.Token != d.token:
-					d.o.Log.Warn("lease lost: another daemon collects")
-					return 0, nil
-				case l.Stop > 0:
-					d.o.Log.Info("stop requested")
-					return 0, nil
-				}
+			if l, _, err := d.ctl.Lease(); err == nil && l.Token != d.token {
+				d.o.Log.Warn("lease lost: another vartop collects")
+				return 0, nil
 			}
 			d.poke()
 		case <-conf.C:

@@ -2,12 +2,14 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"html"
 	"html/template"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -869,8 +871,9 @@ func TestDetailChartIsTheHourByTime(t *testing.T) {
 	}
 }
 
-// otherConfig is the notice of a daemon collecting in another environment.
-const otherConfig = "The vartop daemon is collecting with another configuration — Start collector to use this one."
+// otherConfig is the notice of another vartop collecting in another
+// environment: the fixture's lease is this process's.
+var otherConfig = fmt.Sprintf("Another vartop (pid %d) is collecting with another configuration; this vartop web collects once it stops.", os.Getpid())
 
 // bannerOf is the #banner of a page.
 func bannerOf(body string) string {
@@ -879,12 +882,11 @@ func bannerOf(body string) string {
 	return banner
 }
 
-// TestOtherConfigDaemon (R31): a daemon collecting in another environment
-// than vartop web's — another config file or KUBECONFIG — stores snapshots
-// of units this web must not send its token to. Every page says so, with
-// the Start collector button (which starts this environment's daemon) and
-// no current value; every action is refused with that notice, nothing sent
-// and nothing poked.
+// TestOtherConfigDaemon (R31): another vartop collecting in another
+// environment than this vartop web's — another config file or KUBECONFIG —
+// stores snapshots of units this web must not send its token to. Every
+// page says so, with no current value; every action is refused with that
+// notice, nothing sent and nothing poked.
 func TestOtherConfigDaemon(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	f := newFixture(t, &config.Config{DefaultServer: "multi", Servers: map[string]*config.Server{
@@ -900,9 +902,8 @@ func TestOtherConfigDaemon(t *testing.T) {
 		for _, hx := range []bool{false, true} {
 			status, body := fetch(t, f.srv, path, hx)
 			banner := bannerOf(body)
-			if status != http.StatusOK || !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) ||
-				!strings.Contains(banner, `hx-post="/daemon/start"`) || !strings.Contains(banner, ">Start collector</button>") {
-				t.Errorf("GET %s (hx %v) = %d, want 200 with %q and the Start collector button in #banner:\n%s", path, hx, status, otherConfig, banner)
+			if status != http.StatusOK || !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) {
+				t.Errorf("GET %s (hx %v) = %d, want 200 with %q in #banner:\n%s", path, hx, status, otherConfig, banner)
 			}
 		}
 	}
@@ -936,23 +937,17 @@ func TestOtherConfigDaemon(t *testing.T) {
 		t.Errorf("pokes %d, want %d: the other environment's daemon was poked", got, pokes)
 	}
 
-	// Start collector is no action: it starts this environment's daemon.
-	resp, _ := post(t, f.srv, "/daemon/start", multi(), true)
-	if resp.StatusCode != http.StatusOK || f.started() != 1 {
-		t.Errorf("POST /daemon/start = %d, Start called %d times; want 200, once", resp.StatusCode, f.started())
-	}
-
 	// This environment's daemon: the page is as ever.
 	f.setEnvCheck(nil)
 	_, body = fetch(t, f.srv, "/?server=multi", false)
-	if strings.Contains(body, "another configuration") || strings.Contains(bannerOf(body), "Start collector") || !strings.Contains(body, "2/2 instances") {
+	if strings.Contains(body, "another configuration") || !strings.Contains(body, "2/2 instances") {
 		t.Errorf("a daemon of this environment: the page still refuses it:\n%s", body)
 	}
 }
 
-// TestOtherConfigWaiting (R31): before the first snapshot, a daemon of
-// another environment is said so too, with the Start collector button —
-// it may never collect this server. Its lease let go is still that
+// TestOtherConfigWaiting (R31): before the first snapshot, another vartop
+// collecting in another environment is said so too — it may never collect
+// this server. Its lease let go is still that
 // environment's (R44): what the store holds came from its daemon.
 func TestOtherConfigWaiting(t *testing.T) {
 	_, aSrv := fleettest.NewVarmq(t, "a", nil)
@@ -966,8 +961,8 @@ func TestOtherConfigWaiting(t *testing.T) {
 	status, body := fetch(t, f.srv, "/?server=multi", false)
 	banner := bannerOf(body)
 	if status != http.StatusOK || !strings.Contains(body, "Waiting for the first snapshot of multi…") ||
-		!strings.Contains(banner, otherConfig) || !strings.Contains(banner, ">Start collector</button>") {
-		t.Errorf("GET / = %d, want 200 waiting, with %q and the Start collector button:\n%s", status, otherConfig, body)
+		!strings.Contains(banner, otherConfig) {
+		t.Errorf("GET / = %d, want 200 waiting, with %q:\n%s", status, otherConfig, body)
 	}
 	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
@@ -977,8 +972,8 @@ func TestOtherConfigWaiting(t *testing.T) {
 	f.release() // the daemon stopped
 	checks := f.envChecks()
 	_, body = fetch(t, f.srv, "/?server=multi", false)
-	if banner := bannerOf(body); !strings.Contains(banner, otherConfig) || strings.Count(banner, ">Start collector</button>") != 1 {
-		t.Errorf("its lease let go: want %q and one Start collector button:\n%s", otherConfig, body)
+	if banner := bannerOf(body); strings.Count(banner, otherConfig) != 1 {
+		t.Errorf("its lease let go: want %q once:\n%s", otherConfig, body)
 	}
 	if f.envChecks() == checks {
 		t.Error("a lease let go was not checked for its environment")
@@ -998,8 +993,8 @@ func handOffUnits(at time.Time, fa, fb *httptest.Server) *fleet.Snapshot {
 }
 
 // TestOtherConfigHandOff (R44): while the daemons change hands — the other
-// environment's stopped (Start collector stops it, or `vartop daemon
-// stop`), and this one's not claimed yet, or claimed but not written yet —
+// environment's stopped, and this one's not claimed yet, or claimed but
+// not written yet —
 // the newest snapshot is still the other one's, and fresh. It is not
 // current: no value shown, every action refused, nothing sent. Once this
 // environment's daemon writes, all is as ever.
@@ -1018,9 +1013,8 @@ func TestOtherConfigHandOff(t *testing.T) {
 	f.release()
 	pokes := f.pokes("multi")
 	_, body := fetch(t, f.srv, "/?server=multi", false)
-	if banner := bannerOf(body); !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) ||
-		!strings.Contains(banner, ">Start collector</button>") || strings.Contains(body, current) {
-		t.Errorf("the other environment's daemon stopped, its snapshot fresh: want %q, the button and no current value:\n%s", otherConfig, body)
+	if banner := bannerOf(body); !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) || strings.Contains(body, current) {
+		t.Errorf("the other environment's collector stopped, its snapshot fresh: want %q and no current value:\n%s", otherConfig, body)
 	}
 	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
@@ -1078,7 +1072,7 @@ func TestActionRefusedWhenLeaseUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
-	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">cannot read the vartop daemon&#39;s lease: `) {
+	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">cannot read the collector&#39;s lease: `) {
 		t.Errorf("POST = %d %q, want 409 saying the lease cannot be read", resp.StatusCode, body)
 	}
 	noPatches(t, fa, fb)
@@ -1088,9 +1082,9 @@ func TestActionRefusedWhenLeaseUnreadable(t *testing.T) {
 }
 
 // TestOldHistoryShowsStale (R43): a server whose file holds only rows
-// older than the hour — the daemon down for longer than that — shows its
-// newest snapshot stale, with its age and the Start collector button, not
-// "Waiting for the first snapshot".
+// older than the hour — nothing collecting for longer than that — shows
+// its newest snapshot stale, with its age, not "Waiting for the first
+// snapshot".
 func TestOldHistoryShowsStale(t *testing.T) {
 	_, aSrv := fleettest.NewVarmq(t, "a", nil)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
@@ -1100,38 +1094,35 @@ func TestOldHistoryShowsStale(t *testing.T) {
 	f.write("multi", snap(time.Now().Add(-2*time.Hour), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 2)})))
 	f.release() // the daemon stopped
 
-	down := regexp.MustCompile(`<p class="banner stale">No new data for 2h0m\ds — the vartop daemon is not running\.</p>`)
+	down := regexp.MustCompile(`<p class="banner stale">No new data for 2h0m\ds — vartop web is not collecting\.</p>`)
 	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
 		status, body := fetch(t, f.srv, path, false)
-		if status != http.StatusOK || !down.MatchString(body) || !strings.Contains(body, ">Start collector</button>") || strings.Contains(body, "Waiting for the first snapshot") {
-			t.Errorf("GET %s = %d, want 200 with %q and the Start collector button, not waiting:\n%s", path, status, down, body)
+		if status != http.StatusOK || !down.MatchString(body) || strings.Contains(body, "Waiting for the first snapshot") {
+			t.Errorf("GET %s = %d, want 200 with %q, not waiting:\n%s", path, status, down, body)
 		}
 	}
 }
 
-// TestStaleBannerAndStart: a server whose newest snapshot is older than
-// 3·interval + 2s shows how old, and why: the daemon is not running —
-// with a button that starts it — or the server's own error. Current values
-// read "—"; the history stays.
-func TestStaleBannerAndStart(t *testing.T) {
+// TestStaleBanner: a server whose newest snapshot is older than
+// 3·interval + 2s shows how old, and why: nothing collects, or the
+// server's own error. Current values read "—"; the history stays.
+func TestStaleBanner(t *testing.T) {
 	_, aSrv := fleettest.NewVarmq(t, "a", nil)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
 		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}},
 	}})
 	f.claim()
 	f.write("multi", snap(time.Now().Add(-60*time.Second), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 2)})))
-	f.release() // the daemon stopped
+	f.release() // the collector stopped
 
 	// About a minute old: the age is rounded to the second when the page
 	// is rendered.
-	down := regexp.MustCompile(`<p class="banner stale">No new data for 1m\ds — the vartop daemon is not running\.</p>`)
+	down := regexp.MustCompile(`<p class="banner stale">No new data for 1m\ds — vartop web is not collecting\.</p>`)
 	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
 		for _, hx := range []bool{false, true} {
 			status, body := fetch(t, f.srv, path, hx)
-			_, banner, _ := strings.Cut(body, `<div id="banner"`)
-			banner, _, _ = strings.Cut(banner, "</div>")
-			if status != http.StatusOK || !down.MatchString(banner) || !strings.Contains(banner, `hx-post="/daemon/start"`) || !strings.Contains(banner, ">Start collector</button>") {
-				t.Errorf("GET %s (hx %v) = %d, want 200 with %q and the Start collector button in #banner:\n%s", path, hx, status, down, banner)
+			if banner := bannerOf(body); status != http.StatusOK || !down.MatchString(banner) {
+				t.Errorf("GET %s (hx %v) = %d, want 200 with %q in #banner:\n%s", path, hx, status, down, banner)
 			}
 		}
 	}
@@ -1146,48 +1137,23 @@ func TestStaleBannerAndStart(t *testing.T) {
 		t.Errorf("a stale page's #status should show its health as —:\n%s", status)
 	}
 
-	// Start collector, from the page it is on: htmx sends the browser
-	// there, a full navigation.
-	req := postRequest(t, f.srv, "/daemon/start", url.Values{"server": {"multi"}})
-	req.Header.Set("HX-Current-URL", f.srv.URL+"/workers/orders?server=multi")
-	resp, _ := send(t, f.srv, req)
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Redirect") != "/workers/orders?server=multi" || f.started() != 1 {
-		t.Errorf("POST /daemon/start = %d, HX-Redirect %q, Start called %d times; want 200 sending htmx back to the page, once",
-			resp.StatusCode, resp.Header.Get("HX-Redirect"), f.started())
-	}
-	// Without htmx (no route lets one through the guards) it is a 303.
-	rec := httptest.NewRecorder()
-	plain := httptest.NewRequest(http.MethodPost, "/daemon/start", strings.NewReader("server=multi"))
-	plain.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	f.h.startDaemon(rec, plain)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/?server=multi" {
-		t.Errorf("POST /daemon/start without htmx = %d to %q, want 303 to the dashboard", rec.Code, rec.Header().Get("Location"))
-	}
-
-	// A Start that fails says so in the banner, next to the button, which
-	// stays.
-	_, banner, _ := strings.Cut(body, `<div id="banner"`)
-	banner, _, _ = strings.Cut(banner, "</div>")
-	if !strings.Contains(banner, `hx-target="#start-error"`) || !strings.Contains(banner, `>Start collector</button> <span id="start-error" class="err" role="alert"></span>`) {
-		t.Errorf("the banner lacks the Start button's error slot:\n%s", banner)
-	}
-	f.mu.Lock()
-	f.startErr = errStart
-	f.mu.Unlock()
-	resp, body = post(t, f.srv, "/daemon/start", url.Values{"server": {"multi"}}, true)
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Retarget") != "" || resp.Header.Get("HX-Redirect") != "" || body != errStart.Error() || f.started() != 3 {
-		t.Errorf("failed Start = %d (HX-Retarget %q, HX-Redirect %q) %q, want 200 with the error alone, for its slot",
-			resp.StatusCode, resp.Header.Get("HX-Retarget"), resp.Header.Get("HX-Redirect"), body)
-	}
-
-	// The daemon runs, but the server's collection fails.
+	// The collector runs, but the server's collection fails.
 	f.claim()
 	if err := f.ctl.SetServerErr("multi", "discovery failed: boom — retrying in 5s"); err != nil {
 		t.Fatal(err)
 	}
 	_, body = fetch(t, f.srv, "/?server=multi", false)
-	if want := regexp.MustCompile(`No new data for 1m\ds — multi: discovery failed: boom — retrying in 5s<`); !want.MatchString(body) || strings.Contains(body, "Start collector") {
-		t.Errorf("stale page of a failing server lacks %q, or offers Start:\n%s", want, body)
+	if want := regexp.MustCompile(`No new data for 1m\ds — multi: discovery failed: boom — retrying in 5s<`); !want.MatchString(body) {
+		t.Errorf("stale page of a failing server lacks %q:\n%s", want, body)
+	}
+}
+
+// TestNoStartRoute: vartop web collects itself; it has nothing to start.
+func TestNoStartRoute(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	srv, _ := newTestServer(t, aSrv, bSrv)
+	if resp, _ := post(t, srv, "/daemon/start", multi(), true); resp.StatusCode == http.StatusOK {
+		t.Errorf("POST /daemon/start = %d, want no such route", resp.StatusCode)
 	}
 }
 

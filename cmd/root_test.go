@@ -27,3 +27,13 @@ func TestRootPrintsHelp(t *testing.T) {
 		}
 	}
 }
+
+// TestDaemonCommandGone: vartop has no daemon any more; vartop web
+// collects while it runs.
+func TestDaemonCommandGone(t *testing.T) {
+	for _, c := range rootCmd.Commands() {
+		if c.Name() == "daemon" {
+			t.Fatalf("vartop has a daemon command: %q", c.Short)
+		}
+	}
+}

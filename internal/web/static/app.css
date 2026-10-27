@@ -75,7 +75,6 @@ button.danger { color: var(--bad); }
 .err { color: var(--bad); margin: 8px 0; overflow-wrap: anywhere; }
 .banner { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--warn); background: var(--panel); color: var(--warn); font-weight: 600; }
 .waiting { padding: 24px 0; color: var(--accent); font-size: 1.1rem; }
-.start { margin: 8px 0; }
 .updated.stale { color: var(--warn); }
 
 /* cards */

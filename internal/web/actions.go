@@ -98,9 +98,8 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		conflict(w, fleet.WaitingMsg(t.key))
 		return nil, false
 	case !d.Acts(latest, interval, now):
-		// Stale, a previous daemon's, or none collects (R44).
-		msg, _ := h.staleMsg(t.key, latest, now)
-		conflict(w, msg)
+		// Stale, a previous collector's, or none collects (R44).
+		conflict(w, h.staleMsg(t.key, latest, now))
 		return nil, false
 	}
 	t.latest = latest
@@ -127,7 +126,7 @@ func refused(w http.ResponseWriter, d store.DaemonState) bool {
 	case d.Err != nil:
 		conflict(w, fleet.LeaseErrMsg(d.Err))
 	case d.Other:
-		conflict(w, otherConfigMsg)
+		conflict(w, fleet.OtherConfigMsg(d.Lease.PID))
 	default:
 		return false
 	}
@@ -334,47 +333,6 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	h.respond(w, r, t, "", slices.Concat(perName...))
 }
 
-// startDaemon starts the daemon (Source.Start), then sends the browser
-// back to the page it came from, which then shows whether the daemon
-// collects: htmx with HX-Redirect, a full navigation, so that the page
-// is loaded whole (a 303 would be followed inside htmx's request, its
-// page swapped in as an htmx response); anything else with a 303. A start
-// that fails answers its error alone, for the slot next to the Start
-// collector button (see the layout), which stays.
-func (h *handler) startDaemon(w http.ResponseWriter, r *http.Request) {
-	err := fmt.Errorf("vartop web cannot start the vartop daemon")
-	if h.src.Start != nil {
-		err = h.src.Start()
-	}
-	switch {
-	case err != nil:
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(template.HTMLEscapeString(err.Error())))
-	case isHTMX(r):
-		w.Header().Set("HX-Redirect", backTo(r))
-		w.WriteHeader(http.StatusOK)
-	default:
-		http.Redirect(w, r, backTo(r), http.StatusSeeOther)
-	}
-}
-
-// backTo is the page a POST came from, as htmx names it (HX-Current-URL):
-// its path and query on this server, never another host; else the
-// dashboard of the server the form names.
-func backTo(r *http.Request) string {
-	if u, err := url.Parse(r.Header.Get("HX-Current-URL")); err == nil {
-		if path := u.EscapedPath(); strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "//") && !strings.HasPrefix(path, `/\`) {
-			if u.RawQuery != "" {
-				return path + "?" + u.RawQuery
-			}
-			return path
-		}
-	}
-	return pageURL("/", r.PostFormValue("server"), "", "")
-}
-
 // respond answers an executed action: results, after poking the server
 // and waiting up to fleet.SettleWait (less if the browser gives up) for a
 // snapshot taken after the poke, which shows them, then the #live region
@@ -393,9 +351,9 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 	latest, now := latestOf(snaps), time.Now()
 	switch d := h.daemon(); {
 	case d.Other:
-		stale = otherConfigMsg
+		stale = fleet.OtherConfigMsg(d.Lease.PID)
 	case latest != nil && !d.Current(latest, t.srv.PollInterval(), now):
-		stale, _ = h.staleMsg(t.key, latest, now)
+		stale = h.staleMsg(t.key, latest, now)
 	}
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}
 	if set, p, ok := livePage(r, t.key, t.noun, t.srv.PollInterval(), snaps, t.label, worker, stale); ok {

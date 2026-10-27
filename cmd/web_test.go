@@ -67,7 +67,7 @@ func collectingSource(t *testing.T, cfg *config.Config) web.Source {
 		_, _ = collect.Run(ctx, collect.Options{
 			DataDir: dataDir,
 			Config:  func() (*config.Config, string, error) { return cfg, "", nil },
-			Lease:   store.Lease{PID: os.Getpid(), Build: "test"},
+			Lease:   store.Lease{PID: os.Getpid()},
 		})
 	}()
 	t.Cleanup(func() { cancel(); <-done })
@@ -75,7 +75,6 @@ func collectingSource(t *testing.T, cfg *config.Config) web.Source {
 		DataDir: dataDir,
 		Config:  func() (*config.Config, error) { return cfg, nil },
 		Control: ctl,
-		Start:   func() error { return nil },
 	}
 }
 
@@ -575,7 +574,7 @@ func TestSecondWebTakesOver(t *testing.T) {
 			case <-stopBeat:
 				return
 			case <-tick.C:
-				_, _ = ctl.Beat(token, time.Now())
+				_ = ctl.Beat(token, time.Now())
 			}
 		}
 	}()
@@ -603,4 +602,18 @@ func TestSecondWebTakesOver(t *testing.T) {
 	if err := waitResult(t, res); err != nil {
 		t.Fatalf("runWeb() error: %v", err)
 	}
+}
+
+// isolate points every directory vartop could use at temporary
+// ones, and returns the data dir.
+func isolate(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	dataDir := filepath.Join(home, "data")
+	t.Setenv("VARTOP_DATA_DIR", dataDir)
+	t.Setenv("KUBECONFIG", "")
+	return dataDir
 }

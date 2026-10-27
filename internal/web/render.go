@@ -55,12 +55,9 @@ type Page struct {
 	// worker included — only history.
 	Note, Banner, Waiting, Stale string
 
-	// DaemonDown: no daemon collects; the banner offers to start it.
-	// OtherEnv: the daemon's lease, fresh or not, is of another
-	// environment than this vartop's (R31, R44); Stale says so, and the
-	// banner offers to start this one's. Unconfigured: Server is not in the config; the server select
-	// shows it chosen.
-	DaemonDown, OtherEnv, Unconfigured bool
+	// Unconfigured: Server is not in the config; the server select shows
+	// it chosen.
+	Unconfigured bool
 
 	// Gone is Pod when the newest snapshot has no unit so labelled (see
 	// podGone): the unit select shows it chosen, and the banner links to

@@ -157,7 +157,7 @@ func TestScopeOfByLabel(t *testing.T) {
 	}
 }
 
-// TestReaderCopy: the notices both UIs show, in the words the global
+// TestReaderCopy: the notices vartop web shows, in the words the global
 // constraints fix; a stale notice without a recorded error falls back to
 // the snapshot's own.
 func TestReaderCopy(t *testing.T) {
@@ -171,11 +171,13 @@ func TestReaderCopy(t *testing.T) {
 		{NotConfiguredMsg("multi"), "Server multi is not configured"},
 		{SyncErrMsg("multi", errors.New("disk I/O error")), "cannot read the history of multi: disk I/O error"},
 		{GoneLabelMsg("instance-2", inst), "Instance instance-2 is no longer reported"},
-		{StaleMsg("multi", latest, now, true, "connecting…"), "No new data for 1m1s — the vartop daemon is not running."},
+		{StaleMsg("multi", latest, now, true, "connecting…"), "No new data for 1m1s — vartop web is not collecting."},
 		{StaleMsg("multi", latest, now, false, "connecting…"), "No new data for 1m1s — multi: connecting…"},
 		{StaleMsg("multi", failed, now, false, ""), "No new data for 1m1s — multi: discovery failed: boom"},
 		{StaleMsg("multi", failed, now, false, "connecting…"), "No new data for 1m1s — multi: connecting…"},
 		{StaleMsg("multi", latest, now, false, ""), "No new data for 1m1s."},
+		{OtherConfigMsg(4242), "Another vartop (pid 4242) is collecting with another configuration; this vartop web collects once it stops."},
+		{LeaseErrMsg(errors.New("disk I/O error")), "cannot read the collector's lease: disk I/O error"},
 	} {
 		if c.got != c.want {
 			t.Errorf("got %q, want %q", c.got, c.want)

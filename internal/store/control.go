@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -20,19 +21,17 @@ const DeadAfter = 3 * BeatEvery
 // beatPoll is how often BeatAdvances reads the beat it watches.
 const beatPoll = 100 * time.Millisecond
 
-// ErrLeaseLost means the token given is not the lease's: another daemon
-// claimed it, or it was released.
-var ErrLeaseLost = errors.New("daemon lease lost")
+// ErrLeaseLost means the token given is not the lease's: another
+// collector claimed it, or it was released.
+var ErrLeaseLost = errors.New("collector lease lost")
 
-// Lease is the row of the daemon collecting into the store.
+// Lease is the row of the vartop collecting into the store.
 type Lease struct {
 	Token string // "" once released
 	PID   int
-	Build string // build identity of the daemon's executable
-	// The daemon's environment, as far as collection depends on it.
-	ConfigPath, Kubeconfig, PathEnv string
-	Started, Beat                   time.Time
-	Stop                            int // stop requests since the claim
+	// The collector's environment, as far as collection depends on it.
+	ConfigPath, Kubeconfig string
+	Started, Beat          time.Time
 }
 
 // Control is control.db: the daemon's lease, and per server the UIs' poke
@@ -45,6 +44,8 @@ type Control struct {
 }
 
 const controlSchema = `
+-- build, path_env and stop are unused: the vartop daemon of
+-- 2026-10-26 wrote them. They stay so that its files open unchanged.
 CREATE TABLE IF NOT EXISTS daemon (
 	id          INTEGER PRIMARY KEY CHECK (id = 1),
 	token       TEXT    NOT NULL,
@@ -137,8 +138,8 @@ func (c *Control) claim(l Lease, now time.Time, dead string) (token string, ok b
 	ms := now.UnixMilli()
 	if _, err := tx.Exec(`INSERT OR REPLACE INTO daemon
 		(id, token, pid, build, config_path, kubeconfig, path_env, started, beat, stop)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-		token, l.PID, l.Build, l.ConfigPath, l.Kubeconfig, l.PathEnv, ms, ms); err != nil {
+		VALUES (1, ?, ?, '', ?, ?, '', ?, ?, 0)`,
+		token, l.PID, l.ConfigPath, l.Kubeconfig, ms, ms); err != nil {
 		return "", false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -147,16 +148,17 @@ func (c *Control) claim(l Lease, now time.Time, dead string) (token string, ok b
 	return token, true, nil
 }
 
-// Beat renews the lease of token at now, and reports whether a stop was
-// requested. ErrLeaseLost: the lease is no longer token's.
-func (c *Control) Beat(token string, now time.Time) (stopRequested bool, err error) {
-	var stop int
-	err = c.db.QueryRow(`UPDATE daemon SET beat = ? WHERE id = 1 AND token = ? AND token <> '' RETURNING stop`,
-		now.UnixMilli(), token).Scan(&stop)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, ErrLeaseLost
+// Beat renews the lease of token at now. ErrLeaseLost: the lease is no
+// longer token's.
+func (c *Control) Beat(token string, now time.Time) error {
+	res, err := c.db.Exec(`UPDATE daemon SET beat = ? WHERE id = 1 AND token = ? AND token <> ''`, now.UnixMilli(), token)
+	if err != nil {
+		return err
 	}
-	return stop != 0, err
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return cmp.Or(err, ErrLeaseLost)
+	}
+	return nil
 }
 
 // BeatAdvances watches the lease of token for up to within, and reports
@@ -235,9 +237,8 @@ func (c *Control) Release(token string) error {
 func (c *Control) Lease() (Lease, bool, error) {
 	var l Lease
 	var started, beat int64
-	err := c.db.QueryRow(`SELECT token, pid, build, config_path, kubeconfig, path_env, started, beat, stop
-		FROM daemon WHERE id = 1`).
-		Scan(&l.Token, &l.PID, &l.Build, &l.ConfigPath, &l.Kubeconfig, &l.PathEnv, &started, &beat, &l.Stop)
+	err := c.db.QueryRow(`SELECT token, pid, config_path, kubeconfig, started, beat FROM daemon WHERE id = 1`).
+		Scan(&l.Token, &l.PID, &l.ConfigPath, &l.Kubeconfig, &started, &beat)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Lease{}, false, nil
 	}
@@ -303,13 +304,6 @@ func (d DaemonState) Current(latest *fleet.Snapshot, interval time.Duration, now
 // latest names is not known.
 func (d DaemonState) Acts(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
 	return d.Err == nil && d.Fresh && d.Current(latest, interval, now)
-}
-
-// RequestStop asks the daemon holding the lease to stop: its next Beat
-// says so.
-func (c *Control) RequestStop() error {
-	_, err := c.db.Exec(`UPDATE daemon SET stop = stop + 1 WHERE id = 1 AND token <> ''`)
-	return err
 }
 
 // Poke asks the daemon to poll server now, and returns when it asked: a

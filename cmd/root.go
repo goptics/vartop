@@ -24,41 +24,24 @@ configured server while it runs.`,
 
 // loadOrOnboard loads the configuration, starting the interactive onboarding
 // when there is none yet (or it lists no servers). Any other load error is
-// returned. Onboarding without any config (the first run) also offers the
-// daemon's login service, when there is a terminal to ask on.
+// returned.
 func loadOrOnboard() (*config.Config, error) {
 	cfg, err := config.Load()
 	switch {
 	case err == nil && len(cfg.Servers) > 0:
 		return cfg, nil
 	case err == nil || errors.Is(err, config.ErrConfigNotFound):
-		firstRun := err != nil
-		cfg, err := config.PromptOnboarding()
-		if err == nil && firstRun && isTerminal(os.Stdin) {
-			offerLoginService(config.PromptDaemonAtLogin)
-		}
-		return cfg, err
+		return config.PromptOnboarding()
 	default:
 		return nil, err
 	}
 }
 
-// Execute runs vartop and exits non-zero on an error: with the code of an
-// exitError, else 1.
 func Execute() {
-	err := rootCmd.Execute()
-	if err == nil {
-		return
-	}
-	code := 1
-	var exit exitError
-	if errors.As(err, &exit) {
-		code, err = exit.code, exit.err
-	}
-	if err != nil {
+	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
+		os.Exit(1)
 	}
-	os.Exit(code)
 }
 
 func init() {

@@ -36,7 +36,7 @@ func claimed(t testing.TB, dataDir string) (*Control, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ctl.Close() })
-	token, ok, err := ctl.Claim(Lease{PID: os.Getpid(), Build: "test"}, time.Now())
+	token, ok, err := ctl.Claim(Lease{PID: os.Getpid()}, time.Now())
 	if err != nil || !ok {
 		t.Fatalf("Claim = %q, %v, %v; want a token", token, ok, err)
 	}
@@ -526,7 +526,7 @@ func TestOpenWriterLeavesNoFileOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, _, _ := ctl.Claim(Lease{Build: "test"}, time.Now())
+	token, _, _ := ctl.Claim(Lease{PID: 1}, time.Now())
 	db, err := OpenServer(dir, "prod", true)
 	if err != nil {
 		t.Fatal(err)

@@ -899,14 +899,13 @@ func TestControlsFollowBalancedScope(t *testing.T) {
 }
 
 // TestStaleHidesCurrentValues: a stale page shows no current value, only
-// "—", and keeps its history drawn; with the daemon down its banner offers
-// to start it.
+// "—", and keeps its history drawn.
 func TestStaleHidesCurrentValues(t *testing.T) {
-	const stale = "No new data for 1m0s — the vartop daemon is not running."
+	const stale = "No new data for 1m0s — vartop web is not collecting."
 	for set, p := range map[string]Page{"dashboard": dashboardPage(), "detail": detailPage(), "grid": gridPage()} {
 		p.Note = "3 instances behind lb:8080"
 		fresh := run(t, set, "layout", p)
-		p.Stale, p.DaemonDown = stale, true
+		p.Stale = stale
 		body := run(t, set, "layout", p)
 		// Current state beyond the values: the balancers' note, a unit's
 		// error and down mark, the units reporting the worker.
@@ -920,10 +919,8 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 		}
 		_, banner, _ := strings.Cut(body, `<div id="banner" role="status">`)
 		banner, _, _ = strings.Cut(banner, "</div>")
-		for _, want := range []string{`<p class="banner stale">` + stale + `</p>`, `hx-post="/daemon/start"`, `<input type="hidden" name="server" value="dev">`, `>Start collector</button>`} {
-			if !strings.Contains(banner, want) {
-				t.Errorf("%s: banner lacks %q:\n%s", set, want, banner)
-			}
+		if want := `<p class="banner stale">` + stale + `</p>`; !strings.Contains(banner, want) {
+			t.Errorf("%s: banner lacks %q:\n%s", set, want, banner)
 		}
 		_, live, _ := strings.Cut(body, `<div id="live">`)
 		for _, current := range []string{"12.5", ">9<", "87.5%", ">10<", `class="status active"`, "2/4", "4 ×2 pods"} {
@@ -934,11 +931,6 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 		if set != "grid" && !strings.Contains(live, "<polyline") {
 			t.Errorf("%s: a stale page lost its history", set)
 		}
-	}
-	p := dashboardPage()
-	p.Stale = "No new data for 1m0s — dev: discovery failed"
-	if body := run(t, "dashboard", "layout", p); strings.Contains(body, "Start collector") {
-		t.Error("the daemon runs, yet the page offers to start it")
 	}
 }
 
