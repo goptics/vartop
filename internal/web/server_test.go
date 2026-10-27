@@ -1004,7 +1004,8 @@ func handOffUnits(at time.Time, fa, fb *httptest.Server) *fleet.Snapshot {
 func TestOtherConfigHandOff(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
-		"multi": {Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken}, // stale past 5s
+		// Stale past 8s: the refusals below are R44's, not staleness's.
+		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
 	}})
 	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
 	current := `<td class="num">5</td>` // the idle workers, shown only while current

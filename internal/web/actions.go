@@ -76,18 +76,22 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		conflict(w, fleet.SyncErrMsg(t.key, err))
 		return nil, false
 	}
-	d := h.daemon() // after the Sync: what it took in was taken under this lease, or an earlier one
+	// The snapshots, read once (the label is checked in the snapshot acted
+	// on), then the lease: whatever they hold was taken under it, or an
+	// earlier one (R44).
+	snaps := t.feed.Snapshots()
+	d := h.daemon()
 	if refused(w, d) {
 		return nil, false
 	}
-	if !d.Acts(t.feed.Latest(), interval, time.Now()) {
+	if !d.Acts(latestOf(snaps), interval, time.Now()) {
 		h.refresh(r.Context(), t)
 		// Again: the lease may have changed hands while it waited.
+		snaps = t.feed.Snapshots()
 		if d = h.daemon(); refused(w, d) {
 			return nil, false
 		}
 	}
-	snaps := t.feed.Snapshots() // read once: the label is checked in the snapshot acted on
 	latest := latestOf(snaps)
 	switch now := time.Now(); {
 	case latest == nil:

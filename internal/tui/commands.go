@@ -229,15 +229,17 @@ type actor struct {
 }
 
 func (a actor) act(worker, label, action string) error {
-	d := store.ReadDaemon(a.ctl, a.sameEnv) // after the feed's last Sync: its snapshots were taken under this lease, or an earlier one
+	// The snapshot, then the lease: it was taken under that lease, or an
+	// earlier one (R44).
+	latest := a.feed.Latest()
+	d := store.ReadDaemon(a.ctl, a.sameEnv)
 	if err := refusal(d); err != nil {
 		return err
 	}
-	latest := a.feed.Latest()
 	if !d.Acts(latest, a.interval, time.Now()) {
 		a.settle()
-		latest = a.feed.Latest()
 		// Again: the lease may have changed hands while it waited.
+		latest = a.feed.Latest()
 		d = store.ReadDaemon(a.ctl, a.sameEnv)
 		if err := refusal(d); err != nil {
 			return err
