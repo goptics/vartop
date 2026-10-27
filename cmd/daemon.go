@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"syscall"
@@ -119,7 +120,25 @@ func readConfig() (*config.Config, string, error) {
 // the same build, config path and KUBECONFIG. PATH is not compared, so
 // that ordinary differences between shells restart nothing.
 func sameDaemon(l, want store.Lease) bool {
-	return l.Build == want.Build && l.ConfigPath == want.ConfigPath && l.Kubeconfig == want.Kubeconfig
+	return l.Build == want.Build && sameEnv(l, want)
+}
+
+// sameEnv reports whether the daemons of leases a and b collect in the same
+// environment: the same config path and KUBECONFIG, whatever their build
+// (or PATH). A UI acts on a server only while the daemon collects in its
+// environment (R31): the token it sends must not go to endpoints
+// discovered under another config.
+func sameEnv(a, b store.Lease) bool {
+	return a.ConfigPath == b.ConfigPath && a.Kubeconfig == b.Kubeconfig
+}
+
+// sameEnvAsOwn returns the UIs' check of a lease (R31): whether its daemon
+// collects in this vartop's environment, sameEnv with ownLease (read
+// once). Only a fresh lease is a daemon's that collects: a stale one is
+// "not running", whatever its environment.
+func sameEnvAsOwn() func(store.Lease) bool {
+	own := ownLease()
+	return func(l store.Lease) bool { return sameEnv(l, own) }
 }
 
 func daemonLogPath(dataDir string) string { return filepath.Join(dataDir, "daemon.log") }
@@ -154,7 +173,7 @@ func isTerminal(f *os.File) bool {
 
 // daemonLogger logs to the data dir's daemon.log, whoever started the
 // daemon, and to stderr too when that is a terminal; to stderr alone when
-// the log cannot be opened.
+// the log cannot be opened. A crash goes to daemon.log too (crashToLog).
 func daemonLogger(dataDir string) (*slog.Logger, func()) {
 	path := daemonLogPath(dataDir)
 	f, err := openLog(path)
@@ -167,7 +186,29 @@ func daemonLogger(dataDir string) (*slog.Logger, func()) {
 	if isTerminal(os.Stderr) {
 		w = io.MultiWriter(f, os.Stderr)
 	}
-	return slog.New(slog.NewTextHandler(w, nil)), func() { _ = f.Close() }
+	log := slog.New(slog.NewTextHandler(w, nil))
+	if err := crashToLog(f, os.Stderr); err != nil {
+		log.Warn("a crash will not be written to the daemon log", "err", err)
+	}
+	return log, func() { _ = f.Close() }
+}
+
+// setCrashOutput is debug.SetCrashOutput. Tests replace it: the test
+// binary's own crash output stays its own.
+var setCrashOutput = debug.SetCrashOutput
+
+// crashToLog has the runtime write a crash — a panic nothing recovers, a
+// fatal error — to log as well as to stderr, unless stderr is log already
+// (a detached daemon's is): launchd and Task Scheduler send a daemon's
+// stderr nowhere, which would lose why it crashed and was restarted. On a
+// terminal the log gets its copy too, as it does every line logged.
+func crashToLog(log, stderr *os.File) error {
+	if a, err := log.Stat(); err == nil {
+		if b, err := stderr.Stat(); err == nil && os.SameFile(a, b) {
+			return nil
+		}
+	}
+	return setCrashOutput(log, debug.CrashOptions{})
 }
 
 // spawnDetached starts exe with args as a daemon of its own (see

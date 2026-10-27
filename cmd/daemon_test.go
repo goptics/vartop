@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,6 +34,9 @@ func TestMain(m *testing.M) {
 		Execute()
 		os.Exit(0)
 	}
+	// A test running the daemon in this process must not send the test
+	// binary's own crash output to its temporary daemon.log.
+	setCrashOutput = func(*os.File, debug.CrashOptions) error { return nil }
 	os.Exit(m.Run())
 }
 
@@ -1328,5 +1332,86 @@ func TestDetachedSpawnSubprocess(t *testing.T) {
 	log, _ := os.ReadFile(filepath.Join(dataDir, "daemon.log"))
 	if !bytes.Contains(log, []byte("collecting")) {
 		t.Errorf("daemon.log:\n%s\nwant the daemon's log in it", log)
+	}
+}
+
+// TestCrashOutputToLog: a daemon's crash (a panic nothing recovers, a
+// fatal error) is written to daemon.log too — launchd and Task Scheduler
+// send its stderr nowhere — unless stderr is daemon.log already, as a
+// detached daemon's is.
+func TestCrashOutputToLog(t *testing.T) {
+	var got []string
+	orig := setCrashOutput
+	setCrashOutput = func(f *os.File, _ debug.CrashOptions) error {
+		got = append(got, f.Name())
+		return nil
+	}
+	t.Cleanup(func() { setCrashOutput = orig })
+
+	dataDir := isolate(t)
+	path := filepath.Join(dataDir, "daemon.log")
+	_, closeLog := daemonLogger(dataDir) // the test's stderr is not daemon.log
+	closeLog()
+	if len(got) != 1 || got[0] != path {
+		t.Fatalf("crash output set to %v, want %s", got, path)
+	}
+
+	got = nil
+	log, err := openLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	stderr, err := openLog(path) // a detached daemon's stderr: the log itself
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	if err := crashToLog(log, stderr); err != nil || len(got) != 0 {
+		t.Errorf("crashToLog(log, log) = %v, set to %v; want nothing set", err, got)
+	}
+	other, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := crashToLog(log, other); err != nil || len(got) != 1 || got[0] != path {
+		t.Errorf("crashToLog(log, another file) = %v, set to %v; want %s", err, got, path)
+	}
+}
+
+// TestSameEnv (R31, for the UIs): two daemons collect in the same
+// environment when their config path and KUBECONFIG match, whatever their
+// build or PATH; sameEnvAsOwn checks a lease against this vartop's.
+func TestSameEnv(t *testing.T) {
+	isolate(t)
+	t.Setenv("KUBECONFIG", "/home/u/.kube/prod")
+	own := ownLease()
+	for _, tc := range []struct {
+		name   string
+		differ func(*store.Lease)
+		same   bool
+	}{
+		{"identical", func(*store.Lease) {}, true},
+		{"build", func(l *store.Lease) { l.Build = "/old/vartop (1 bytes, modified x)" }, true},
+		{"PATH", func(l *store.Lease) { l.PathEnv = "/elsewhere" }, true},
+		{"pid", func(l *store.Lease) { l.PID++ }, true},
+		{"config path", func(l *store.Lease) { l.ConfigPath = "/elsewhere/vartop/config.json" }, false},
+		{"KUBECONFIG", func(l *store.Lease) { l.Kubeconfig = "/home/u/.kube/staging" }, false},
+		{"KUBECONFIG unset", func(l *store.Lease) { l.Kubeconfig = "" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := own
+			tc.differ(&l)
+			if got := sameEnv(l, own); got != tc.same {
+				t.Errorf("sameEnv() = %v, want %v", got, tc.same)
+			}
+			if got := sameEnvAsOwn()(l); got != tc.same {
+				t.Errorf("sameEnvAsOwn()() = %v, want %v", got, tc.same)
+			}
+			if got, want := sameDaemon(l, own), tc.same && l.Build == own.Build; got != want {
+				t.Errorf("sameDaemon() = %v, want %v", got, want)
+			}
+		})
 	}
 }

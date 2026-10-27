@@ -3,9 +3,11 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/daemon"
+	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/store"
 	"github.com/goptics/vartop/internal/web"
 )
@@ -289,5 +292,66 @@ func TestServeWebUnknownServer(t *testing.T) {
 	}
 	if opened {
 		t.Fatal("open was called for a server not configured")
+	}
+}
+
+// TestWebLogsStoreNotices: vartop web logs what the store gets past — a
+// stored snapshot it skips because it cannot be decoded — where it logs
+// the rest (store.SetLogger).
+func TestWebLogsStoreNotices(t *testing.T) {
+	d := newTestDaemon(t)
+	d.startsAs(t, d.o.want)
+	saveServersConfig(t, "prod", &config.Server{Name: "prod", Endpoints: []string{"http://127.0.0.1:1/varmq"}})
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		store.SetLogger(nil)
+	})
+	origAddr, origNoOpen := webAddr, webNoOpen
+	webAddr, webNoOpen = "127.0.0.1:0", true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // serve, then shut down at once
+	webCmd.SetContext(ctx)
+	var out bytes.Buffer
+	webCmd.SetOut(&out)
+	t.Cleanup(func() {
+		webAddr, webNoOpen = origAddr, origNoOpen
+		webCmd.SetContext(context.Background())
+		webCmd.SetOut(nil)
+	})
+	if err := webCmd.RunE(webCmd, nil); err != nil {
+		t.Fatalf("vartop web = %v; printed %s", err, out.String())
+	}
+
+	l, _ := lease(t, d.o.ctl)
+	w, err := store.OpenServer(d.o.dataDir, "prod", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := w.Append(l.Token, fleet.Tick{Snap: &fleet.Snapshot{At: time.Now()}})
+	_ = w.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", store.PathFor(d.o.dataDir, "prod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`UPDATE snapshots SET data = x'00ff' WHERE id = ?`, id)
+	_ = raw.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := store.OpenServer(d.o.dataDir, "prod", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, _, err := r.Window(time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "cannot be decoded") {
+		t.Errorf("logged %q, want the skipped snapshot reported", logged.String())
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -129,6 +130,7 @@ var webCmd = &cobra.Command{
 			return err
 		}
 		startCollecting(cmd.ErrOrStderr())
+		store.SetLogger(slog.Default()) // as web logs: through the log package, to stderr
 		src, release, err := webSource()
 		if err != nil {
 			return err
