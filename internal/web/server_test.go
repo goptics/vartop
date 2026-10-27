@@ -17,6 +17,7 @@ import (
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/store"
 )
 
 func TestListenRejectsNonLoopback(t *testing.T) {
@@ -863,6 +864,122 @@ func TestDetailChartIsTheHourByTime(t *testing.T) {
 	}
 	if !strings.Contains(chart, `<span class="peak">peak 3.0/s</span>`) {
 		t.Errorf("the chart's peak is not the hour's 3.0/s:\n%s", chart)
+	}
+}
+
+// otherConfig is the notice of a daemon collecting in another environment.
+const otherConfig = "The vartop daemon is collecting with another configuration — Start collector to use this one."
+
+// bannerOf is the #banner of a page.
+func bannerOf(body string) string {
+	_, banner, _ := strings.Cut(body, `<div id="banner"`)
+	banner, _, _ = strings.Cut(banner, "</div>")
+	return banner
+}
+
+// TestOtherConfigDaemon (R31): a daemon collecting in another environment
+// than vartop web's — another config file or KUBECONFIG — stores snapshots
+// of units this web must not send its token to. Every page says so, with
+// the Start collector button (which starts this environment's daemon) and
+// no current value; every action is refused with that notice, nothing sent
+// and nothing poked.
+func TestOtherConfigDaemon(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{DefaultServer: "multi", Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: urlsOf(aSrv, bSrv), Token: testToken},
+	}})
+	f.leaseConfig = "/b/vartop/config.json"
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	f.startDaemon()
+	f.waitFirst("multi")
+	pokes := f.pokes("multi")
+
+	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
+		for _, hx := range []bool{false, true} {
+			status, body := fetch(t, f.srv, path, hx)
+			banner := bannerOf(body)
+			if status != http.StatusOK || !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) ||
+				!strings.Contains(banner, `hx-post="/daemon/start"`) || !strings.Contains(banner, ">Start collector</button>") {
+				t.Errorf("GET %s (hx %v) = %d, want 200 with %q and the Start collector button in #banner:\n%s", path, hx, status, otherConfig, banner)
+			}
+		}
+	}
+	_, body := fetch(t, f.srv, "/?server=multi", false)
+	_, status, _ := strings.Cut(body, `<div id="status">`)
+	status, _, _ = strings.Cut(status, "</div>")
+	if !strings.Contains(status, `<span class="health" title="healthy / total instances">— instances</span>`) ||
+		!strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">3</td>`) {
+		t.Errorf("the page shows current values of the other environment's daemon:\n%s", body)
+	}
+
+	for _, a := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/workers/orders/actions/pause", multi()},
+		{"/workers/orders/actions/resume", multi()},
+		{"/workers/orders/actions/restart", multi()},
+		{"/workers/orders/actions/stop", multi("instance", "instance-1")},
+		{"/workers/orders/concurrency", multi("n", "3")},
+		{"/bulk/pause", multi("names", "orders")},
+		{"/bulk/resume", multi("names", "orders", "confirm", "1")},
+	} {
+		resp, body := post(t, f.srv, a.path, a.form, true)
+		if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+			t.Errorf("POST %s %v = %d %q, want 409 with %q", a.path, a.form, resp.StatusCode, body, otherConfig)
+		}
+	}
+	noPatches(t, fa, fb)
+	if got := f.pokes("multi"); got != pokes {
+		t.Errorf("pokes %d, want %d: the other environment's daemon was poked", got, pokes)
+	}
+
+	// Start collector is no action: it starts this environment's daemon.
+	resp, _ := post(t, f.srv, "/daemon/start", multi(), true)
+	if resp.StatusCode != http.StatusOK || f.started() != 1 {
+		t.Errorf("POST /daemon/start = %d, Start called %d times; want 200, once", resp.StatusCode, f.started())
+	}
+
+	// This environment's daemon: the page is as ever.
+	f.setEnvCheck(nil)
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if strings.Contains(body, "another configuration") || strings.Contains(bannerOf(body), "Start collector") || !strings.Contains(body, "2/2 instances") {
+		t.Errorf("a daemon of this environment: the page still refuses it:\n%s", body)
+	}
+}
+
+// TestOtherConfigWaiting (R31): before the first snapshot, a daemon of
+// another environment is said so too, with the Start collector button —
+// it may never collect this server. A lease gone stale is no daemon at
+// all, whatever its environment: it is not checked.
+func TestOtherConfigWaiting(t *testing.T) {
+	_, aSrv := fleettest.NewVarmq(t, "a", nil)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: []string{aSrv.URL}},
+	}})
+	f.leaseConfig = "/b/vartop/config.json"
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	f.claim()
+
+	status, body := fetch(t, f.srv, "/?server=multi", false)
+	banner := bannerOf(body)
+	if status != http.StatusOK || !strings.Contains(body, "Waiting for the first snapshot of multi…") ||
+		!strings.Contains(banner, otherConfig) || !strings.Contains(banner, ">Start collector</button>") {
+		t.Errorf("GET / = %d, want 200 waiting, with %q and the Start collector button:\n%s", status, otherConfig, body)
+	}
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+
+	f.release() // the daemon stopped
+	checks := f.envChecks()
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if strings.Contains(body, "another configuration") || !strings.Contains(bannerOf(body), ">Start collector</button>") {
+		t.Errorf("no daemon running: want the Start button without %q:\n%s", otherConfig, body)
+	}
+	if f.envChecks() != checks {
+		t.Error("a stale lease was checked for its environment")
 	}
 }
 

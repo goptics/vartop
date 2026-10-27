@@ -355,3 +355,26 @@ func TestWebLogsStoreNotices(t *testing.T) {
 		t.Errorf("logged %q, want the skipped snapshot reported", logged.String())
 	}
 }
+
+// TestWebSourceChecksEnv (R31): vartop web checks the daemon's lease
+// against its own environment — its config file and KUBECONFIG.
+func TestWebSourceChecksEnv(t *testing.T) {
+	isolate(t)
+	src, release, err := webSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if src.SameEnv == nil {
+		t.Fatal("webSource has no SameEnv: the web would act on another environment's daemon's units")
+	}
+	own := ownLease()
+	if !src.SameEnv(own) {
+		t.Error("SameEnv refuses this vartop's own environment")
+	}
+	other := own
+	other.ConfigPath = "/elsewhere/vartop/config.json"
+	if src.SameEnv(other) {
+		t.Error("SameEnv takes a daemon reading another config file for this environment's")
+	}
+}

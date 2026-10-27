@@ -35,7 +35,7 @@
   {{if and .Note (not .Stale)}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}
 </div>
 <div id="errors" role="alert"></div>
-<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}{{if .DaemonDown}}<form class="start" hx-post="/daemon/start" hx-target="#start-error" hx-swap="innerHTML" hx-sync="#page:replace">
+<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}{{if or .DaemonDown .OtherEnv}}<form class="start" hx-post="/daemon/start" hx-target="#start-error" hx-swap="innerHTML" hx-sync="#page:replace">
   {{template "server_field" .}}
   <button type="submit">Start collector</button> <span id="start-error" class="err" role="alert"></span>
 </form>{{end}}</div>

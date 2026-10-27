@@ -80,6 +80,10 @@ type Source struct {
 	Config  func() (*config.Config, error)
 	Control *store.Control // the daemon's lease, the servers' errors and pokes
 	Start   func() error   // starts the daemon (ensureDaemon); the "Start collector" button
+	// SameEnv reports whether a daemon's lease is of this vartop's
+	// environment: its config file and KUBECONFIG (R31). Nil: every lease
+	// is.
+	SameEnv func(store.Lease) bool
 }
 
 // handler serves the pages of every configured server from the store.
@@ -217,6 +221,10 @@ func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" 
 // noServersMsg is the notice of a config with no server at all.
 const noServersMsg = "No servers are configured"
 
+// otherConfigMsg is the notice of a daemon collecting in another
+// environment than vartop web's, whose button starts this one's.
+var otherConfigMsg = fleet.OtherConfigMsg("Start collector")
+
 // unknownLabelMsg is the notice of a label no snapshot of the hour has.
 func unknownLabelMsg(label, server string, n fleet.Noun) string {
 	return label + " is not " + n.Article + " " + n.One + " of " + server
@@ -332,14 +340,21 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	snaps = feed.Snapshots()
 	latest := latestOf(snaps)
 	fill(&p, snaps)
+	running, other := h.daemon()
+	if other {
+		// Another environment's snapshots: no current value, and no
+		// action (see bind) until this environment's daemon collects.
+		p.Stale, p.OtherEnv = otherConfigMsg, true
+	}
 	switch now := time.Now(); {
 	case latest == nil:
 		p.Waiting = fleet.WaitingMsg(p.Server)
-		p.DaemonDown = !h.daemonRunning()
-		if msg := h.serverErr(p.Server, nil); msg != "" && !p.DaemonDown {
+		p.DaemonDown = !running
+		if msg := h.serverErr(p.Server, nil); msg != "" && running && !other {
 			p.Banner = p.Server + ": " + msg
 		}
 		return p, nil, false
+	case other:
 	case fleet.Stale(latest, interval, now):
 		p.Stale, p.DaemonDown = h.staleMsg(p.Server, latest, now)
 	case latest.Err != "":
@@ -407,8 +422,20 @@ func labelOf(srv *config.Server, value string) string {
 // daemonRunning reports whether a daemon holds a fresh lease. A lease that
 // cannot be read counts as held: nothing says the daemon is down.
 func (h *handler) daemonRunning() bool {
-	_, fresh, err := h.src.Control.Lease()
-	return fresh || err != nil
+	running, _ := h.daemon()
+	return running
+}
+
+// daemon reports whether a daemon holds a fresh lease (see daemonRunning),
+// and whether that daemon collects in another environment than this
+// vartop's (Source.SameEnv, R31). A stale lease is no daemon, whatever its
+// environment, and one that cannot be read is none other.
+func (h *handler) daemon() (running, otherEnv bool) {
+	l, fresh, err := h.src.Control.Lease()
+	if err != nil {
+		return true, false
+	}
+	return fresh, fresh && h.src.SameEnv != nil && !h.src.SameEnv(l)
 }
 
 // serverErr is the collection error the daemon recorded for the server

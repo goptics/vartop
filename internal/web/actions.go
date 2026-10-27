@@ -45,9 +45,10 @@ type target struct {
 // configured server whose newest snapshot is fresh and has the unit the
 // form names. A server without a fresh snapshot is poked, and given up to
 // fleet.SettleWait to take one, unless no daemon runs to answer. Otherwise
-// it answers 409 with the notice why — not configured, waiting for the
-// first snapshot, stale, the unit gone or unknown, the form out of date —
-// and returns false; nothing may reach varmq then.
+// it answers 409 with the notice why — not configured, the daemon
+// collecting in another environment, waiting for the first snapshot,
+// stale, the unit gone or unknown, the form out of date — and returns
+// false; nothing may reach varmq then.
 //
 // The unit parameter is taken as it is, unlike a page's (see labelOf): a
 // form from before labels, still open in a tab, names its unit by key,
@@ -64,6 +65,12 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	t := &target{key: serverOf(cfg, r.PostFormValue("server"))}
 	if t.srv = cfg.Servers[t.key]; t.srv == nil {
 		conflict(w, fleet.NotConfiguredMsg(t.key))
+		return nil, false
+	}
+	if _, other := h.daemon(); other {
+		// Its snapshots name units of another environment: this config's
+		// token must not reach them. Nor is that daemon poked.
+		conflict(w, otherConfigMsg)
 		return nil, false
 	}
 	t.noun = fleet.NounFor(t.srv)

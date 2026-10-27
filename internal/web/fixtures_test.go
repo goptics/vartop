@@ -81,6 +81,10 @@ type fixture struct {
 	// startDaemon.
 	build func(*config.Server) (*api.Pool, error)
 
+	// leaseConfig is the config path in the lease of the daemon
+	// startDaemon runs, or that claim takes. Set it before either.
+	leaseConfig string
+
 	mu       sync.Mutex
 	cfg      *config.Config // what the daemon and the UI read; replaced whole, never changed
 	startErr error          // what Source.Start returns
@@ -88,6 +92,8 @@ type fixture struct {
 	run      *daemonRun     // the daemon running, nil if none
 	token    string         // the lease the test holds, "" if none
 	feeds    map[string]*store.Feed
+	envCheck func(store.Lease) bool // Source.SameEnv's answer; every lease is of this environment when nil
+	envCalls int                    // Source.SameEnv calls
 }
 
 // newFixture serves the web UI over a fresh data dir for cfg, its servers
@@ -105,7 +111,7 @@ func newFixture(t *testing.T, cfg *config.Config) *fixture {
 	t.Cleanup(func() { _ = ctl.Close() })
 	f.ctl = ctl
 
-	h, err := newHandler(Source{DataDir: f.dir, Config: f.config, Control: ctl, Start: f.start})
+	h, err := newHandler(Source{DataDir: f.dir, Config: f.config, Control: ctl, Start: f.start, SameEnv: f.sameEnv})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +172,33 @@ func (f *fixture) start() error {
 	return f.startErr
 }
 
+// sameEnv is Source.SameEnv: what the test set (see setEnvCheck).
+func (f *fixture) sameEnv(l store.Lease) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.envCalls++
+	return f.envCheck == nil || f.envCheck(l)
+}
+
+// setEnvCheck sets what Source.SameEnv answers.
+func (f *fixture) setEnvCheck(check func(store.Lease) bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.envCheck = check
+}
+
+// envChecks is how many times Source.SameEnv was called.
+func (f *fixture) envChecks() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.envCalls
+}
+
+// lease is the lease of the daemon the fixture runs, or of the test.
+func (f *fixture) lease() store.Lease {
+	return store.Lease{PID: os.Getpid(), Build: "test", ConfigPath: f.leaseConfig}
+}
+
 // started is how many times Source.Start was called.
 func (f *fixture) started() int {
 	f.mu.Lock()
@@ -189,7 +222,7 @@ func (f *fixture) startDaemon() {
 		DataDir:   f.dir,
 		Config:    func() (*config.Config, string, error) { cfg, err := f.config(); return cfg, "", err },
 		BuildPool: f.build,
-		Lease:     store.Lease{PID: os.Getpid(), Build: "test"},
+		Lease:     f.lease(),
 		Log:       slog.New(slog.DiscardHandler),
 	}
 	go func() {
@@ -225,7 +258,7 @@ func (f *fixture) stopDaemon() {
 // snapshots (see write).
 func (f *fixture) claim() {
 	f.t.Helper()
-	token, ok, err := f.ctl.Claim(store.Lease{PID: os.Getpid(), Build: "test"}, time.Now())
+	token, ok, err := f.ctl.Claim(f.lease(), time.Now())
 	if err != nil || !ok {
 		f.t.Fatalf("Claim = %v, %v", ok, err)
 	}

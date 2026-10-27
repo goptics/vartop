@@ -105,8 +105,9 @@ func serveWeb(ctx context.Context, src web.Source, key, addr string, out io.Writ
 
 // webSource is what vartop web reads and acts through: the store of this
 // vartop's environment, the config read again on every request (the
-// daemon follows its changes too), and ensureDaemon to start the daemon.
-// release closes it.
+// daemon follows its changes too), ensureDaemon to start the daemon, and
+// the check of a daemon's lease against this environment (R31). release
+// closes it.
 func webSource() (src web.Source, release func(), err error) {
 	dataDir, err := store.DataDir()
 	if err != nil {
@@ -116,7 +117,7 @@ func webSource() (src web.Source, release func(), err error) {
 	if err != nil {
 		return src, nil, err
 	}
-	return web.Source{DataDir: dataDir, Config: config.Load, Control: ctl, Start: ensureLocalDaemon},
+	return web.Source{DataDir: dataDir, Config: config.Load, Control: ctl, Start: ensureLocalDaemon, SameEnv: sameEnvAsOwn()},
 		func() { _ = ctl.Close() }, nil
 }
 

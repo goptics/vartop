@@ -51,6 +51,16 @@ func GoneLabelMsg(label string, n Noun) string {
 	return n.Cap() + " " + label + " is no longer reported"
 }
 
+// OtherConfigMsg is the notice of a daemon collecting in another
+// environment than the reader's — another config file or KUBECONFIG — whose
+// snapshots the reader shows no current value of and acts on none of
+// (R31). start says how the reader starts a daemon of its own: "Start
+// collector" in vartop web, which then reads "… — Start collector to use
+// this one."
+func OtherConfigMsg(start string) string {
+	return "The vartop daemon is collecting with another configuration — " + start + " to use this one."
+}
+
 // StaleMsg says how old latest, the stale newest snapshot of the server
 // keyed key, is at now, and why there is none newer: no daemon is running
 // (down), or the server's collection error — srvErr, the one the daemon
