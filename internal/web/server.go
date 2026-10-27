@@ -543,7 +543,9 @@ func (h *handler) render(w http.ResponseWriter, set string, status int, p Page) 
 		return
 	}
 	if p.reload {
-		w.Header().Set("HX-Refresh", "true")
+		// The page asked for, not a refresh: after a picker change the
+		// browser's URL is still the page picked from.
+		w.Header().Set("HX-Redirect", p.SelfURL)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

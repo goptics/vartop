@@ -19,9 +19,8 @@
     <a href="{{pageURL "/" .Server .Noun.Param .Pod}}"{{if .Dashboard}} aria-current="page"{{end}}>Dashboard</a>
     <a href="{{pageURL "/grid" .Server .Noun.Param .Pod}}"{{if .Grid}} aria-current="page"{{end}}>{{.Noun.Cap}} grid</a>
   </nav>
-  {{if .Servers}}<form class="pick" action="/" method="get">
+  {{if .Servers}}<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
     <label>Server <select name="server">{{if .Unconfigured}}<option value="{{.Server}}" selected disabled>{{.Server}}</option>{{end}}{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
-    <button type="submit">Show</button>
   </form>{{end}}
   {{if .Pods}}<form class="pick" hx-get="{{pathOf .SelfURL}}" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
     {{template "server_field" .}}

@@ -795,15 +795,17 @@ func TestWaitingForFirstSnapshot(t *testing.T) {
 	if strings.Contains(body, `id="poller"`) {
 		t.Error("the waiting page polls #live, which would never bring the header")
 	}
-	// htmx (a poll, the unit picker) would swap in only part of the page:
-	// the browser reloads it instead, and gets the page above.
+	// htmx (a poll, the server or unit picker) would swap in only part of
+	// the page: the browser loads the page asked for instead, whole. Not a
+	// reload: after a picker change that would be the page picked from.
 	req, err := http.NewRequest(http.MethodGet, f.srv.URL+"/?server=multi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("HX-Request", "true")
-	if resp, _ := send(t, f.srv, req); resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Refresh") != "true" {
-		t.Errorf("htmx GET before the first snapshot = %d (HX-Refresh %q), want 200 reloading the page", resp.StatusCode, resp.Header.Get("HX-Refresh"))
+	if resp, _ := send(t, f.srv, req); resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Redirect") != "/?server=multi" || resp.Header.Get("HX-Refresh") != "" {
+		t.Errorf("htmx GET before the first snapshot = %d (HX-Redirect %q, HX-Refresh %q), want 200 sending the browser to /?server=multi",
+			resp.StatusCode, resp.Header.Get("HX-Redirect"), resp.Header.Get("HX-Refresh"))
 	}
 	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+copy+`</p>` {

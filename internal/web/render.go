@@ -68,8 +68,8 @@ type Page struct {
 	Gone string
 
 	// reload: an htmx request got a waiting page, which htmx would swap
-	// in only part of; the response has the browser reload it instead
-	// (HX-Refresh).
+	// in only part of; the response has the browser load it whole instead
+	// (HX-Redirect to SelfURL).
 	reload bool
 
 	// At most one is set; none while waiting or when the server or unit

@@ -263,7 +263,7 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 		"title=\"a: Running\nb: Running\"",
 		`hx-post="/bulk/pause"`,
 		`hx-post="/bulk/resume"`,
-		`<form class="pick" action="/" method="get">`,
+		`<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">`,
 		`<select name="server">`,
 		"All pods (merged)",
 	} {
@@ -278,11 +278,12 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 	if !strings.Contains(body, "<title>half</title>") {
 		t.Error("point title missing")
 	}
-	// The server picker is a plain form: picking a server loads its page.
-	_, picker, _ := strings.Cut(body, `<form class="pick" action="/" method="get">`)
+	// Picking a server loads its page at once, as picking a unit does: no
+	// button to press after the choice.
+	_, picker, _ := strings.Cut(body, `<form class="pick" action="/" method="get"`)
 	picker, _, _ = strings.Cut(picker, "</form>")
-	if strings.Contains(picker, "hx-") || !strings.Contains(picker, `<button type="submit">Show</button>`) {
-		t.Errorf("the server picker should be a plain GET form with a submit button:\n%s", picker)
+	if strings.Contains(picker, "<button") {
+		t.Errorf("the server picker should apply on change, with no button:\n%s", picker)
 	}
 	// Bulk checkboxes belong to the bulk form that sits outside #live.
 	if !strings.Contains(body, `form="bulk"`) {
