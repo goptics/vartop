@@ -365,7 +365,7 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}
 	if set, p, ok := livePage(r, t.key, t.noun, t.srv.PollInterval(), snaps, t.label, worker, stale); ok {
 		if p.Detail != nil {
-			h.dayCharts(&p, p.Detail.Name, latestOf(snaps).At)
+			h.dayCharts(&p, t.feed, p.Detail.Name, latestOf(snaps).At)
 		}
 		frags = append(frags, fragment{set, "live_oob", p})
 	}

@@ -102,22 +102,28 @@ func TestDaySpansTheDay(t *testing.T) {
 }
 
 // TestDayPartialAndNoData: a bucket in which a unit was down at some poll
-// is partial, and says how few answered; a poll with no rate at all
-// counts toward that, not toward the average.
+// is partial, and says how few answered; a poll with no rate counts toward
+// that, not toward the average. A poll where no unit answered names no
+// worker, and adds nothing.
 func TestDayPartialAndNoData(t *testing.T) {
 	d := NewDay("orders")
 	d.Add(orders(dayT0, [2]float64{2, 0}, [2]float64{2, 0}))
 	down := orders(dayT0.Add(time.Minute), [2]float64{6, 0}, [2]float64{0, 0})
 	down.Pods[1] = PodSnapshot{Key: "instance-2", Via: "instance-2", Label: "instance-2", Err: "connection refused"}
 	d.Add(down)
-	none := orders(dayT0.Add(2 * time.Minute))
+	starting := orders(dayT0.Add(2*time.Minute), [2]float64{0, 0}, [2]float64{0, 0})
+	for _, u := range starting.Pods {
+		u.Workers["orders"].RateOK = false // the first poll after a restart: no rate yet
+	}
+	d.Add(starting)
+	none := orders(dayT0.Add(3 * time.Minute))
 	none.Pods = []PodSnapshot{{Key: "instance-1", Via: "instance-1", Label: "instance-1", Err: "connection refused"}}
 	d.Add(none)
 
 	pts, _ := d.Rates("", false, dayT0, NounFor(nil))
 	p := last(t, pts)
-	if p.V != 5 || !p.Partial || !strings.HasSuffix(p.Title, "· 0/1 instances") {
-		t.Errorf("point = %v partial %v %q; want avg 5 of the polls with a rate, partial, 0/1 instances at the worst poll", p.V, p.Partial, p.Title)
+	if p.V != 5 || !p.Partial || !strings.HasSuffix(p.Title, "· 0/2 instances") {
+		t.Errorf("point = %v partial %v %q; want avg 5 of the polls with a rate, partial, 0/2 instances at the poll with none", p.V, p.Partial, p.Title)
 	}
 }
 
@@ -144,5 +150,57 @@ func TestDayOtherWorkers(t *testing.T) {
 	d.Add(orders(dayT0, [2]float64{3, 1}))
 	if pts, peak := d.Rates("", false, dayT0, NounFor(nil)); !last(t, pts).Gap || peak != 0 {
 		t.Errorf("emails from orders' snapshots = %+v, peak %v; want a gap", last(t, pts), peak)
+	}
+}
+
+// TestDayPoints: what one snapshot adds to each worker's day — merged and
+// per label, its rates and how many units contributed of those expected —
+// and nothing for a view no unit is expected in.
+func TestDayPoints(t *testing.T) {
+	s := orders(dayT0, [2]float64{1, 0.5}, [2]float64{3, 0})
+	s.Pods[1].Workers["emails"] = rated(smp("Running", 1, 0, 1, 0), 2, 0)
+	s.Pods = append(s.Pods, PodSnapshot{Key: "instance-3", Via: "instance-3", Label: "instance-3", Err: "connection refused"})
+
+	got := map[string]DayPoint{}
+	for _, p := range DayPoints(s) {
+		got[p.Worker+"/"+p.Label] = p
+	}
+	want := map[string]DayPoint{
+		"orders/":           {Worker: "orders", Completed: 4, Failed: 0.5, Contributing: 2, Expected: 3},
+		"orders/instance-1": {Worker: "orders", Label: "instance-1", Completed: 1, Failed: 0.5, Contributing: 1, Expected: 1},
+		"orders/instance-2": {Worker: "orders", Label: "instance-2", Completed: 3, Contributing: 1, Expected: 1},
+		"orders/instance-3": {Worker: "orders", Label: "instance-3", Expected: 1},
+		"emails/":           {Worker: "emails", Completed: 2, Contributing: 1, Expected: 2},
+		"emails/instance-2": {Worker: "emails", Label: "instance-2", Completed: 2, Contributing: 1, Expected: 1},
+		"emails/instance-3": {Worker: "emails", Label: "instance-3", Expected: 1},
+	}
+	if len(got) != len(want) {
+		t.Errorf("DayPoints = %+v, want %d points (none for emails on instance-1, which lacks it)", got, len(want))
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s = %+v, want %+v", k, got[k], w)
+		}
+	}
+}
+
+// TestDayPut: a day loaded from stored bucket stats charts as one summed
+// from the snapshots.
+func TestDayPut(t *testing.T) {
+	summed := NewDay("orders")
+	loaded := NewDay("orders")
+	for i, r := range []float64{2, 4, 6} {
+		summed.Add(orders(dayT0.Add(time.Duration(i)*time.Minute), [2]float64{r, 1}))
+	}
+	var merged DayStat
+	for _, r := range []float64{2, 4, 6} {
+		merged.Add(DayPoint{Worker: "orders", Completed: r, Failed: 1, Contributing: 1, Expected: 1})
+	}
+	loaded.Put(dayT0, "", merged)
+	end := dayT0.Add(2 * time.Minute)
+	a, pa := summed.Rates("", false, end, NounFor(nil))
+	b, pb := loaded.Rates("", false, end, NounFor(nil))
+	if last(t, a) != last(t, b) || pa != pb {
+		t.Errorf("loaded = %+v (peak %v), summed = %+v (peak %v); want the same", last(t, b), pb, last(t, a), pa)
 	}
 }

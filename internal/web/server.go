@@ -91,7 +91,6 @@ type handler struct {
 	src   Source
 	tmpl  map[string]*template.Template
 	feeds *feedCache
-	days  *dayCache
 	logf  func(format string, args ...any) // where a recovered panic is logged
 
 	mu   sync.Mutex
@@ -117,7 +116,7 @@ func newHandler(src Source) (*handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &handler{src: src, tmpl: tmpl, feeds: newFeedCache(src.DataDir), days: newDayCache(src.DataDir), logf: log.Printf}, nil
+	return &handler{src: src, tmpl: tmpl, feeds: newFeedCache(src.DataDir), logf: log.Printf}, nil
 }
 
 // routes is h behind the guards (see NewHandler).
@@ -139,7 +138,7 @@ func (h *handler) routes(hosts []string) http.Handler {
 }
 
 // close closes the server files h reads.
-func (h *handler) close() { h.feeds.close(); h.days.closeAll() }
+func (h *handler) close() { h.feeds.close() }
 
 // allowHosts refuses a request whose Host is not one of hosts, ignoring
 // case. It guards GETs too: a DNS-rebinding page reaches loopback under its
@@ -268,7 +267,7 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 			// p says why; no unit's data is shown under the gone one's label.
 		} else if d, found := fleet.BuildDetail(snaps, p.Pod, name, 0, p.Noun); found {
 			p.Detail = &d
-			h.dayCharts(&p, name, latestOf(snaps).At)
+			h.dayCharts(&p, h.feeds.get(p.Server, p.Interval(), time.Now()), name, latestOf(snaps).At)
 		} else {
 			where := "any " + p.Noun.One
 			if p.Pod != "" {

@@ -336,7 +336,17 @@ type writer struct {
 	unsaved    labelled          // the newest label state a failed write did not save
 	errSet     bool              // err is recorded in control.db
 	err        string            // the server's error recorded last
+	unfilled   bool              // db may hold snapshots from before its day buckets (see fill)
 }
+
+const (
+	// fillEvery is the pause between two batches of fill, which leave the
+	// ticks room between them.
+	fillEvery = 50 * time.Millisecond
+	// fillBatch is how many snapshots one batch of fill sums: one short
+	// transaction, even for a large fleet.
+	fillBatch = 50
+)
 
 // run writes the queued ticks, and prunes the file when asked, until ctx
 // is cancelled; then it closes the file.
@@ -346,18 +356,40 @@ func (w *writer) run(ctx context.Context) {
 			_ = w.db.Close()
 		}
 	}()
+	w.unfilled = true
+	fill := time.NewTicker(fillEvery)
+	defer fill.Stop()
 	for {
+		var filling <-chan time.Time
+		if w.unfilled && w.db != nil {
+			filling = fill.C
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-w.c.prune:
 			w.prune(now)
+			w.unfilled = true // a fill that failed, or a file opened anew
 		case q := <-w.c.queue:
 			if !w.write(q) {
 				return
 			}
+		case <-filling:
+			w.fill()
 		}
 	}
+}
+
+// fill sums a batch of the snapshots the file holds from before it had
+// day buckets into them (store.FillBuckets), until there are none left:
+// the 24h charts then show the history stored by an older vartop too. A
+// failure stops it until the next prune, which starts it again.
+func (w *writer) fill() {
+	more, err := w.db.FillBuckets(w.c.d.token, w.c.d.o.Now().Add(-fleet.DayWindow), fillBatch)
+	if w.c.seen.changed("fill", errString(err)) && err != nil && !errors.Is(err, store.ErrLeaseLost) {
+		w.c.d.o.Log.Warn("cannot fill the day buckets", "server", w.c.name, "err", err)
+	}
+	w.unfilled = more && err == nil
 }
 
 // prune prunes the file at now. A file found corrupt is set aside, and a

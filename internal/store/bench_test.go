@@ -2,8 +2,10 @@ package store
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 
@@ -146,6 +148,59 @@ func BenchmarkWindowLoad(b *testing.B) {
 		got, _, err := r.Window(since)
 		if err != nil || len(got) != len(snaps) {
 			b.Fatalf("Window = %d snapshots, %v; want %d", len(got), err, len(snaps))
+		}
+	}
+}
+
+// BenchmarkAppend measures one Append of a 10 × 20 server's snapshot, its
+// day buckets included (20 workers × 11 views upserted).
+func BenchmarkAppend(b *testing.B) {
+	snaps := fleetTicks(b.N, 10, 20, 5*time.Second)
+	dir := b.TempDir()
+	_, token := claimed(b, dir)
+	db := newWriter(b, dir, "prod")
+	b.ResetTimer()
+	for _, s := range snaps {
+		if _, err := db.Append(token, fleet.Tick{Snap: s}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkDayRead measures reading a worker's full day of buckets of a
+// 10 × 20 server, what a 24h chart reads: one snapshot per bucket stored,
+// which fills every bucket as a day of polls would.
+func BenchmarkDayRead(b *testing.B) {
+	snaps := fleetTicks(int(fleet.DayWindow/fleet.DayBucket), 10, 20, fleet.DayBucket)
+	dir := b.TempDir()
+	_, token := claimed(b, dir)
+	db := newWriter(b, dir, "prod")
+	for _, s := range snaps {
+		if _, err := db.Append(token, fleet.Tick{Snap: s}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	r, err := OpenServer(dir, "prod", false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer r.Close()
+	var worker string
+	for _, u := range snaps[0].Pods {
+		if names := slices.Sorted(maps.Keys(u.Workers)); len(names) > 0 {
+			worker = names[0]
+			break
+		}
+	}
+	since := snaps[0].At
+	b.ResetTimer()
+	for range b.N {
+		d, err := r.Day(worker, since)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if pts, _ := d.Rates("", false, snaps[len(snaps)-1].At, fleet.NounFor(nil)); len(pts) == 0 {
+			b.Fatal("no points")
 		}
 	}
 }

@@ -792,3 +792,58 @@ func TestFanOutPanicIsolated(t *testing.T) {
 		})
 	}
 }
+
+// TestFillsStoredHistoryIntoBuckets: a server file whose snapshots were
+// stored before it had day buckets (by an older vartop) gets them filled
+// in the background by the collector, so that its 24h charts show the
+// history already stored.
+func TestFillsStoredHistoryIntoBuckets(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", nil)
+	h := newHarness(t)
+
+	// An older vartop's file: a snapshot two hours old, no buckets.
+	ctl := h.control()
+	token, ok, err := ctl.Claim(store.Lease{PID: 1}, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	sm := &fleet.Sample{At: old, CompletedRate: 7, RateOK: true}
+	sm.Name, sm.Status = "legacy", "running"
+	w, err := store.OpenServer(h.dir, "a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Append(token, fleet.Tick{Snap: &fleet.Snapshot{At: old, Pods: []fleet.PodSnapshot{
+		{Key: "http://x", Via: "http://x", Label: "instance-1", Workers: map[string]*fleet.Sample{"legacy": sm}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	if err := ctl.Release(token); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", store.PathFor(h.dir, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP TABLE buckets; DELETE FROM meta WHERE k IN ('fill_to', 'filled')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+
+	h.writeConfig(oneServer(srv.URL))
+	h.start(1)
+	fleettest.WaitUntil(t, 5*time.Second, "the stored snapshot summed into its bucket", func() bool {
+		r, err := store.OpenServer(h.dir, "a", false)
+		if err != nil {
+			return false
+		}
+		defer r.Close()
+		d, err := r.Day("legacy", time.Now().Add(-fleet.DayWindow))
+		if err != nil {
+			return false
+		}
+		_, peak := d.Rates("", false, time.Now(), fleet.NounFor(nil))
+		return peak == 7
+	})
+}

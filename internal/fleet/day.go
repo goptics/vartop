@@ -2,6 +2,8 @@ package fleet
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 )
 
@@ -12,83 +14,118 @@ const (
 	DayBucket = 5 * time.Minute
 )
 
-// Day is one worker's completed/s and failed/s per DayBucket, merged and
-// per unit label, summed from the snapshots added to it: the day kept in
-// buckets, not in snapshots, which a day of would be too many to hold. It
-// is not safe for concurrent use.
+// DayPoint is what one snapshot adds to one worker's day, merged (Label
+// "") or of the unit labelled Label: its completed/s and failed/s, and how
+// many of the units expected to give a rate did (see the file comment).
+type DayPoint struct {
+	Worker, Label          string
+	Completed, Failed      float64
+	Contributing, Expected int
+}
+
+// DayPoints is what s adds to the day of each worker on it: a point merged
+// and one per unit label (its first unit's, as PodsOf takes), none for a
+// view no unit is expected in. The workers are those its healthy units
+// list: a snapshot no unit answered names none, and adds nothing.
+func DayPoints(s *Snapshot) []DayPoint {
+	workers := map[string]bool{}
+	for _, p := range s.Pods {
+		for name := range p.Workers {
+			workers[name] = true
+		}
+		for _, name := range p.Unreached {
+			workers[name] = true
+		}
+	}
+	var out []DayPoint
+	for _, name := range slices.Sorted(maps.Keys(workers)) {
+		merged := DayPoint{Worker: name}
+		seen := make(map[string]bool, len(s.Pods))
+		for _, p := range s.Pods {
+			c, n, e := unitRate(p, name, completedRate)
+			f, _, _ := unitRate(p, name, failedRate)
+			merged.Completed, merged.Failed = merged.Completed+c, merged.Failed+f
+			merged.Contributing, merged.Expected = merged.Contributing+n, merged.Expected+e
+			if seen[p.Label] || e == 0 {
+				seen[p.Label] = true
+				continue
+			}
+			seen[p.Label] = true
+			out = append(out, DayPoint{Worker: name, Label: p.Label, Completed: c, Failed: f, Contributing: n, Expected: e})
+		}
+		if merged.Expected > 0 {
+			out = append(out, merged)
+		}
+	}
+	return out
+}
+
+// DayStat sums one view's points over a bucket.
+type DayStat struct {
+	Polls                     int     // the points with a rate
+	Completed, Failed         float64 // their sums
+	PeakCompleted, PeakFailed float64 // and highest
+	// Fewest of Of units expected contributed at the bucket's worst poll,
+	// counting those with no rate; Of is 0 before the first point.
+	Fewest, Of int
+}
+
+// Add sums p, a point with an expected unit, into st.
+func (st *DayStat) Add(p DayPoint) {
+	if st.Of == 0 || p.Contributing < st.Fewest {
+		st.Fewest, st.Of = p.Contributing, p.Expected
+	}
+	if p.Contributing == 0 {
+		return
+	}
+	st.Polls++
+	st.Completed += p.Completed
+	st.Failed += p.Failed
+	st.PeakCompleted, st.PeakFailed = max(st.PeakCompleted, p.Completed), max(st.PeakFailed, p.Failed)
+}
+
+// Day is one worker's DayStats per DayBucket, merged and per unit label:
+// the day kept in buckets, not in snapshots, which a day of would be too
+// many to hold. It is not safe for concurrent use.
 type Day struct {
 	worker  string
-	buckets map[int64]*dayBucket // by the bucket's start, unix seconds
-}
-
-// dayBucket is one DayBucket of a Day: the merged view's sums, and each
-// label's.
-type dayBucket struct {
-	merged dayStat
-	units  map[string]*dayStat
-}
-
-// dayStat sums the rate points of one view over a bucket.
-type dayStat struct {
-	polls             int     // the points with a rate
-	completed, failed float64 // their sums
-	peakC, peakF      float64 // and highest
-	// fewest of expected units contributed at the bucket's worst poll,
-	// counting those with no rate at all; seen once one poll expected one.
-	fewest, of int
-	seen       bool
+	buckets map[int64]map[string]*DayStat // by the bucket's start (unix seconds), then label
 }
 
 // NewDay returns an empty Day of worker.
 func NewDay(worker string) *Day {
-	return &Day{worker: worker, buckets: make(map[int64]*dayBucket)}
+	return &Day{worker: worker, buckets: make(map[int64]map[string]*DayStat)}
 }
 
-// Add sums s into its bucket: the units' rates merged, and each label's
-// (its first unit's, as PodsOf takes). Snapshots may come in any order.
+// Add sums s's points of the Day's worker into s's bucket. Snapshots may
+// come in any order.
 func (d *Day) Add(s *Snapshot) {
-	key := s.At.Truncate(DayBucket).Unix()
-	b := d.buckets[key]
-	if b == nil {
-		b = &dayBucket{units: make(map[string]*dayStat)}
-		d.buckets[key] = b
-	}
-	var c, f float64
-	var contributing, expected int
-	seen := make(map[string]bool, len(s.Pods))
-	for _, p := range s.Pods {
-		uc, n, e := unitRate(p, d.worker, completedRate)
-		uf, _, _ := unitRate(p, d.worker, failedRate)
-		c, f, contributing, expected = c+uc, f+uf, contributing+n, expected+e
-		if seen[p.Label] {
-			continue // PodsOf takes the first
+	start := s.At.Truncate(DayBucket)
+	for _, p := range DayPoints(s) {
+		if p.Worker == d.worker {
+			d.stat(start, p.Label).Add(p)
 		}
-		seen[p.Label] = true
-		st := b.units[p.Label]
-		if st == nil {
-			st = &dayStat{}
-			b.units[p.Label] = st
-		}
-		st.add(uc, uf, n, e)
 	}
-	b.merged.add(c, f, contributing, expected)
 }
 
-// add sums one rate point of contributing of the expected units.
-func (st *dayStat) add(c, f float64, contributing, expected int) {
-	if expected == 0 {
-		return // the worker is not on these units
+// Put sets the stats of the view label ("" merged) in the bucket starting
+// at start: a day read back from where they were stored.
+func (d *Day) Put(start time.Time, label string, st DayStat) { *d.stat(start, label) = st }
+
+// stat is the bucket starting at start's stats of the view label, made
+// when missing.
+func (d *Day) stat(start time.Time, label string) *DayStat {
+	b := d.buckets[start.Unix()]
+	if b == nil {
+		b = make(map[string]*DayStat)
+		d.buckets[start.Unix()] = b
 	}
-	if !st.seen || contributing < st.fewest {
-		st.fewest, st.of, st.seen = contributing, expected, true
+	st := b[label]
+	if st == nil {
+		st = &DayStat{}
+		b[label] = st
 	}
-	if contributing == 0 {
-		return
-	}
-	st.polls++
-	st.completed += c
-	st.failed += f
-	st.peakC, st.peakF = max(st.peakC, c), max(st.peakF, f)
+	return st
 }
 
 // Prune drops the buckets that end at or before cut.
@@ -108,35 +145,23 @@ func (d *Day) Rates(label string, failed bool, end time.Time, n Noun) (pts []Poi
 	last := end.Truncate(DayBucket)
 	for at := last.Add(-DayWindow); !at.After(last); at = at.Add(DayBucket) {
 		span := at.Local().Format("15:04") + "–" + at.Add(DayBucket).Local().Format("15:04")
-		st := d.stat(at.Unix(), label)
-		if st == nil || st.polls == 0 {
+		st := d.buckets[at.Unix()][label]
+		if st == nil || st.Polls == 0 {
 			pts = append(pts, Point{At: at, Gap: true, Title: span + " · no data"})
 			continue
 		}
-		sum, top := st.completed, st.peakC
+		sum, top := st.Completed, st.PeakCompleted
 		if failed {
-			sum, top = st.failed, st.peakF
+			sum, top = st.Failed, st.PeakFailed
 		}
-		v := sum / float64(st.polls)
+		v := sum / float64(st.Polls)
 		peak = max(peak, top)
 		pts = append(pts, Point{
 			At:      at,
 			V:       v,
-			Partial: st.fewest < st.of,
-			Title:   fmt.Sprintf("%s · avg %.1f/s · peak %.1f/s · %d/%d %s", span, v, top, st.fewest, st.of, n.Many),
+			Partial: st.Fewest < st.Of,
+			Title:   fmt.Sprintf("%s · avg %.1f/s · peak %.1f/s · %d/%d %s", span, v, top, st.Fewest, st.Of, n.Many),
 		})
 	}
 	return pts, peak
-}
-
-// stat is the bucket at key's sums of the view label ("" merged), or nil.
-func (d *Day) stat(key int64, label string) *dayStat {
-	b := d.buckets[key]
-	switch {
-	case b == nil:
-		return nil
-	case label == "":
-		return &b.merged
-	}
-	return b.units[label]
 }

@@ -192,15 +192,30 @@ func (s *ServerDB) init() error {
 		}
 	case m.version != StoreVersion:
 	default:
+		// A file from before the buckets: they are made, and the
+		// snapshots stored so far left for FillBuckets.
+		var n int
+		if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'buckets'`).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := tx.Exec(bucketsSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO meta (k, v)
+				VALUES ('fill_to', (SELECT coalesce(max(id), 0) FROM snapshots)), ('filled', 0)`); err != nil {
+				return err
+			}
+		}
 		return tx.Commit()
 	}
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS snapshots`); err != nil {
+	if _, err := tx.Exec(`DROP TABLE IF EXISTS snapshots; DROP TABLE IF EXISTS buckets`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(snapshotsSchema); err != nil {
+	if _, err := tx.Exec(snapshotsSchema + bucketsSchema); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO meta (k, v) VALUES ('key', ?), ('version', ?), ('epoch', ?)`,
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO meta (k, v) VALUES ('key', ?), ('version', ?), ('epoch', ?), ('fill_to', 0), ('filled', 0)`,
 		s.key, StoreVersion, time.Now().UnixNano()); err != nil {
 		return err
 	}
@@ -322,20 +337,17 @@ func (s *ServerDB) Append(token string, t fleet.Tick) (id int64, err error) {
 		return 0, s.blame(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var holder string
-	switch err := tx.QueryRow(`SELECT token FROM ctl.daemon WHERE id = 1`).Scan(&holder); {
-	case errors.Is(err, sql.ErrNoRows):
-		return 0, ErrLeaseLost
-	case err != nil:
-		return 0, ctlErr(err)
-	case holder == "" || holder != token:
-		return 0, ErrLeaseLost
+	if err := checkLease(tx, token); err != nil {
+		return 0, err
 	}
 	res, err := tx.Exec(`INSERT INTO snapshots (at, data) VALUES (?, ?)`, t.Snap.At.UnixMilli(), data)
 	if err != nil {
 		return 0, err
 	}
 	if id, err = res.LastInsertId(); err != nil {
+		return 0, err
+	}
+	if err := addBuckets(tx, t.Snap); err != nil {
 		return 0, err
 	}
 	if labels != nil {
@@ -369,20 +381,6 @@ func (s *ServerDB) Tail(afterID int64) ([]*fleet.Snapshot, int64, error) {
 // takes in none older than its window, whatever their ids.
 func (s *ServerDB) tailSince(afterID int64, since time.Time) ([]*fleet.Snapshot, int64, error) {
 	return s.scan(`SELECT id, at, data FROM snapshots WHERE id > ?1 AND at >= ?2 ORDER BY id`, afterID, since.UnixMilli())
-}
-
-// Each hands fn the snapshots taken since since with an id above afterID,
-// oldest first, one at a time, and returns the newest id in the file (0
-// when it has none) to go on from — below afterID when the snapshots
-// afterID counted were dropped. It holds no more than one: a day's worth
-// is read without being kept.
-func (s *ServerDB) Each(afterID int64, since time.Time, fn func(*fleet.Snapshot)) (int64, error) {
-	if afterID == 0 { // from the first in the window, as Window finds it
-		return s.scanEach(`SELECT id, at, data FROM snapshots
-			WHERE id >= (SELECT min(id) FROM snapshots INDEXED BY snapshots_at WHERE at >= ?1) AND at >= ?1
-			ORDER BY id`, fn, since.UnixMilli())
-	}
-	return s.scanEach(`SELECT id, at, data FROM snapshots WHERE id > ?1 AND at >= ?2 ORDER BY id`, fn, afterID, since.UnixMilli())
 }
 
 // scan runs a query of id, at and data, and reads the newest id, in one
@@ -496,6 +494,10 @@ func (s *ServerDB) Prune(now time.Time) error {
 		return errReadOnly
 	}
 	if _, err := s.db.Exec(`DELETE FROM snapshots WHERE at < ?`, now.Add(-Retention).UnixMilli()); err != nil {
+		return err
+	}
+	// A bucket that ended before the retention began.
+	if _, err := s.db.Exec(`DELETE FROM buckets WHERE start <= ?`, now.Add(-Retention-fleet.DayBucket).Unix()); err != nil {
 		return err
 	}
 	for {
