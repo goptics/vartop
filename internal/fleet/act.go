@@ -3,6 +3,9 @@ package fleet
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -61,6 +64,26 @@ func GoneLabelMsg(label string, n Noun) string {
 // none of (R31). vartop web collects once that one lets the lease go.
 func OtherConfigMsg(pid int) string {
 	return "Another vartop (pid " + strconv.Itoa(pid) + ") is collecting with another configuration; this vartop web collects once it stops."
+}
+
+// ConfigChangedMsg is the refusal of an action while the newest snapshot
+// of the server keyed server was polled under its previous endpoints (or
+// discovery settings): its units are not the ones the config now lists.
+func ConfigChangedMsg(server string) string {
+	return "The configuration of " + server + " changed; actions wait for its first snapshot under it. Try again in a few seconds."
+}
+
+// SourceOf identifies what finds srv's units: its endpoints, Kubernetes or
+// DNS settings — not its token, interval or name, which leave the units as
+// they are. It is a short hash, so that no setting is stored as it is.
+func SourceOf(srv *config.Server) string {
+	b, _ := json.Marshal(struct {
+		Endpoints  []string
+		Kubernetes *config.KubernetesRef
+		DNS        *config.DNSRef
+	}{srv.Endpoints, srv.Kubernetes, srv.DNS})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
 }
 
 // StaleMsg says how old latest, the stale newest snapshot of the server

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
@@ -181,6 +182,44 @@ func TestReaderCopy(t *testing.T) {
 	} {
 		if c.got != c.want {
 			t.Errorf("got %q, want %q", c.got, c.want)
+		}
+	}
+}
+
+// TestSourceOf: a server's source changes with what finds its units — its
+// endpoints, Kubernetes or DNS settings — and with nothing else: not its
+// token, interval or name.
+func TestSourceOf(t *testing.T) {
+	base := func() *config.Server {
+		return &config.Server{Name: "prod", Endpoints: []string{"http://a:8080/varmq"}, Token: "t1", Interval: 5}
+	}
+	src := SourceOf(base())
+	if src == "" || src != SourceOf(base()) {
+		t.Fatalf("SourceOf = %q, then %q: want one non-empty value", src, SourceOf(base()))
+	}
+	for name, edit := range map[string]func(*config.Server){
+		"token":    func(s *config.Server) { s.Token = "t2" },
+		"interval": func(s *config.Server) { s.Interval = 10 },
+		"name":     func(s *config.Server) { s.Name = "production" },
+	} {
+		s := base()
+		edit(s)
+		if got := SourceOf(s); got != src {
+			t.Errorf("another %s: SourceOf = %q, want %q", name, got, src)
+		}
+	}
+	for name, edit := range map[string]func(*config.Server){
+		"endpoint":  func(s *config.Server) { s.Endpoints = []string{"http://b:8080/varmq"} },
+		"endpoints": func(s *config.Server) { s.Endpoints = append(s.Endpoints, "http://b:8080/varmq") },
+		"kubernetes": func(s *config.Server) {
+			s.Endpoints, s.Kubernetes = nil, &config.KubernetesRef{Context: "prod", Namespace: "workers", Service: "mux"}
+		},
+		"dns": func(s *config.Server) { s.Endpoints, s.DNS = nil, &config.DNSRef{Host: "mux.internal", Port: 8080} },
+	} {
+		s := base()
+		edit(s)
+		if got := SourceOf(s); got == src {
+			t.Errorf("another %s: SourceOf = %q, want it to change", name, got)
 		}
 	}
 }

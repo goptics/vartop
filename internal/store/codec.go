@@ -17,11 +17,14 @@ import (
 // short field names, since they are in every row. A change to them is a new
 // StoreVersion.
 
-// snapshotRec is a fleet.Snapshot but for its At, which is a column.
+// snapshotRec is a fleet.Snapshot but for its At, which is a column. Source
+// came after StoreVersion 1 without a new version: rows from before it
+// read with none, which no action takes for current.
 type snapshotRec struct {
 	Units  []unitRec      `json:"u,omitempty"`
 	Behind map[string]int `json:"b,omitempty"`
 	Err    string         `json:"e,omitempty"`
+	Source string         `json:"src,omitempty"`
 }
 
 // unitRec is a fleet.PodSnapshot.
@@ -108,7 +111,7 @@ var (
 
 // encodeSnapshot is the blob stored for s: its record, as JSON, deflated.
 func encodeSnapshot(s *fleet.Snapshot) ([]byte, error) {
-	rec := snapshotRec{Behind: s.Behind, Err: s.Err}
+	rec := snapshotRec{Behind: s.Behind, Err: s.Err, Source: s.Source}
 	if len(s.Pods) > 0 {
 		rec.Units = make([]unitRec, len(s.Pods))
 	}
@@ -172,7 +175,7 @@ func decodeSnapshot(atMs int64, data []byte) (*fleet.Snapshot, error) {
 		return nil, err
 	}
 
-	s := &fleet.Snapshot{At: time.UnixMilli(atMs), Behind: rec.Behind, Err: rec.Err}
+	s := &fleet.Snapshot{At: time.UnixMilli(atMs), Behind: rec.Behind, Err: rec.Err, Source: rec.Source}
 	if len(rec.Units) > 0 {
 		s.Pods = make([]fleet.PodSnapshot, len(rec.Units))
 	}

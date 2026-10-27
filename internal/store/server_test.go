@@ -147,6 +147,7 @@ func fullSnapshot(round bool) *fleet.Snapshot {
 		},
 		Behind: map[string]int{lb: 2},
 		Err:    "",
+		Source: "3f2a9c41d07e8b56",
 	}
 }
 

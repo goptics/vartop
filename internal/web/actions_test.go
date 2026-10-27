@@ -1151,6 +1151,42 @@ func TestActionResponsesUseNoun(t *testing.T) {
 	}
 }
 
+// TestActionRefusedAfterEndpointEdit: a snapshot polled under the
+// server's previous endpoints names units the config no longer lists; an
+// action on it is refused, nothing sent, until a snapshot under the
+// edited config comes — the token read now must not go to the old ones.
+func TestActionRefusedAfterEndpointEdit(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}, Token: testToken},
+	}})
+	f.claim()
+	f.write("multi", snap(time.Now(),
+		labelled(okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1")))
+	f.setConfig(&config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{bSrv.URL}, Token: testToken},
+	}})
+
+	before := f.pokes("multi")
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if want := `<p class="banner">` + html.EscapeString(fleet.ConfigChangedMsg("multi")) + `</p>`; resp.StatusCode != http.StatusConflict || body != want {
+		t.Errorf("POST after the edit = %d %q, want 409 with %q", resp.StatusCode, body, want)
+	}
+	if f.pokes("multi") != before+1 {
+		t.Errorf("pokes %d, want the server poked once for a snapshot under the edit", f.pokes("multi")-before)
+	}
+	noPatches(t, fa, fb)
+
+	// The edited config's first snapshot: acted on, at the new endpoint.
+	f.write("multi", snap(time.Now(),
+		labelled(okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1")))
+	if resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true); resp.StatusCode != http.StatusOK {
+		t.Errorf("POST under the edited config = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	noPatches(t, fa)
+	wantPatches(t, fb, "PATCH /workers/orders/actions/pause")
+}
+
 // TestActionRefusedWhenStale: with a stale newest snapshot nothing is sent:
 // what the pages show may no longer be the server. With no collector running
 // the refusal is at once; with one, the server is poked and given

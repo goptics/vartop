@@ -61,6 +61,10 @@ type Snapshot struct {
 	// discovered, discovery failing); "" for a poll that ran, whatever its
 	// units' errors.
 	Err string
+	// Source is SourceOf the server's config it was polled under: an action
+	// goes out only on a snapshot of the config it reads, never to units
+	// the server's previous endpoints found.
+	Source string
 }
 
 // Rater derives per-worker rates as snapshots arrive. It belongs to the one

@@ -276,6 +276,9 @@ func (f *fixture) write(name string, s *fleet.Snapshot) {
 	f.t.Helper()
 	f.mu.Lock()
 	token := f.token
+	if srv := f.cfg.Servers[name]; srv != nil && s.Source == "" {
+		s.Source = fleet.SourceOf(srv) // as the collector stamps it
+	}
 	f.mu.Unlock()
 	if token == "" {
 		l, _, err := f.ctl.Lease()

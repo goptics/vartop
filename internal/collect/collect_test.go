@@ -504,6 +504,28 @@ func TestTakeoverEndsOldCollector(t *testing.T) {
 	}
 }
 
+// TestSnapshotsCarryTheirSource: every snapshot names the source of the
+// config it was polled under (fleet.SourceOf); after the server's
+// endpoints are edited, the restarted collector's snapshots name the new
+// one.
+func TestSnapshotsCarryTheirSource(t *testing.T) {
+	_, a := fleettest.NewVarmq(t, "a", nil)
+	_, b := fleettest.NewVarmq(t, "b", nil)
+	h := newHarness(t)
+	h.writeConfig(oneServer(a.URL))
+	h.start(7)
+	h.waitSnaps("a", 1, 5*time.Second)
+	if got, want := h.latest("a").Source, fleet.SourceOf(oneServer(a.URL)["a"]); got != want {
+		t.Fatalf("Source = %q, want %q", got, want)
+	}
+	h.writeConfig(oneServer(b.URL))
+	want := fleet.SourceOf(oneServer(b.URL)["a"])
+	fleettest.WaitUntil(t, 5*time.Second, "a snapshot under the edited endpoints", func() bool {
+		l := h.latest("a")
+		return l != nil && l.Source == want
+	})
+}
+
 // TestConfigAddRemoveEdit: with no servers the collector idles; a server added
 // to the config is collected, one edited is restarted (and no other), one
 // removed stops being polled while its file stays.

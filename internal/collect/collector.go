@@ -37,6 +37,7 @@ type collector struct {
 	name   string
 	srv    *config.Server
 	enc    string             // srv as JSON: what tells an edit
+	source string             // fleet.SourceOf(srv), stamped on every snapshot
 	cancel context.CancelFunc // stops the collector
 	done   chan struct{}      // closed once its file is closed
 
@@ -70,7 +71,7 @@ type queued struct {
 func (d *holder) start(name string, srv *config.Server, enc string, delay time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &collector{
-		d: d, name: name, srv: srv, enc: enc, cancel: cancel,
+		d: d, name: name, srv: srv, enc: enc, source: fleet.SourceOf(srv), cancel: cancel,
 		done:  make(chan struct{}),
 		poke:  make(chan struct{}, 1),
 		prune: make(chan time.Time, 1),
@@ -281,6 +282,7 @@ func (c *collector) serve(ctx context.Context, fc *fleet.Collector) {
 // poller, or from connect before the poller runs), so each label state it
 // numbers is newer than every one before.
 func (c *collector) sink(t fleet.Tick) error {
+	t.Snap.Source = c.source
 	if t.Panic != nil {
 		t.Snap.Err = internalError
 		if c.seen.changed("panic", fmt.Sprint(t.Panic.Value)) {

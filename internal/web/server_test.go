@@ -1057,6 +1057,44 @@ func TestOtherConfigHandOff(t *testing.T) {
 	wantPatches(t, fb, "PATCH /workers/orders/actions/pause")
 }
 
+// TestLeaseReadAgainAfterTheWait (R31): an action that waits for a fresh
+// snapshot reads the lease again once it comes. Here the wait sees the
+// lease pass to another environment's collector, which writes the
+// snapshot: the action is refused with that notice, nothing sent — the
+// lease read before the wait would have taken that snapshot for this
+// environment's.
+func TestLeaseReadAgainAfterTheWait(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
+	}})
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	f.leaseConfig = "/a/vartop/config.json"
+	f.claim()
+	f.write("multi", handOffUnits(time.Now().Add(-time.Minute), aSrv, bSrv)) // stale: the action waits
+	pokes := f.pokes("multi")
+
+	handedOff := make(chan struct{})
+	go func() { // on the action's poke, another environment's collector takes over and writes
+		defer close(handedOff)
+		for deadline := time.Now().Add(fleet.SettleWait); f.pokes("multi") == pokes; time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				return
+			}
+		}
+		f.release()
+		f.leaseConfig = "/b/vartop/config.json"
+		f.claim()
+		f.write("multi", handOffUnits(time.Now(), aSrv, bSrv))
+	}()
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	<-handedOff
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST across the hand-off = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+	noPatches(t, fa, fb)
+}
+
 // TestActionRefusedWhenLeaseUnreadable (R44): with the collector's lease
 // unreadable, whose units the newest snapshot names is not known: an
 // action is refused, nothing sent. The pages keep showing the snapshot,

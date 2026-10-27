@@ -84,7 +84,8 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	if refused(w, d) {
 		return nil, false
 	}
-	if !d.Acts(latestOf(snaps), interval, time.Now()) {
+	source := fleet.SourceOf(t.srv)
+	if l := latestOf(snaps); !d.Acts(l, interval, time.Now()) || l.Source != source {
 		h.refresh(r.Context(), t)
 		// Again: the lease may have changed hands while it waited.
 		snaps = t.feed.Snapshots()
@@ -100,6 +101,12 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	case !d.Acts(latest, interval, now):
 		// Stale, a previous collector's, or none collects (R44).
 		conflict(w, h.staleMsg(t.key, latest, now))
+		return nil, false
+	case latest.Source != source:
+		// Polled under the server's previous endpoints: its units are not
+		// the ones the config lists, and the token read now must not go
+		// to them.
+		conflict(w, fleet.ConfigChangedMsg(t.key))
 		return nil, false
 	}
 	t.latest = latest

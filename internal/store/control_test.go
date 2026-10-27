@@ -453,3 +453,48 @@ func TestCollectorCurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestAppendWaitsOutAClaim (R44): Append checks the lease and inserts in
+// one transaction holding control.db's write lock, so a Claim cannot
+// commit between the two. With a claim's transaction open, Append waits,
+// then finds the lease lost and writes nothing: no row of the previous
+// holder lands under the new lease, where it would pass for current.
+func TestAppendWaitsOutAClaim(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().Round(0)
+	old, ok, err := openControl(t, dir).Claim(Lease{PID: 1}, now)
+	if err != nil || !ok {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	w := newWriter(t, dir, "prod")
+
+	claimant := openDB(controlPath(dir), true, "")
+	defer claimant.Close()
+	tx, err := claimant.Begin() // IMMEDIATE, as claim's
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE daemon SET token = 'next', started = ? WHERE id = 1`, now.Add(time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	appended := make(chan error, 1)
+	go func() {
+		_, err := w.Append(old, tick(now.Add(2*time.Second), 1))
+		appended <- err
+	}()
+	select {
+	case err := <-appended:
+		_ = tx.Rollback()
+		t.Fatalf("Append returned %v while a claim's transaction was open, want it to wait", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-appended; !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Append after the claim = %v, want ErrLeaseLost", err)
+	}
+	if s, _ := w.Latest(); s != nil {
+		t.Errorf("the previous holder's row was written under the new lease (At %v)", s.At)
+	}
+}
