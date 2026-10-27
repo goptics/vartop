@@ -36,6 +36,10 @@ const (
 	RemovedGrace = 24 * time.Hour
 )
 
+// ErrDataDirRemoved is Run's error when the data directory it collects
+// into is deleted, or replaced, under it.
+var ErrDataDirRemoved = errors.New("data directory removed")
+
 // Options are what Run collects with.
 type Options struct {
 	DataDir string // the store; store.DataDir() when ""
@@ -205,7 +209,7 @@ func (d *holder) run(ctx context.Context) (int, error) {
 			// collector run next, use a new one.
 			gone, err := d.ctl.Replaced()
 			if gone {
-				return 1, fmt.Errorf("data directory removed: %s no longer holds the control.db this collector opened", d.o.DataDir)
+				return 1, fmt.Errorf("%w: %s no longer holds the control.db this collector opened", ErrDataDirRemoved, d.o.DataDir)
 			}
 			if d.seen.changed("replaced", errString(err)) && err != nil {
 				d.o.Log.Warn("cannot check the data directory", "err", err)

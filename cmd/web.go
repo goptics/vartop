@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -144,14 +145,19 @@ const collectRetry = 5 * time.Second
 // loop calls it again, at least retry after the last start — so that a
 // failure is retried without spinning, and this vartop web collects once
 // the other one stops. It logs, once while each lasts, a failure and who
-// else collects (lease, the lease as Control.Lease reads it).
-func collectLoop(ctx context.Context, run func(context.Context) (int, error), lease func() (store.Lease, bool, error), retry time.Duration, log *slog.Logger) {
+// else collects (lease, the lease as Control.Lease reads it). It returns
+// nil once ctx ends, or Run's collect.ErrDataDirRemoved: what vartop web
+// reads is gone then.
+func collectLoop(ctx context.Context, run func(context.Context) (int, error), lease func() (store.Lease, bool, error), retry time.Duration, log *slog.Logger) error {
 	last := "" // what was logged last, so that it is logged once
 	for ctx.Err() == nil {
 		began := time.Now()
 		code, err := run(ctx)
-		if ctx.Err() != nil {
-			return
+		switch {
+		case ctx.Err() != nil:
+			return nil
+		case errors.Is(err, collect.ErrDataDirRemoved):
+			return err
 		}
 		switch l, fresh, lerr := lease(); {
 		case err != nil || code != 0:
@@ -169,6 +175,7 @@ func collectLoop(ctx context.Context, run func(context.Context) (int, error), le
 		}
 		sleep(ctx, time.Until(began.Add(retry)))
 	}
+	return nil
 }
 
 // sleep waits d, or until ctx ends.
@@ -184,6 +191,8 @@ func sleep(ctx context.Context, d time.Duration) {
 // runWeb serves the web UI on addr (serveWeb) and, until it stops,
 // collects every configured server into the store (collectLoop), logging
 // to log. Once the web stops, collection stops too and lets the lease go.
+// The data directory deleted under it stops the web too, with that error:
+// its pages would go on reading the deleted files.
 func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(string) error, log *slog.Logger) error {
 	src, release, err := webSource()
 	if err != nil {
@@ -191,17 +200,25 @@ func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(stri
 	}
 	defer release()
 
+	serveCtx, stopServing := context.WithCancel(ctx)
+	defer stopServing()
 	collectCtx, stopCollecting := context.WithCancel(ctx)
 	collected := make(chan struct{})
+	var collectErr error
 	go func() {
 		defer close(collected)
 		o := collect.Options{DataDir: src.DataDir, Config: readConfig, Lease: ownLease(), Log: log}
 		run := func(ctx context.Context) (int, error) { return collect.Run(ctx, o) }
-		collectLoop(collectCtx, run, src.Control.Lease, collectRetry, log)
+		if collectErr = collectLoop(collectCtx, run, src.Control.Lease, collectRetry, log); collectErr != nil {
+			stopServing()
+		}
 	}()
-	err = serveWeb(ctx, src, key, addr, out, open)
+	err = serveWeb(serveCtx, src, key, addr, out, open)
 	stopCollecting()
 	<-collected
+	if collectErr != nil {
+		return fmt.Errorf("%w; start vartop web again", collectErr)
+	}
 	return err
 }
 

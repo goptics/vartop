@@ -674,3 +674,31 @@ func TestWebRefusesNonLoopbackHost(t *testing.T) {
 		t.Fatalf("vartop web --host 0.0.0.0 = %v, want a refusal naming 0.0.0.0, loopback only", err)
 	}
 }
+
+// TestWebStopsWhenDataDirRemoved: with its data directory deleted under
+// it, vartop web would read the deleted files while its collector writes
+// new ones; it stops instead, saying why.
+func TestWebStopsWhenDataDirRemoved(t *testing.T) {
+	dataDir := isolate(t)
+	fake := fakeOrdersVarmq(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := startRunWeb(t, ctx, &config.Config{
+		DefaultServer: "prod",
+		Servers:       map[string]*config.Server{"prod": {Name: "prod", Endpoints: []string{fake.URL}}},
+	})
+	if !waitStored(dataDir, "prod", 5*time.Second) {
+		t.Fatal("no snapshot of prod stored within 5s of vartop web starting")
+	}
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-res:
+		if err == nil || !strings.Contains(err.Error(), "data directory removed") || !strings.Contains(err.Error(), dataDir) {
+			t.Errorf("runWeb() = %v, want an error saying %s was removed", err, dataDir)
+		}
+	case <-time.After(3 * store.BeatEvery):
+		t.Fatal("vartop web still runs over a deleted data directory")
+	}
+}
