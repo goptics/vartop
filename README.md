@@ -161,12 +161,14 @@ vartop web --no-open                # print the URL, don't launch a browser
 | --- | --- | --- |
 | `--addr` | Address to listen on (must be a loopback address) | `127.0.0.1:7070` |
 | `--no-open` | Don't open the browser | *(opens it)* |
-| `-s`, `--server` | Server to show first; the page can switch to any configured server | *(default server)* |
+| `-s`, `--server` | Server to show first; the page can switch to any configured server | *(default server, else the first configured)* |
 
 - **Loopback only.** vartop refuses any other `--addr`, and the server only answers requests addressed to its own loopback host name.
 - **The token stays on the server.** vartop calls varmq on the page's behalf; the bearer token is never sent to the browser.
 - **History comes from the daemon.** Charts cover the last hour of what the daemon stored, so they are already there when the page opens and survive restarting `vartop web`. The page reads the store and never calls varmq to show data.
-- **A stopped daemon is visible.** When no new data has arrived for twice the polling interval plus 2 seconds, a banner says how old the data is and why (the daemon is not running, or the server's error), the current values show `—`, and the history stays drawn. When no daemon is running the banner has a **Start collector** button.
+- **A stopped daemon is visible.** When no new data has arrived for three times the polling interval plus 2 seconds, a banner says how old the data is and why (the daemon is not running, or the server's error). Everything current shows `—` or is hidden (the values, the health count, the load-balancer note, per-instance errors, the list of reporting instances), and the history stays drawn. When no daemon is running the banner has a **Start collector** button. A server with only old history, say after the daemon was down for hours, shows the same banner with its age, not "Waiting for the first snapshot".
+- **A daemon collecting with another configuration is refused.** The daemon collects with one configuration, the config path and `KUBECONFIG` of the vartop that started it (see [Environment](#environment)). If a vartop with another one restarts it while this page is open, the banner reads *The vartop daemon is collecting with another configuration — Start collector to use this one.*, the current values show `—`, and every action is refused with that text (HTTP 409) and sends nothing: the daemon's snapshots name endpoints found under the other configuration, and this server's token must not go to them. **Start collector** restarts the daemon with this vartop's configuration.
+- **Charts keep the time axis.** The sparklines span a fixed 10 minutes and the detail charts a fixed hour, each point placed at the time it was taken; a line breaks where polls are missing (the daemon was down, or the server unreachable), so a gap shows as a gap.
 
 Outside Kubernetes the UIs say **instance** where Kubernetes says pod, and label each one instance-1, instance-2, … in the order the daemon first sees them, static and DNS endpoints included; hover a label in the web UI for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number. Labels are stored per server, so the TUI and the web UI show the same ones and they survive daemon restarts; a number not seen for 24 hours is freed, and a new instance takes the lowest free number.
 
@@ -180,7 +182,7 @@ A page's address says what it shows, by the names the page shows:
 
 | Parameter | Meaning |
 | --- | --- |
-| `server=<name>` | The configured server to show, by the key it is listed under in the config (the default server when absent) |
+| `server=<name>` | The configured server to show, by the key it is listed under in the config (the default server when absent, else the first configured server by name) |
 | `instance=<label>` | Off Kubernetes: only that instance, e.g. `?instance=instance-2` |
 | `pod=<pod name>` | On Kubernetes: only that pod |
 
@@ -194,7 +196,7 @@ The TUI reads the same store as the web UI, so it shows the same numbers and lab
 - sparklines in the KPI line above the table
 - two 1 h charts (completed and failed) on the worker detail screen
 
-The sparklines and charts need room, so they appear only when the terminal is wide enough. When the newest data is stale (no new snapshot for twice the polling interval plus 2 seconds) the header says how old it is and why (the daemon is not running, or the server's error), current values show `—`, and the history stays drawn.
+The sparklines and charts need room, so they appear only when the terminal is wide enough. When the newest data is stale (no new snapshot for three times the polling interval plus 2 seconds) the header says how old it is and why (the daemon is not running, or the server's error), current values show `—`, and the history stays drawn. When the daemon collects with another configuration (see [Environment](#environment)) the header says *The vartop daemon is collecting with another configuration — press r to use this one.*, current values show `—`, and every action is refused with that text and sends nothing; <kbd>r</kbd> restarts the daemon with this vartop's configuration.
 
 ### Keyboard Shortcuts
 
@@ -225,6 +227,8 @@ Every screen shows its available keys in a help footer at the bottom.
 
 #### Action Mode (Dashboard & Worker Detail)
 
+An action asks the daemon to poll at once, and the screen shows the result when that poll lands, after up to 2 seconds (<kbd>r</kbd> waits the same way). With no daemon running it does not wait.
+
 | Key | Action |
 | --- | --- |
 | <kbd>p</kbd> | Pause worker |
@@ -245,16 +249,16 @@ Servers are listed alphabetically, each with its health from its newest stored s
 | <kbd>Esc</kbd> | Collapse the expanded server, or close the Switch view if nothing is expanded |
 | <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | Quit |
 
-While the daemon is still connecting to a server (a Kubernetes watcher can take a few seconds to sync), the dashboard says it is waiting for the server's first snapshot. If the connection fails, the real cause the daemon recorded (for example an RBAC `forbidden` error) is shown with the server's name.
+While the daemon is still connecting to a server (a Kubernetes watcher can take a few seconds to sync), the dashboard says it is waiting for the server's first snapshot. If the connection fails, the real cause the daemon recorded (for example an RBAC `forbidden` error) is shown with the server's name. A server that has older history but nothing newer shows the stale header with its age instead.
 
 ## Daemon
 
 `vartop daemon` is a small background process that polls **every configured server**, all the time, and writes what it sees to a local SQLite store with 24 hours of history. `vartop` and `vartop web` don't poll varmq themselves: they read that store. That is why both show the same numbers and the same instance labels, why trends are already drawn when you open either one, and why history survives closing them.
 
-The daemon never exits on its own, and idles when no server is configured. It follows the config file, so adding, editing or removing a server takes effect within a few seconds without restarting it. You rarely start it yourself:
+The daemon runs until it is asked to stop (`vartop daemon stop`) or another daemon takes over, and idles when no server is configured. It also exits, with an error, when its store fails, as when its data directory is deleted under it (`data directory removed`): the login service then starts it again, and without one so does the next `vartop` or `vartop web`. It follows the config file, so adding, editing or removing a server takes effect within a few seconds without restarting it. Deleting `config.json` stops all collection, as if every server were removed; the servers' files stay for 24 hours after their last write, so putting the config back within a day resumes the history. A config that is there but does not parse or validate changes nothing: the daemon keeps collecting with the last good one and logs the error (one that starts on a broken config collects nothing until it is fixed). You rarely start it yourself:
 
 - the first time you run vartop, after the onboarding wizard, it offers to install the [login service](#login-service)
-- `vartop` and `vartop web` start a daemon when none is running — through the login service when that is installed, otherwise as a detached process of their own
+- `vartop` and `vartop web` start a daemon when none is running — through the login service when that is installed, otherwise (or when the service fails, see [Login service](#login-service)) as a detached process of their own. If it cannot be started, `vartop web` prints why, and the TUI shows it on its error line instead of behind its screen: *vartop daemon did not start; see {data directory}/daemon.log*
 
 | Command | Description |
 | --- | --- |
@@ -267,7 +271,11 @@ The daemon never exits on its own, and idles when no server is configured. It fo
 | `vartop daemon install` | Start the daemon at login, and again after a crash (a login service) |
 | `vartop daemon uninstall` | Remove the login service; vartop then starts the daemon itself |
 
-`vartop daemon stop` says so when it is done: *vartop daemon stopped. It starts again at your next login or the next time you open vartop.* `status` shows the daemon's pid, uptime, build, config path, `KUBECONFIG` and `PATH`, the data directory and its size, the log file, whether the login service is installed, and for each server how old its newest snapshot is, its units (and how many of them are healthy) and its last error.
+`vartop daemon stop` says so when it is done: *vartop daemon stopped. It starts again at your next login or the next time you open vartop.* It asks the daemon to stop and waits 5 seconds. A daemon still there that keeps beating is killed. One that neither stops nor beats for 6 more seconds is left alone, since its process id may not be its own any more: `stop` fails with exit code 1 and *the vartop daemon is not responding; its lease expires within 15s*. Its lease expires within 15 seconds; `vartop daemon start`, or opening vartop, starts a new daemon, which takes that lease over.
+
+`status` always shows the data directory and its size, the log file and whether the login service is installed. Only while the daemon runs does it also show the daemon's pid, uptime, build, config path, `KUBECONFIG` and `PATH`. For each configured server it shows how old its newest snapshot is, its units (and how many of them are healthy) and its last error.
+
+**After a crash**, the dead daemon's lease stays valid for up to 15 seconds. A daemon that finds it, the login service's restart or one vartop spawns, watches the lease's heartbeat for 6 seconds and takes the lease over if it does not move; if it moves, the other daemon is alive and the new one exits quietly. vartop waits for that, up to 9 seconds instead of 3, before it reports that the daemon did not start. A crash's stack trace is written to `daemon.log`, also under launchd and Task Scheduler, which send a service's own stderr nowhere.
 
 ### Login service
 
@@ -278,8 +286,11 @@ The daemon never exits on its own, and idles when no server is configured. It fo
 | Linux | systemd user unit `vartop.service` in `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`) | `Restart=on-failure` |
 | macOS | LaunchAgent `dev.goptics.vartop` in `~/Library/LaunchAgents` | `RunAtLoad`; `KeepAlive` on failure |
 | Windows | Scheduled task `vartop daemon` | At logon; restarts on failure |
+| Any other (FreeBSD, …) | None: `vartop daemon install` fails with *vartop has no login service on {os}* | vartop starts a detached daemon itself, on the next `vartop` or `vartop web` after it ends |
 
 The service file holds the absolute path of the vartop that installed it and a small part of its environment (see below), and is written with mode `0600`. While the service is installed, starting and restarting the daemon goes through your service manager, so the daemon stays supervised; `vartop daemon stop` makes it exit cleanly, which the service manager does not restart.
+
+**When the service cannot start the daemon**, vartop does not leave nothing collecting. If the service manager refuses the service, or does not start it, when `vartop`, `vartop web`, `vartop daemon start` or `restart` go through it (a Linux session with no systemd user instance, say), or no daemon holds the lease within a few seconds of that, vartop spawns a detached daemon itself and warns: *vartop daemon started detached; its login service failed: {error}*. `vartop daemon start`, `restart` and `vartop web` print it, and the TUI shows it on its error line as it opens. If the detached daemon does not start either, the error names both failures. On Linux and macOS, a unit or LaunchAgent file that `install` wrote anew and the manager refused is removed again, so `status` goes on saying the login service is not installed. `vartop daemon install` itself only reports its error when no daemon was running; one that had stopped a running daemon starts it again, detached, and says so: *{error} (the vartop daemon runs detached meanwhile)*.
 
 > **Tested on Linux.** The macOS and Windows service paths were only built and vetted on the development machine, not run.
 
@@ -288,6 +299,8 @@ The service file holds the absolute path of the vartop that installed it and a s
 ### Environment
 
 What the daemon can reach depends on the environment it starts with: the config path (`XDG_CONFIG_HOME` or `HOME`), `KUBECONFIG`, the credential plugins on `PATH` that EKS, GKE and AKS kubeconfigs call, proxies, `VARTOP_DATA_DIR`. **The environment of the vartop you run wins.** When `vartop` or `vartop web` finds a daemon built from another binary, or one reading another config path or `KUBECONFIG`, it stops that daemon and starts one with its own environment, so the daemon follows whichever vartop you started last. `PATH` is not compared, so ordinary differences between shells restart nothing. With the login service installed, vartop first rewrites the environment the service saved, then restarts it through the service manager.
+
+That swap happens as a vartop starts. A web page or TUI that was already open, under the old environment, finds its daemon replaced by one collecting with another configuration: it shows *The vartop daemon is collecting with another configuration* and refuses actions (see [Web UI](#web-ui)) until you press **Start collector** or <kbd>r</kbd>, which switches the daemon back to its own environment. A relative `VARTOP_DATA_DIR` is saved in the service as the absolute path it names, since the service manager runs the daemon from another directory.
 
 The service saves only an allow-list of non-secret variables: `PATH`, `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `VARTOP_DATA_DIR`, `KUBECONFIG`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms), `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `CLOUDSDK_CONFIG`, `CLOUDSDK_ACTIVE_CONFIG_NAME`, `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_CONFIG_DIR`. A name containing `KEY`, `SECRET` or `TOKEN` is never written. `KUBECONFIG`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `VARTOP_DATA_DIR` are always written, empty when unset, so the service manager's own values never take the place of yours.
 
@@ -305,9 +318,9 @@ The store lives in `VARTOP_DATA_DIR` when that is set, else in `vartop` under yo
 | --- | --- |
 | `control.db` | The daemon's lease, the UIs' requests to poll now, and each server's last collection error |
 | `servers/<name>-<hash>.db` | One file per configured server: its snapshots (24 hours) and its instance labels |
-| `daemon.log`, `daemon.log.1` | The daemon's log; renamed to `.1` when it passes 5 MiB as a daemon starts |
+| `daemon.log`, `daemon.log.1` | The daemon's log, with the stack trace of a crash; renamed to `.1` when it passes 5 MiB as a daemon starts and no other daemon is running |
 
-The directory is created `0700` and its files `0600`. Tokens are never stored there: the daemon reads them from the [config](#configuration) when it polls. A server's file is deleted 24 hours after the server leaves the config, so removing a server by mistake and adding it back under the same name within a day keeps its history.
+The directory is created `0700` and its files `0600`. Tokens are never stored there: the daemon reads them from the [config](#configuration) when it polls. A server's file is deleted 24 hours after its last write. A configured server is written every poll, so that is about 24 hours after the server left the config: removing a server by mistake and adding it back under the same name within a day keeps its history. A daemon that was down for more than 24 hours deletes the file of a server that is no longer configured as soon as it starts: its history was past retention anyway, and only the server's instance numbers are lost.
 
 ### Disk use
 
@@ -322,6 +335,8 @@ Configuration lives in your OS user config directory, created on first run (dire
 | Linux | `$XDG_CONFIG_HOME/vartop/config.json` (default `~/.config/vartop/config.json`) |
 | macOS | `~/Library/Application Support/vartop/config.json` |
 | Windows | `%AppData%\vartop\config.json` |
+
+If `config.json` is a symlink, say into a dotfiles repository, vartop saves through it and the link stays.
 
 ### Schema
 
