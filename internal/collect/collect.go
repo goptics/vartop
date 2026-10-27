@@ -144,6 +144,12 @@ func takeOver(ctx context.Context, ctl *store.Control, o Options) (token string,
 	case err != nil || advanced:
 		return "", false, err
 	}
+	// BeatAdvances answers false at once too when the lease is no longer
+	// l's: let go, as a vartop web stopped with Ctrl+C does, or taken.
+	// That is a Claim, not a holder that does not beat.
+	if cur, _, err := ctl.Lease(); err == nil && cur.Token != l.Token {
+		return ctl.Claim(o.Lease, o.Now())
+	}
 	o.Log.Warn("the collector holding the lease does not beat; taking it over", "pid", l.PID, "beat", l.Beat)
 	return ctl.TakeOver(l.Token, o.Lease, o.Now())
 }

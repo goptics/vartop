@@ -310,6 +310,33 @@ func (h *harness) deadLease() string {
 	return token
 }
 
+// TestReleasedHolderTakenOverQuietly: a collector watching the beat of a
+// holder that lets the lease go — a vartop web stopped with Ctrl+C — takes
+// it over at once, without logging it as a holder that does not beat.
+func TestReleasedHolderTakenOverQuietly(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", nil)
+	h := newHarness(t)
+	h.writeConfig(oneServer(srv.URL))
+	ctl := h.control()
+	token, ok, err := ctl.Claim(store.Lease{PID: 9}, h.now())
+	if !ok || err != nil {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	began := time.Now()
+	h.start(3)
+	time.Sleep(300 * time.Millisecond) // it watches the beat
+	if err := ctl.Release(token); err != nil {
+		t.Fatal(err)
+	}
+	h.waitSnaps("a", 1, 3*time.Second)
+	if took := time.Since(began); took > store.DeadAfter/2 {
+		t.Errorf("took the released lease after %v, want at once", took)
+	}
+	if n := h.logs.count("does not beat"); n != 0 {
+		t.Errorf("a released lease was logged as a holder that does not beat:\n%s", &h.logs)
+	}
+}
+
 // TestCrashedHolderTakenOver (R34): a collector started while the lease of a
 // dead one is still fresh — a supervisor restarts a crashed collector within
 // LeaseTTL — watches its beat for DeadAfter, takes the lease over, and

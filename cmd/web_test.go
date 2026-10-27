@@ -389,6 +389,37 @@ func TestWebSourceChecksEnv(t *testing.T) {
 	}
 }
 
+// TestSameEnv (R31): two leases are of one environment when their config
+// path and KUBECONFIG agree, whatever their pid; vartop web's own lease is
+// of its own, KUBECONFIG set or not.
+func TestSameEnv(t *testing.T) {
+	isolate(t)
+	t.Setenv("KUBECONFIG", "/home/u/.kube/prod")
+	own := ownLease()
+	if own.Kubeconfig != "/home/u/.kube/prod" || own.ConfigPath == "" {
+		t.Fatalf("ownLease = %+v, want this environment's config path and KUBECONFIG", own)
+	}
+	with := func(edit func(*store.Lease)) store.Lease { l := own; edit(&l); return l }
+	for _, c := range []struct {
+		name string
+		l    store.Lease
+		want bool
+	}{
+		{"identical", own, true},
+		{"another pid", with(func(l *store.Lease) { l.PID++ }), true},
+		{"another config path", with(func(l *store.Lease) { l.ConfigPath = "/elsewhere/vartop/config.json" }), false},
+		{"another KUBECONFIG", with(func(l *store.Lease) { l.Kubeconfig = "/home/u/.kube/staging" }), false},
+		{"KUBECONFIG unset", with(func(l *store.Lease) { l.Kubeconfig = "" }), false},
+	} {
+		if got := sameEnv(c.l, own); got != c.want {
+			t.Errorf("%s: sameEnv = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if !sameEnvAsOwn()(own) {
+		t.Error("sameEnvAsOwn refuses this vartop's own lease with KUBECONFIG set")
+	}
+}
+
 // lockedBuffer is a bytes.Buffer a logger and a test may share.
 type lockedBuffer struct {
 	mu sync.Mutex
@@ -700,5 +731,61 @@ func TestWebStopsWhenDataDirRemoved(t *testing.T) {
 		}
 	case <-time.After(3 * store.BeatEvery):
 		t.Fatal("vartop web still runs over a deleted data directory")
+	}
+}
+
+// TestReaderWebStopsWhenDataDirRemoved: a vartop web that only shows what
+// another collects stops too when the data directory is deleted, rather
+// than make it anew, collect into it, and refuse every action for reading
+// the deleted control.db.
+func TestReaderWebStopsWhenDataDirRemoved(t *testing.T) {
+	dataDir := isolate(t)
+	fake := fakeOrdersVarmq(t)
+	ctl, err := store.OpenControl(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctl.Close()
+	token, ok, err := ctl.Claim(store.Lease{PID: 4242}, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	stopBeat := make(chan struct{})
+	beating := make(chan struct{})
+	go func() { // the other vartop, beating on into the deleted file
+		defer close(beating)
+		tick := time.NewTicker(store.BeatEvery / 4)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stopBeat:
+				return
+			case <-tick.C:
+				_ = ctl.Beat(token, time.Now())
+			}
+		}
+	}()
+	defer func() { close(stopBeat); <-beating }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := startRunWeb(t, ctx, &config.Config{
+		DefaultServer: "prod",
+		Servers:       map[string]*config.Server{"prod": {Name: "prod", Endpoints: []string{fake.URL}}},
+	})
+	time.Sleep(time.Second) // it watched the other one beat: a reader
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-res:
+		if err == nil || !strings.Contains(err.Error(), "data directory removed") || !strings.Contains(err.Error(), dataDir) {
+			t.Errorf("runWeb() = %v, want an error saying %s was removed", err, dataDir)
+		}
+	case <-time.After(collectRetry + 3*time.Second):
+		t.Fatal("a reader vartop web still runs over a deleted data directory")
+	}
+	if _, err := os.Stat(dataDir); err == nil {
+		t.Error("the reader made the deleted data directory anew")
 	}
 }

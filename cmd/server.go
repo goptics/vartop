@@ -169,7 +169,7 @@ var serverRemoveCmd = &cobra.Command{
 
 		if len(cfg.Servers) == 0 {
 			cfg.DefaultServer = ""
-			fmt.Println("Removed the last server. vartop will prompt for a new one on next run.")
+			fmt.Println("Removed the last server. vartop web will prompt for a new one, or add one with vartop server add.")
 		} else if cfg.DefaultServer == name {
 			// Reassign default server if we just deleted the default
 			for remainingName := range cfg.Servers {

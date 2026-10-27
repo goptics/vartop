@@ -191,8 +191,9 @@ func sleep(ctx context.Context, d time.Duration) {
 // runWeb serves the web UI on addr (serveWeb) and, until it stops,
 // collects every configured server into the store (collectLoop), logging
 // to log. Once the web stops, collection stops too and lets the lease go.
-// The data directory deleted under it stops the web too, with that error:
-// its pages would go on reading the deleted files.
+// The data directory deleted under it stops the web too, with that error,
+// whether it collects or only shows what another collects: its pages would
+// go on reading the deleted files.
 func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(string) error, log *slog.Logger) error {
 	src, release, err := webSource()
 	if err != nil {
@@ -208,7 +209,16 @@ func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(stri
 	go func() {
 		defer close(collected)
 		o := collect.Options{DataDir: src.DataDir, Config: readConfig, Lease: ownLease(), Log: log}
-		run := func(ctx context.Context) (int, error) { return collect.Run(ctx, o) }
+		run := func(ctx context.Context) (int, error) {
+			// The pages read the control.db opened at the start: deleted,
+			// a Run would make a new one they never see (and the data
+			// directory anew), so this vartop web stops as its collector
+			// does.
+			if gone, _ := src.Control.Replaced(); gone {
+				return 1, fmt.Errorf("%w: %s no longer holds the control.db this vartop web opened", collect.ErrDataDirRemoved, src.DataDir)
+			}
+			return collect.Run(ctx, o)
+		}
 		if collectErr = collectLoop(collectCtx, run, src.Control.Lease, collectRetry, log); collectErr != nil {
 			stopServing()
 		}
