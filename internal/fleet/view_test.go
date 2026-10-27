@@ -1136,6 +1136,8 @@ func TestEverySeriesCarriesTimes(t *testing.T) {
 	check("fleetRates", fleetRates(snaps, "", completedRate, 1, "/s", podNoun), snaps)
 	check("pendingSeries", pendingSeries(snaps, "", podNoun), snaps)
 	check("CompletedRates", CompletedRates(snaps, "", "orders"), window)
+	check("CompletedRatesOf", CompletedRatesOf(snaps, map[string][]string{"p0": {"orders"}})["p0"]["orders"], window)
+	check("CompletedRatesOf, a unit never seen", CompletedRatesOf(snaps, map[string][]string{"p9": {"orders"}})["p9"]["orders"], window)
 	check("CompletedRates1h", CompletedRates1h(snaps, "", "orders"), snaps)
 	check("FailedRates1h", FailedRates1h(snaps, "", "orders"), snaps)
 	det, ok := BuildDetail(snaps, "", "orders", 5*time.Second, podNoun)
@@ -1144,6 +1146,54 @@ func TestEverySeriesCarriesTimes(t *testing.T) {
 	}
 	check("detail completed", det.Completed1h, snaps)
 	check("detail failed", det.Failed1h, snaps)
+}
+
+// TestCompletedRatesOfMatchesCompletedRates (T8): the series CompletedRatesOf
+// builds in one pass are those CompletedRates builds one at a time, for every
+// label and worker asked: a unit absent from the early snapshots, one that
+// answered nothing, a worker it did not reach, a sample with no rate, a label
+// twice in one snapshot (the first counts, as for PodsOf), and snapshots older
+// than the trend window, left out.
+func TestCompletedRatesOfMatchesCompletedRates(t *testing.T) {
+	var snaps []*Snapshot
+	for n := range 150 { // 12.5 minutes of 5s polls: longer than the trend window
+		w := func(rate float64) *Sample { return rated(smp("Running", 4, 1, 3, 0), rate, 0) }
+		p0 := okPod("p0", map[string]*Sample{"orders": w(float64(n)), "billing": w(1)})
+		pods := []PodSnapshot{p0}
+		switch n % 5 {
+		case 1: // p0 answered nothing
+			pods[0] = PodSnapshot{Key: "p0", Via: "p0", Label: "p0", Err: "connection refused"}
+		case 2: // billing not reached; orders without a rate
+			p0.Workers = map[string]*Sample{"orders": smp("Running", 4, 1, 3, 0)}
+			p0.Unreached = []string{"billing"}
+			pods[0] = p0
+		case 3: // p0 twice: the first counts
+			pods = append(pods, okPod("p0", map[string]*Sample{"orders": w(999), "billing": w(999)}))
+		case 4: // p0 twice, the first answered nothing: it still counts
+			pods = []PodSnapshot{{Key: "p0", Via: "p0", Label: "p0", Err: "connection refused"},
+				okPod("p0", map[string]*Sample{"orders": w(999), "billing": w(999)})}
+		}
+		if n >= 100 { // p1 comes late
+			pods = append(pods, okPod("p1", map[string]*Sample{"orders": w(7)}))
+		}
+		snaps = append(snaps, snap(atTick(n), pods...))
+	}
+	want := map[string][]string{"p0": {"orders", "billing", "absent"}, "p1": {"orders", "billing"}, "p9": {"orders"}}
+
+	got := CompletedRatesOf(snaps, want)
+	for label, workers := range want {
+		for _, name := range workers {
+			if exp := CompletedRates(snaps, label, name); !reflect.DeepEqual(got[label][name], exp) {
+				t.Errorf("%s/%s:\n got %+v\nwant %+v", label, name, got[label][name], exp)
+			}
+		}
+	}
+	if len(got) != len(want) || len(got["p0"]) != 3 || len(got["p1"]) != 2 || len(got["p9"]) != 1 {
+		t.Errorf("CompletedRatesOf built %v, want exactly the series asked for", got)
+	}
+	if got := CompletedRatesOf(nil, want); len(got["p0"]["orders"]) != 0 {
+		t.Errorf("no snapshots: %+v, want no points", got)
+	}
 }
 
 // TestDetailSeriesBoundedToTheHour (R39): the detail series chart the hour

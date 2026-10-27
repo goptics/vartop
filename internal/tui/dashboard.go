@@ -329,18 +329,25 @@ type trendSet struct {
 // first), for the view of the unit labelled label ("" is every unit): the
 // series of the rows it shows — each worker of each unit in its newest
 // snapshot — and its KPIs. fleet builds them, as it does the web charts';
-// only what is drawn is built: no row, no tooltip that is not.
+// only what is drawn is built: no row, no tooltip that is not. The rows'
+// series are built in one pass (fleet.CompletedRatesOf): one CompletedRates
+// a row scans every unit of every snapshot for its label, which at 200 units
+// at a 1s interval took most of a second.
 func newTrends(snaps []*fleet.Snapshot, label string, interval time.Duration, n fleet.Noun) trendSet {
 	ts := trendSet{workers: make(map[unitWorker][]fleet.Point)}
 	if len(snaps) == 0 {
 		return ts
 	}
+	want := make(map[string][]string)
 	for _, p := range fleet.PodsOf(snaps[len(snaps)-1], label) {
 		if p.Err != "" {
 			continue
 		}
-		for _, name := range workersOf(p) {
-			ts.workers[unitWorker{p.Label, name}] = fleet.CompletedRates(snaps, p.Label, name)
+		want[p.Label] = append(want[p.Label], workersOf(p)...)
+	}
+	for unit, series := range fleet.CompletedRatesOf(snaps, want) {
+		for name, pts := range series {
+			ts.workers[unitWorker{unit, name}] = pts
 		}
 	}
 	ts.kpis = fleet.BuildDashboard(snaps, label, interval, n).KPIs

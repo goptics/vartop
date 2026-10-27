@@ -1179,16 +1179,27 @@ func TestSwitchClosesActionMenu(t *testing.T) {
 }
 
 // BenchmarkNewTrends is the build of the sparklines' series, which the sync
-// command runs off the UI goroutine, for a fleet of 50 units with 10 workers
-// each, an hour of history.
+// command runs off the UI goroutine: for a fleet of 50 units with 10 workers
+// each, an hour of history at a 5s and a 1s interval; and of 200 units at 1s,
+// 11 minutes of history — the build reads the last 10, and an hour of 200
+// units at 1s would hold 7.2 million samples.
 func BenchmarkNewTrends(b *testing.B) {
-	for _, interval := range []time.Duration{5 * time.Second, time.Second} {
-		b.Run(interval.String(), func(b *testing.B) {
+	for _, tc := range []struct {
+		units    int
+		interval time.Duration
+		history  time.Duration
+	}{
+		{50, 5 * time.Second, time.Hour},
+		{50, time.Second, time.Hour},
+		{200, time.Second, fleet.TrendWindow + time.Minute},
+	} {
+		b.Run(fmt.Sprintf("%dx10/%s", tc.units, tc.interval), func(b *testing.B) {
 			end := time.Now()
+			n := int(tc.history / tc.interval)
 			var snaps []*fleet.Snapshot
-			for j := range int(time.Hour / interval) {
-				at := end.Add(-time.Duration(int(time.Hour/interval)-1-j) * interval)
-				pods := make([]fleet.PodSnapshot, 50)
+			for j := range n {
+				at := end.Add(-time.Duration(n-1-j) * tc.interval)
+				pods := make([]fleet.PodSnapshot, tc.units)
 				for u := range pods {
 					workers := make(map[string]*fleet.Sample)
 					for w := range 10 {
@@ -1203,7 +1214,7 @@ func BenchmarkNewTrends(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				newTrends(snaps, "", interval, fleet.Noun{One: "pod", Many: "pods"})
+				newTrends(snaps, "", tc.interval, fleet.Noun{One: "pod", Many: "pods"})
 			}
 		})
 	}

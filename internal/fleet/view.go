@@ -491,6 +491,58 @@ func CompletedRates(snaps []*Snapshot, pod, name string) []Point {
 	return workerRates(newest(snaps, TrendWindow), pod, name, completedRate, nil)
 }
 
+// CompletedRatesOf is CompletedRates of each worker want names on each unit,
+// by label: label → worker → points, each series the one CompletedRates gives
+// of that label and worker. It builds them in one pass over the snapshots,
+// each unit's samples looked up once per snapshot, where a CompletedRates per
+// series would scan every unit of every snapshot for its label: a UI that
+// draws a series for every row of a large fleet wants them all (T8).
+//
+// As PodsOf, a label met twice in a snapshot is its first unit's. A label or
+// worker the snapshots lack charts gaps.
+func CompletedRatesOf(snaps []*Snapshot, want map[string][]string) map[string]map[string][]Point {
+	window := newest(snaps, TrendWindow)
+	type series struct {
+		name string
+		pts  []Point
+	}
+	of := make(map[string][]series, len(want)) // by label, each worker once
+	out := make(map[string]map[string][]Point, len(want))
+	for label, workers := range want {
+		out[label] = make(map[string][]Point, len(workers))
+		for _, name := range workers {
+			if _, dup := out[label][name]; dup {
+				continue
+			}
+			pts := make([]Point, len(window))
+			for i, s := range window {
+				pts[i] = Point{At: s.At, Gap: true}
+			}
+			out[label][name] = pts
+			of[label] = append(of[label], series{name, pts})
+		}
+	}
+	seen := make(map[string]bool)
+	for i, s := range window {
+		clear(seen)
+		for _, p := range s.Pods {
+			if seen[p.Label] {
+				continue // PodsOf takes the first
+			}
+			seen[p.Label] = true
+			if p.Err != "" {
+				continue
+			}
+			for _, w := range of[p.Label] {
+				if sm := p.Workers[w.name]; sm != nil && sm.RateOK {
+					w.pts[i] = Point{At: s.At, V: completedRate(sm)}
+				}
+			}
+		}
+	}
+	return out
+}
+
 // CompletedRates1h and FailedRates1h are the completed/s and failed/s of one
 // worker over the hour up to the newest of snaps, merged or of the pod
 // labelled pod: the points of Completed1h and Failed1h of BuildDetail,
