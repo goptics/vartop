@@ -32,6 +32,9 @@ const (
 	// TrendWindow is how far back row and KPI sparklines reach, the 10 minutes
 	// up to the newest snapshot (the TUI buckets it by time).
 	TrendWindow = 10 * time.Minute
+	// HistoryWindow is how far back the detail charts reach, the hour up to
+	// the newest snapshot.
+	HistoryWindow = time.Hour
 	// concurrencyFloor is the smallest upper bound of the concurrency slider.
 	concurrencyFloor = 64
 	// tipSep separates per-pod lines in tooltips (title attributes render \n
@@ -39,8 +42,12 @@ const (
 	tipSep = "\n"
 )
 
-// Point is one chart sample.
+// Point is one chart sample. At is when the snapshot it was built from was
+// taken (Snapshot.At): every series builder sets it on every point, gaps
+// included, and the UIs place points by it — a series' window ends at its
+// newest point's At.
 type Point struct {
+	At      time.Time
 	V       float64
 	Gap     bool   // no data for this snapshot: draw a break, not zero
 	Partial bool   // fewer pods contributed than were expected to: draw hollow
@@ -268,10 +275,11 @@ func BuildGrid(latest *Snapshot) GridView {
 }
 
 // BuildDetail aggregates one worker across the pods reporting it in the newest
-// snapshot (counters are summed) and charts its rates over the whole history.
-// It reports false when no healthy, selected pod has the worker. The detail
-// series always span all of snaps, so the interval is not needed. n words the
-// tooltips.
+// snapshot (counters are summed) and charts its rates over the hour up to the
+// newest of snaps, however many polls that took: a feed held across a
+// collection gap holds older ones, which are left out. It reports false when
+// no healthy, selected pod has the worker. The window is a span of time, so
+// the interval is not needed. n words the tooltips.
 func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun) (DetailView, bool) {
 	if len(snaps) == 0 {
 		return DetailView{}, false
@@ -281,6 +289,7 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 	if m.reporting == 0 {
 		return DetailView{}, false
 	}
+	hour := newest(snaps, HistoryWindow)
 
 	d := DetailView{
 		Name:             worker,
@@ -288,8 +297,8 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 		Class:            m.class,
 		StatusTip:        strings.Join(m.statusTips, tipSep),
 		ConcurrencyStart: slices.Max(m.concurrency),
-		Completed1h:      WorkerRates(snaps, pod, worker, completedRate, n),
-		Failed1h:         WorkerRates(snaps, pod, worker, failedRate, n),
+		Completed1h:      WorkerRates(hour, pod, worker, completedRate, n),
+		Failed1h:         WorkerRates(hour, pod, worker, failedRate, n),
 	}
 	d.ConcurrencyMax = max(concurrencyFloor, 2*d.ConcurrencyStart)
 	for _, p := range pods {
@@ -483,16 +492,16 @@ func CompletedRates(snaps []*Snapshot, pod, name string) []Point {
 }
 
 // CompletedRates1h and FailedRates1h are the completed/s and failed/s of one
-// worker over the whole of snaps (the hour a feed holds), merged or of the
-// pod labelled pod: the points of Completed1h and Failed1h of BuildDetail,
+// worker over the hour up to the newest of snaps, merged or of the pod
+// labelled pod: the points of Completed1h and Failed1h of BuildDetail,
 // without their tooltips — for a UI that draws none (see CompletedRates).
 func CompletedRates1h(snaps []*Snapshot, pod, name string) []Point {
-	return workerRates(snaps, pod, name, completedRate, nil)
+	return workerRates(newest(snaps, HistoryWindow), pod, name, completedRate, nil)
 }
 
 // FailedRates1h is CompletedRates1h for the failed/s.
 func FailedRates1h(snaps []*Snapshot, pod, name string) []Point {
-	return workerRates(snaps, pod, name, failedRate, nil)
+	return workerRates(newest(snaps, HistoryWindow), pod, name, failedRate, nil)
 }
 
 // workerRates is WorkerRates; with n nil the points have no Title.
@@ -522,9 +531,9 @@ func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 		}
 		switch {
 		case n == nil && contributing == 0:
-			out[i] = Point{Gap: true}
+			out[i] = Point{At: s.At, Gap: true}
 		case n == nil:
-			out[i] = Point{V: sum, Partial: contributing < expected}
+			out[i] = Point{At: s.At, V: sum, Partial: contributing < expected}
 		case contributing == 0:
 			out[i] = noDataPoint(s)
 		default:
@@ -586,7 +595,7 @@ func pendingSeries(snaps []*Snapshot, pod string, n Noun) []Point {
 			out[i] = noDataPoint(s)
 			continue
 		}
-		out[i] = Point{V: float64(total), Title: fmt.Sprintf("%s · %d pending (max/%s)", PointTime(s), total, n.One)}
+		out[i] = Point{At: s.At, V: float64(total), Title: fmt.Sprintf("%s · %d pending (max/%s)", PointTime(s), total, n.One)}
 	}
 	return out
 }
@@ -596,6 +605,7 @@ func pendingSeries(snaps []*Snapshot, pod string, n Noun) []Point {
 func ratePoint(s *Snapshot, sum float64, contributing, expected int, scale float64, unit string, n Noun) Point {
 	v := sum * scale
 	return Point{
+		At:      s.At,
 		V:       v,
 		Partial: contributing < expected,
 		Title:   fmt.Sprintf("%s · %.1f%s · %d/%d %s", PointTime(s), v, unit, contributing, expected, n.Many),
@@ -604,7 +614,7 @@ func ratePoint(s *Snapshot, sum float64, contributing, expected int, scale float
 
 // noDataPoint is the gap of a snapshot that has nothing to chart.
 func noDataPoint(s *Snapshot) Point {
-	return Point{Gap: true, Title: PointTime(s) + " · no data"}
+	return Point{At: s.At, Gap: true, Title: PointTime(s) + " · no data"}
 }
 
 // PointTime is the clock time a point's tooltip starts with.

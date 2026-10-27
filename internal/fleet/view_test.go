@@ -1090,3 +1090,92 @@ func TestRates1hMatchDetail(t *testing.T) {
 		}
 	}
 }
+
+// TestEverySeriesCarriesTimes (R39): every point of every series builder
+// carries the At of the snapshot it was built from — rate points, partial
+// points and gaps alike — so that both UIs place it by time, from one
+// source.
+func TestEverySeriesCarriesTimes(t *testing.T) {
+	down := PodSnapshot{Key: "p1", Via: "p1", Label: "p1", Err: "connection refused"}
+	var snaps []*Snapshot
+	for n := range 150 { // 12.5 minutes of 5s polls: longer than the trend window
+		var pods []PodSnapshot
+		switch n % 4 {
+		case 1: // nothing rated: a gap
+			pods = []PodSnapshot{okPod("p0", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 1)})}
+		case 2: // one unit down: partial
+			pods = []PodSnapshot{okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 1), 2, 1)}), down}
+		case 3: // no healthy unit: no data at all
+			pods = []PodSnapshot{down}
+		default:
+			pods = []PodSnapshot{okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 1), 2, 1)})}
+		}
+		snaps = append(snaps, snap(atTick(n), pods...))
+	}
+	window := newest(snaps, TrendWindow)
+	check := func(what string, pts []Point, of []*Snapshot) {
+		t.Helper()
+		if len(pts) != len(of) {
+			t.Errorf("%s: %d points, want %d", what, len(pts), len(of))
+			return
+		}
+		for i, p := range pts {
+			if !p.At.Equal(of[i].At) {
+				t.Errorf("%s: point %d (%+v) has At %v, want its snapshot's, %v", what, i, p, p.At, of[i].At)
+				return
+			}
+		}
+	}
+
+	d := BuildDashboard(snaps, "", 5*time.Second, podNoun)
+	check("row spark", rowByName(t, d.Rows, "orders").Spark, window)
+	check("KPI completed", d.KPIs.Completed, window)
+	check("KPI failed", d.KPIs.Failed, window)
+	check("KPI pending", d.KPIs.Pending, window)
+	check("WorkerRates", WorkerRates(snaps, "", "orders", completedRate, podNoun), snaps)
+	check("fleetRates", fleetRates(snaps, "", completedRate, 1, "/s", podNoun), snaps)
+	check("pendingSeries", pendingSeries(snaps, "", podNoun), snaps)
+	check("CompletedRates", CompletedRates(snaps, "", "orders"), window)
+	check("CompletedRates1h", CompletedRates1h(snaps, "", "orders"), snaps)
+	check("FailedRates1h", FailedRates1h(snaps, "", "orders"), snaps)
+	det, ok := BuildDetail(snaps, "", "orders", 5*time.Second, podNoun)
+	if !ok {
+		t.Fatal("orders reported absent")
+	}
+	check("detail completed", det.Completed1h, snaps)
+	check("detail failed", det.Failed1h, snaps)
+}
+
+// TestDetailSeriesBoundedToTheHour (R39): the detail series chart the hour
+// up to the newest snapshot, whatever older ones they are given — a feed
+// held open across a collection gap holds more than an hour's worth.
+// CompletedRates1h and FailedRates1h, its points without tooltips, are
+// bounded alike.
+func TestDetailSeriesBoundedToTheHour(t *testing.T) {
+	var snaps []*Snapshot
+	add := func(from, to int) {
+		for n := from; n < to; n++ {
+			snaps = append(snaps, snap(atTick(n), okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 2, 1)})))
+		}
+	}
+	add(0, 600)     // 50 minutes of 5s polls
+	add(1080, 1200) // after 40 minutes with none, 10 more
+	newestAt := atTick(1199)
+	since := newestAt.Add(-time.Hour) // tick 479: 121 polls before the gap, 120 after
+	d, ok := BuildDetail(snaps, "", "orders", 5*time.Second, podNoun)
+	if !ok {
+		t.Fatal("orders reported absent")
+	}
+	for what, pts := range map[string][]Point{
+		"Completed1h": d.Completed1h, "Failed1h": d.Failed1h,
+		"CompletedRates1h": CompletedRates1h(snaps, "", "orders"), "FailedRates1h": FailedRates1h(snaps, "", "orders"),
+	} {
+		if len(pts) != 241 {
+			t.Errorf("%s: %d points, want the hour's 241", what, len(pts))
+			continue
+		}
+		if !pts[0].At.Equal(since) || !pts[len(pts)-1].At.Equal(newestAt) {
+			t.Errorf("%s spans %v to %v, want the hour from %v to %v", what, pts[0].At, pts[len(pts)-1].At, since, newestAt)
+		}
+	}
+}
