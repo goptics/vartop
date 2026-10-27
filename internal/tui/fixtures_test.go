@@ -45,6 +45,10 @@ type fixture struct {
 	starts   int            // calls of the model's start
 	startErr error          // what they return
 	run      *daemonRun     // the daemon running, nil if none
+	// envOK is the model's check of a daemon's environment (Daemon.SameEnv),
+	// nil: every one is this one's; envChecks counts its calls.
+	envOK     func(store.Lease) bool
+	envChecks int
 }
 
 // newFixture is a fresh data dir for cfg, its servers named by their keys.
@@ -100,6 +104,31 @@ func (f *fixture) failStart(err error) {
 	f.startErr = err
 }
 
+// daemon is what the model is told of the daemon: f.start starts it, and
+// its environment is checked by the check setEnvCheck set.
+func (f *fixture) daemon() Daemon { return Daemon{Start: f.start, SameEnv: f.sameEnv} }
+
+// sameEnv is the model's Daemon.SameEnv: it counts its calls.
+func (f *fixture) sameEnv(l store.Lease) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.envChecks++
+	return f.envOK == nil || f.envOK(l)
+}
+
+// setEnvCheck replaces the model's check of a daemon's environment.
+func (f *fixture) setEnvCheck(ok func(store.Lease) bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.envOK = ok
+}
+
+func (f *fixture) envChecked() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.envChecks
+}
+
 // model is a 120×40 TUI showing the server keyed key, its feed synced once.
 // Its feeds are closed when the test ends.
 func (f *fixture) model(key string) *Model {
@@ -111,7 +140,7 @@ func (f *fixture) model(key string) *Model {
 func (f *fixture) modelFor(t *testing.T, key string) *Model {
 	t.Helper()
 	cfg, _ := f.config()
-	m := NewModel(cfg, key, f.dir, f.ctl, f.start)
+	m := NewModel(cfg, key, f.dir, f.ctl, f.daemon())
 	m.load = f.config
 	t.Cleanup(func() { _ = m.Close() })
 	deliver(&m, tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -123,7 +152,13 @@ func (f *fixture) modelFor(t *testing.T, key string) *Model {
 // snapshots (see write).
 func (f *fixture) claim() {
 	f.t.Helper()
-	token, ok, err := f.ctl.Claim(store.Lease{PID: os.Getpid(), Build: "test"}, time.Now())
+	f.claimAs(store.Lease{PID: os.Getpid(), Build: "test"})
+}
+
+// claimAs is claim, the lease that of l: a daemon of its environment.
+func (f *fixture) claimAs(l store.Lease) {
+	f.t.Helper()
+	token, ok, err := f.ctl.Claim(l, time.Now())
 	if err != nil || !ok {
 		f.t.Fatalf("Claim = %v, %v", ok, err)
 	}

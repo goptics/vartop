@@ -51,7 +51,7 @@ func TestRowsFromFeed(t *testing.T) {
 	f.write("multi", latest)
 
 	cfg, _ := f.config()
-	m := NewModel(cfg, "multi", f.dir, f.ctl, f.start)
+	m := NewModel(cfg, "multi", f.dir, f.ctl, f.daemon())
 	t.Cleanup(func() { _ = m.Close() })
 	if m.Init() == nil {
 		t.Fatal("Init returned no command")

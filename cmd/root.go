@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -36,7 +38,7 @@ concurrencies, and metrics from varmq mux servers.`,
 		if _, err := cfg.GetActiveServer(key); err != nil {
 			return err
 		}
-		startCollecting(cmd.ErrOrStderr())
+		daemon := tuiDaemon()
 
 		dataDir, err := store.DataDir()
 		if err != nil {
@@ -49,8 +51,8 @@ concurrencies, and metrics from varmq mux servers.`,
 		defer ctl.Close()
 
 		// The TUI reads what the daemon collects; r starts the daemon when
-		// none runs.
-		m := tui.NewModel(cfg, key, dataDir, ctl, ensureLocalDaemon)
+		// none runs, or one collects with another configuration.
+		m := tui.NewModel(cfg, key, dataDir, ctl, daemon)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 
 		finalModel, err := p.Run()
@@ -68,6 +70,21 @@ concurrencies, and metrics from varmq mux servers.`,
 		}
 		return err
 	},
+}
+
+// tuiDaemon makes sure the daemon collects (ensureDaemon) before the TUI
+// opens, as startCollecting does for vartop web, and is what the TUI is
+// told of it: r starts it, a daemon's environment is checked against this
+// vartop's (R31), and what making sure it runs said — that it did not start,
+// or the warning of a login service that failed — goes on the TUI's error
+// line: printed, it would be hidden behind the TUI's screen.
+func tuiDaemon() tui.Daemon {
+	var warn bytes.Buffer
+	err := ensureLocal(&warn)
+	if w := strings.TrimSpace(warn.String()); w != "" {
+		err = errors.Join(err, errors.New(w))
+	}
+	return tui.Daemon{Start: ensureLocalDaemon, SameEnv: sameEnvAsOwn(), StartErr: err}
 }
 
 // loadOrOnboard loads the configuration, starting the interactive onboarding

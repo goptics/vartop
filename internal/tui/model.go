@@ -24,6 +24,7 @@ type Model struct {
 	dataDir string
 	ctl     *store.Control
 	start   func() error                   // starts the daemon; nil: nothing to start
+	sameEnv func(store.Lease) bool         // whether a daemon collects in this vartop's environment (R31); nil: every one does
 	load    func() (*config.Config, error) // reads the config again, every tick
 
 	// feeds holds the feed of every server shown so far, kept for the
@@ -39,6 +40,12 @@ type Model struct {
 	syncErr error  // reading the feed failed
 	down    bool   // no daemon holds a fresh lease
 	srvErr  string // the server's collection error
+
+	// otherEnv is what the last sync said of the daemon holding the lease:
+	// it collects with another configuration than this vartop's (R31), so
+	// its snapshots are of that one's servers. Not the server's: a switch
+	// keeps it.
+	otherEnv bool
 
 	err error // the error line: what the last refresh or action said
 
@@ -75,17 +82,35 @@ type feedKey struct {
 // replace it.
 var loadConfig = config.Load
 
+// Daemon is what the TUI is told of the vartop daemon by the vartop that
+// runs it.
+type Daemon struct {
+	// Start starts the daemon (ensureDaemon) in this vartop's environment,
+	// for r when none runs, or when one collects with another configuration;
+	// nil starts nothing.
+	Start func() error
+	// SameEnv reports whether the daemon of a fresh lease collects in this
+	// vartop's environment: its config file and KUBECONFIG (R31). nil takes
+	// every daemon for this environment's.
+	SameEnv func(store.Lease) bool
+	// StartErr is what making sure the daemon runs said as the TUI opened —
+	// it did not start, say — shown on the error line: printed, it would
+	// be hidden behind the TUI's screen. nil when there is nothing to say.
+	StartErr error
+}
+
 // NewModel is the TUI over the store in dataDir, showing the server keyed
 // serverKey in cfg. ctl is the store's control file: the daemon's lease,
-// the servers' errors and pokes. start starts the daemon (ensureDaemon),
-// for r when none runs; nil starts nothing. The first sync of the server's
-// feed comes with Init.
-func NewModel(cfg *config.Config, serverKey string, dataDir string, ctl *store.Control, start func() error) Model {
+// the servers' errors and pokes. d is what the TUI knows of the daemon. The
+// first sync of the server's feed comes with Init.
+func NewModel(cfg *config.Config, serverKey string, dataDir string, ctl *store.Control, d Daemon) Model {
 	m := Model{
 		cfg:            cfg,
 		dataDir:        dataDir,
 		ctl:            ctl,
-		start:          start,
+		start:          d.Start,
+		sameEnv:        d.SameEnv,
+		err:            d.StartErr,
 		load:           loadConfig,
 		feeds:          make(map[feedKey]*store.Feed),
 		settleWait:     fleet.SettleWait,
@@ -205,9 +230,34 @@ func (m *Model) interval() time.Duration {
 // noun is what the server shown calls its units.
 func (m *Model) noun() fleet.Noun { return fleet.NounFor(m.server()) }
 
-// stale reports whether the newest snapshot of the server shown is stale
-// at now (see fleet.Stale).
-func (m *Model) stale(now time.Time) bool { return fleet.Stale(m.latest(), m.interval(), now) }
+// stale reports whether what the server shown has is not current at now:
+// its newest snapshot is stale (see fleet.Stale), or the daemon collects
+// with another configuration (R31), whose snapshots are not of this one's
+// servers. Its values show —.
+func (m *Model) stale(now time.Time) bool {
+	return m.otherEnv || fleet.Stale(m.latest(), m.interval(), now)
+}
+
+// otherConfigMsg is the notice of a daemon collecting with another
+// configuration (R31): the header's, and every action's refusal.
+var otherConfigMsg = fleet.OtherConfigMsg("press r")
+
+// staleMsg is the header's warning, under the status bar: why what the
+// server shown has is not current (see stale) — the daemon collects with
+// another configuration, or how old its newest snapshot is and why; "" when
+// it is current, or there is none (the body says so then).
+func (m *Model) staleMsg(now time.Time) string {
+	latest := m.latest()
+	switch {
+	case latest == nil:
+		return ""
+	case m.otherEnv:
+		return otherConfigMsg
+	case fleet.Stale(latest, m.interval(), now):
+		return fleet.StaleMsg(m.key, latest, now, m.down, m.srvErr)
+	}
+	return ""
+}
 
 // resetPodView returns to the merged view of every unit of a server; the
 // table is rebuilt for it by the show that comes with it.

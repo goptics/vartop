@@ -104,7 +104,9 @@ func (s *switcherScreen) rebuild(m *Model) {
 	for _, name := range slices.Sorted(maps.Keys(m.cfg.Servers)) {
 		srv, latest := m.cfg.Servers[name], m.switchLatest[name]
 		h := fleet.Health(latest)
-		stale := fleet.Stale(latest, srv.PollInterval(), now) // its health is not current
+		// Its health is not current; nor is any under a daemon collecting with
+		// another configuration (R31).
+		stale := m.otherEnv || fleet.Stale(latest, srv.PollInterval(), now)
 		expanded := s.expanded == name
 
 		items = append(items, switchServerItem{

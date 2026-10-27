@@ -45,7 +45,7 @@ func (m Model) syncCmd(feed *store.Feed, gen int) tea.Cmd {
 	if feed == nil {
 		return nil
 	}
-	key, ctl := m.key, m.ctl
+	key, ctl, sameEnv := m.key, m.ctl, m.sameEnv
 	label, interval, noun, build := m.selectedLabel, m.interval(), m.noun(), m.buildTrends
 	have := m.dashboardScreen().trends.key
 	var open unitWorker // what the detail screen shows; none if it is not
@@ -56,7 +56,7 @@ func (m Model) syncCmd(feed *store.Feed, gen int) tea.Cmd {
 	}
 	return func() tea.Msg {
 		msg := syncedMsg{server: key, gen: gen, err: feed.Sync()}
-		msg.down, msg.srvErr = controlState(ctl, key)
+		msg.down, msg.otherEnv, msg.srvErr = controlState(ctl, key, sameEnv)
 		msg.trends = trendsFor(feed, label, interval, noun, build, have)
 		if open.worker != "" {
 			msg.detail = detailFor(feed, open.label, open.worker, buildDetail, haveDetail)
@@ -106,17 +106,31 @@ func detailFor(feed *store.Feed, label, worker string, build func([]*fleet.Snaps
 	return s
 }
 
-// controlState is what control.db says of the server keyed key: whether no
-// daemon holds a fresh lease, and the server's collection error. A lease
-// that cannot be read counts as held: nothing says the daemon is down.
-func controlState(ctl *store.Control, key string) (down bool, srvErr string) {
-	if _, fresh, err := ctl.Lease(); err == nil && !fresh {
-		down = true
-	}
+// controlState is what control.db says of the server keyed key: what it
+// says of the daemon (see daemonState), and the server's collection error.
+func controlState(ctl *store.Control, key string, sameEnv func(store.Lease) bool) (down, other bool, srvErr string) {
+	down, other = daemonState(ctl, sameEnv)
 	if errs, err := ctl.ServerErrs(); err == nil {
 		srvErr = errs[key]
 	}
-	return down, srvErr
+	return down, other, srvErr
+}
+
+// daemonState is what control.db says of the daemon: whether none holds a
+// fresh lease (down), and whether the one that does collects with another
+// configuration than this vartop's (other; R31) — sameEnv says, nil taking
+// every one for this one's. Only a fresh lease is a daemon's that collects:
+// a stale one is not running, whatever its environment. A lease that cannot
+// be read counts as held, in this environment: nothing says otherwise.
+func daemonState(ctl *store.Control, sameEnv func(store.Lease) bool) (down, other bool) {
+	l, fresh, err := ctl.Lease()
+	switch {
+	case err != nil:
+		return false, false
+	case !fresh:
+		return true, false
+	}
+	return false, sameEnv != nil && !sameEnv(l)
 }
 
 // configCmd reads the config again. One that cannot be read (half written,
@@ -161,17 +175,28 @@ func readLatest(dataDir, key string) *fleet.Snapshot {
 }
 
 // refreshCmd pokes the server shown, so that the daemon polls it now, and
-// starts the daemon when none holds a fresh lease. nil when the server is
-// not configured: there is nothing to poke.
+// starts the daemon when none holds a fresh lease. One collecting with
+// another configuration (R31) is not poked: this vartop's is started first,
+// which replaces it (ensureDaemon), as vartop web's Start collector does.
+// nil when the server is not configured: there is nothing to poke.
 func (m *Model) refreshCmd() tea.Cmd {
 	m.err = nil
 	if m.server() == nil {
 		return nil
 	}
-	key, ctl, start := m.key, m.ctl, m.start
+	key, ctl, start, sameEnv := m.key, m.ctl, m.start, m.sameEnv
 	return func() tea.Msg {
+		down, other := daemonState(ctl, sameEnv)
+		if other {
+			if start == nil {
+				return actedMsg{server: key, err: errors.New(otherConfigMsg)}
+			}
+			if err := start(); err != nil {
+				return actedMsg{server: key, err: err}
+			}
+		}
 		_, err := ctl.Poke(key)
-		if _, fresh, lerr := ctl.Lease(); lerr == nil && !fresh && start != nil {
+		if down && start != nil {
 			err = errors.Join(err, start())
 		}
 		return actedMsg{server: key, err: err}
@@ -189,7 +214,7 @@ func (m *Model) actCmd(worker, label, action string) tea.Cmd {
 		return nil
 	}
 	m.err = nil
-	a := actor{feed: m.feed, ctl: m.ctl, key: m.key, interval: srv.PollInterval(), token: srv.Token, noun: m.noun(), wait: m.settleWait}
+	a := actor{feed: m.feed, ctl: m.ctl, sameEnv: m.sameEnv, key: m.key, interval: srv.PollInterval(), token: srv.Token, noun: m.noun(), wait: m.settleWait}
 	return func() tea.Msg {
 		return actedMsg{server: a.key, err: a.act(worker, label, action)}
 	}
@@ -199,6 +224,7 @@ func (m *Model) actCmd(worker, label, action string) tea.Cmd {
 type actor struct {
 	feed     *store.Feed
 	ctl      *store.Control
+	sameEnv  func(store.Lease) bool // the model's (see daemonState)
 	key      string
 	interval time.Duration
 	token    string
@@ -207,6 +233,11 @@ type actor struct {
 }
 
 func (a actor) act(worker, label, action string) error {
+	if _, other := daemonState(a.ctl, a.sameEnv); other {
+		// Its snapshots name units of another configuration's servers: this
+		// one's token must not reach them. Nor is that daemon poked.
+		return errors.New(otherConfigMsg)
+	}
 	latest := a.feed.Latest()
 	if latest == nil || fleet.Stale(latest, a.interval, time.Now()) {
 		a.settle()
@@ -216,7 +247,7 @@ func (a actor) act(worker, label, action string) error {
 	case latest == nil:
 		return errors.New(fleet.WaitingMsg(a.key))
 	case fleet.Stale(latest, a.interval, now):
-		down, srvErr := controlState(a.ctl, a.key)
+		down, _, srvErr := controlState(a.ctl, a.key, a.sameEnv)
 		return errors.New(fleet.StaleMsg(a.key, latest, now, down, srvErr))
 	}
 	units := fleet.PodsOf(latest, label)
@@ -239,7 +270,7 @@ func (a actor) act(worker, label, action string) error {
 // taken after the poke, for up to a.wait. With no daemon running, which
 // would answer the poke, it returns at once.
 func (a actor) settle() {
-	if down, _ := controlState(a.ctl, a.key); down {
+	if down, _ := daemonState(a.ctl, a.sameEnv); down {
 		return
 	}
 	at, err := a.ctl.Poke(a.key)

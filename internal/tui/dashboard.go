@@ -483,8 +483,8 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 		updatedInfo,
 	)}
 	wrap := lipgloss.NewStyle().Width(max(1, m.width-4))
-	if stale {
-		lines = append(lines, wrap.Foreground(ColorWarning).Render(fleet.StaleMsg(m.key, latest, now, m.down, m.srvErr)))
+	if msg := m.staleMsg(now); msg != "" {
+		lines = append(lines, wrap.Foreground(ColorWarning).Render(msg))
 	}
 	if down := unitErrors(latest, m.selectedLabel); down != "" {
 		lines = append(lines, wrap.Foreground(ColorError).Render(down))
@@ -551,8 +551,9 @@ func (m *Model) connectionLabel() string {
 const daemonDownHint = "the vartop daemon is not running — press r to start it"
 
 // notice is what the body shows instead of the table, if anything: the
-// server is not configured (bad), has no snapshot yet, or the unit selected
-// is no longer reported (bad).
+// server is not configured (bad), has no snapshot yet — and why, when the
+// daemon is not running, collects with another configuration, or cannot
+// collect it — or the unit selected is no longer reported (bad).
 func (m *Model) notice() (text string, bad bool) {
 	latest := m.latest()
 	switch {
@@ -561,6 +562,8 @@ func (m *Model) notice() (text string, bad bool) {
 	case latest == nil:
 		text = fleet.WaitingMsg(m.key)
 		switch {
+		case m.otherEnv: // its server errors are of that configuration's servers
+			text += "\n" + otherConfigMsg
 		case m.down:
 			text += "\n" + daemonDownHint
 		case m.srvErr != "":

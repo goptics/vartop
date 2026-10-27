@@ -235,7 +235,7 @@ func (d *detailScreen) renderHeader(m *Model, latest *fleet.Snapshot, u fleet.Po
 	if stale {
 		// Wrapped to the screen: the compact header is narrow.
 		staleLine = lipgloss.NewStyle().Foreground(ColorWarning).Width(max(1, m.width-8)).
-			Render(fleet.StaleMsg(m.key, latest, time.Now(), m.down, m.srvErr))
+			Render(m.staleMsg(time.Now()))
 	}
 	unitInfo := u.Label
 	if tip := u.Tip(); tip != "" && tip != u.Label {

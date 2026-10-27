@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -211,5 +212,154 @@ func TestRemovedServerFeedClosed(t *testing.T) {
 	}
 	if _, ok := m.feeds[feedKey{"a", 5 * time.Second}]; !ok || len(m.feeds) != 1 {
 		t.Fatalf("feeds kept: %v, want a's only", slices.Collect(maps.Keys(m.feeds)))
+	}
+}
+
+// otherConfigCopy is the TUI's notice of a daemon collecting with another
+// configuration (R31).
+const otherConfigCopy = "The vartop daemon is collecting with another configuration — press r to use this one."
+
+// TestOtherConfigDaemon (R31): a daemon collecting with another
+// configuration — its config file or KUBECONFIG not this vartop's — collects
+// servers of that one: the TUI says so, shows no current value, and refuses
+// every action with the notice, nothing sent and nothing poked. r starts
+// this vartop's daemon, which replaces it.
+func TestOtherConfigDaemon(t *testing.T) {
+	pod := newFakePod(t)
+	f := newFixture(t, multiConfig(pod.url()))
+	f.claimAs(store.Lease{PID: os.Getpid(), Build: "test", ConfigPath: "/b/vartop/config.json"})
+	f.write("multi", fresh(unit("instance-1", pod.url(), map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)})))
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	m := f.model("multi")
+
+	view := m.View()
+	if !strings.Contains(view, otherConfigCopy) {
+		t.Errorf("dashboard lacks the notice %q:\n%s", otherConfigCopy, view)
+	}
+	if got, want := rowsOf(m), []string{"orders|instance-1|—|—|—|—|—"}; !slices.Equal(got, want) {
+		t.Errorf("rows = %v, want %v: no current value", got, want)
+	}
+
+	refused := func(where string, keys ...tea.KeyMsg) {
+		t.Helper()
+		for _, action := range []rune{'p', 'r', 's', 'R'} { // pause, resume, stop, restart
+			m.err = nil
+			for _, k := range keys {
+				press(m, k)
+			}
+			press(m, runeKey('a'))
+			cmd := press(m, runeKey(action))
+			if cmd == nil {
+				t.Fatalf("%s: %c returned no command", where, action)
+			}
+			deliver(m, cmd())
+			if m.err == nil || m.err.Error() != otherConfigCopy {
+				t.Errorf("%s: %c: error = %v, want %q", where, action, m.err, otherConfigCopy)
+			}
+		}
+	}
+	refused("dashboard")
+	press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.isDetailActive() {
+		t.Fatal("enter did not open the detail screen")
+	}
+	view = m.View()
+	if !strings.Contains(view, otherConfigCopy) || strings.Contains(view, "Running") || strings.Contains(view, "7 workers") {
+		t.Errorf("detail: want the notice and no current value:\n%s", view)
+	}
+	refused("detail")
+	if n := pod.total(); n != 0 {
+		t.Errorf("varmq got %d requests: %v", n, pod.seen())
+	}
+	if n := f.pokes("multi"); n != 0 {
+		t.Errorf("the other configuration's daemon was poked %d times", n)
+	}
+
+	// The switcher shows no current health either.
+	press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	openSwitcher(t, m)
+	for _, it := range m.switcher.switcher.Items() {
+		if it, ok := it.(switchServerItem); ok && !it.stale {
+			t.Errorf("switcher shows %s's health: %+v", it.name, it)
+		}
+	}
+	press(m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	// r starts this vartop's daemon, and pokes the other one not.
+	m.err = nil
+	cmd := press(m, runeKey('r'))
+	if cmd == nil {
+		t.Fatal("r returned no command")
+	}
+	deliver(m, cmd())
+	if f.started() != 1 || m.err != nil {
+		t.Errorf("r: starts = %d, error %v; want this vartop's daemon started", f.started(), m.err)
+	}
+
+	// Once the daemon collects in this environment, all is as before.
+	f.setEnvCheck(nil)
+	syncNow(t, m)
+	if view := m.View(); strings.Contains(view, otherConfigCopy) {
+		t.Errorf("the notice stays once the environment is this one's:\n%s", view)
+	}
+	if got, want := rowsOf(m), []string{"orders|instance-1|Running|4|1|0|3"}; !slices.Equal(got, want) {
+		t.Errorf("rows = %v, want %v", got, want)
+	}
+}
+
+// TestOtherConfigWaiting (R31): a server with no snapshot under a daemon of
+// another configuration waits with the notice, not "not running"; a stale
+// lease is no daemon's to check: it is not running, whatever its
+// environment.
+func TestOtherConfigWaiting(t *testing.T) {
+	f := newFixture(t, multiConfig("http://a.invalid"))
+	f.claimAs(store.Lease{PID: os.Getpid(), Build: "test", ConfigPath: "/b/vartop/config.json"})
+	f.setEnvCheck(func(store.Lease) bool { return false })
+	m := f.model("multi")
+	view := m.View()
+	for _, want := range []string{"Waiting for the first snapshot of multi…", otherConfigCopy} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view lacks %q:\n%s", want, view)
+		}
+	}
+	if cmd := m.actCmd("orders", "instance-1", "pause"); cmd != nil {
+		if deliver(m, cmd()); m.err == nil || m.err.Error() != otherConfigCopy {
+			t.Errorf("action error = %v, want %q", m.err, otherConfigCopy)
+		}
+	}
+	if n := f.pokes("multi"); n != 0 {
+		t.Errorf("pokes = %d, want none", n)
+	}
+
+	f.release()
+	checks := f.envChecked()
+	m.err = nil // the refusal the action left on the error line
+	syncNow(t, m)
+	view = m.View()
+	if strings.Contains(view, otherConfigCopy) || !strings.Contains(view, "the vartop daemon is not running") {
+		t.Errorf("after the lease is let go: want not running, no notice:\n%s", view)
+	}
+	if f.envChecked() != checks {
+		t.Error("a stale lease's environment was checked")
+	}
+}
+
+// TestStartErrorShown: what making sure the daemon runs said as the TUI
+// opened (Daemon.StartErr) is on its error line from the start — printed,
+// it would be hidden behind the TUI's screen — until r tries again.
+func TestStartErrorShown(t *testing.T) {
+	f := newFixture(t, multiConfig("http://a.invalid"))
+	cfg, _ := f.config()
+	startErr := errors.New("vartop daemon did not start; see /data/daemon.log")
+	m := NewModel(cfg, "multi", f.dir, f.ctl, Daemon{Start: f.start, StartErr: startErr})
+	t.Cleanup(func() { _ = m.Close() })
+	deliver(&m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	syncNow(t, &m)
+	if view := m.View(); !strings.Contains(view, startErr.Error()) {
+		t.Errorf("the start error is not shown:\n%s", view)
+	}
+	deliver(&m, press(&m, runeKey('r'))())
+	if view := m.View(); strings.Contains(view, startErr.Error()) {
+		t.Errorf("the start error stays after r started the daemon:\n%s", view)
 	}
 }
