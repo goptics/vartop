@@ -269,6 +269,38 @@ func TestDirectActionPokes(t *testing.T) {
 	}
 }
 
+// TestActionEscapesWorkerName: the worker's name goes into the action's
+// path escaped, as vartop web sends it: a slash in it is no path separator,
+// and a %XX in it is not read as another name (q%41 would reach worker qA).
+func TestActionEscapesWorkerName(t *testing.T) {
+	pod := newFakePod(t)
+	f := newFixture(t, multiConfig(pod.url()))
+	f.claim()
+	f.write("multi", fresh(unit("instance-1", pod.url(), map[string]*fleet.Sample{
+		"q%41":        smp("Running", 4, 1, 3, 0),
+		"emails/high": smp("Running", 4, 1, 3, 0),
+	})))
+	m := f.model("multi")
+	m.settleWait = 0 // no daemon answers the poke: nothing to wait for
+
+	for worker, want := range map[string]string{
+		"q%41":        "PATCH /workers/q%2541/actions/pause",
+		"emails/high": "PATCH /workers/emails%2Fhigh/actions/pause",
+	} {
+		cmd := m.actCmd(worker, "instance-1", "pause")
+		if cmd == nil {
+			t.Fatalf("%s: no action command", worker)
+		}
+		deliver(m, cmd())
+		if m.err != nil {
+			t.Errorf("%s: error %v", worker, m.err)
+		}
+		if pod.count(want) != 1 {
+			t.Errorf("%s: varmq got %v, want %q", worker, pod.seen(), want)
+		}
+	}
+}
+
 // TestDashboardActionRoutesToRowPod drives the dashboard's own action keys
 // (a, then p) on the second row of a merged view where both units run the
 // same worker: the PATCH must reach only that row's unit.

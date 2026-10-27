@@ -344,7 +344,7 @@ type fakePod struct {
 	srv *httptest.Server
 
 	mu          sync.Mutex
-	requests    []string // "METHOD /path"
+	requests    []string // "METHOD /path", the path as sent: escaped
 	auth        []string // each request's Authorization header, same order
 	failActions bool     // PATCH requests answer 409
 }
@@ -359,7 +359,7 @@ func newFakePod(t *testing.T) *fakePod {
 
 func (p *fakePod) handle(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
-	p.requests = append(p.requests, r.Method+" "+r.URL.Path)
+	p.requests = append(p.requests, r.Method+" "+r.URL.EscapedPath())
 	p.auth = append(p.auth, r.Header.Get("Authorization"))
 	failActions := p.failActions
 	p.mu.Unlock()

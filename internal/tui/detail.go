@@ -184,7 +184,9 @@ func (d *detailScreen) View(m *Model) string {
 	// The scroll indicator can wrap the footer onto another line, so size the
 	// viewport for that case to keep its height (and the scroll limits) stable.
 	footerHeight = max(footerHeight, lipgloss.Height(d.renderFooter(m, 1)))
-	d.vp.Width, d.vp.Height = m.width, m.height-footerHeight-2
+	// Never negative, however short the screen: the viewport would scroll
+	// past its content, and its next View panic.
+	d.vp.Width, d.vp.Height = m.width, max(0, m.height-footerHeight-2)
 	d.vp.SetContent(fullBodyContent)
 	d.vp.SetYOffset(d.vp.YOffset) // re-clamp after a resize
 	footer = d.renderFooter(m, d.vp.YOffset)
@@ -330,7 +332,7 @@ func (d *detailScreen) renderFooter(m *Model, scrollY int) string {
 	keysView := helpFooter(d.keyMap(), m.width-lipgloss.Width(pollInfo)-4)
 
 	// Create footer layout
-	leftCol := lipgloss.NewStyle().Width(m.width - lipgloss.Width(pollInfo) - 2).Render(keysView)
+	leftCol := lipgloss.NewStyle().Width(max(1, m.width-lipgloss.Width(pollInfo)-2)).Render(keysView)
 	footerContent := lipgloss.JoinHorizontal(lipgloss.Right, leftCol, pollInfo)
 
 	return FooterStyle.Width(m.width).Padding(0, 1).Render(footerContent)

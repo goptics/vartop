@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"slices"
 	"time"
 
@@ -225,7 +226,8 @@ func (a actor) act(worker, label, action string) error {
 	case units[0].Balanced:
 		return errors.New(fleet.OneBalancedMsg)
 	}
-	err := api.NewClient(units[0].Key, a.token).Action(worker, action)
+	// Escaped, as fleet.Act sends it: the name is one segment of the path.
+	err := api.NewClient(units[0].Key, a.token).Action(url.PathEscape(worker), action)
 	_, _ = a.ctl.Poke(a.key) // sent, or maybe sent: the daemon polls now, to show what it did
 	if err != nil {
 		return fmt.Errorf("failed to %s worker %s on %s: %w", action, worker, label, err)

@@ -357,9 +357,13 @@ func TestDetailRefreshPokes(t *testing.T) {
 	}
 }
 
+// TestResizeAllScreensDoesNotPanic: every screen survives any size, a tiny
+// one or one whose footer wraps taller than the screen (widths 20 to 23 put
+// the detail screen's scroll indicator past its width), and every scroll
+// key after it: past the end, to the bottom and back.
 func TestResizeAllScreensDoesNotPanic(t *testing.T) {
-	widths := []int{20, 80, 92, 106, 200}
-	heights := []int{5, 24, 60}
+	widths := []int{20, 21, 22, 23, 80, 92, 106, 200}
+	heights := []int{1, 2, 3, 5, 24, 60}
 
 	// The stores, made once; each subtest gets a model of its own.
 	detail, switcher, empty := detailFixture(t), switcherFixture(t), newFixture(t, localConfig())
@@ -467,10 +471,17 @@ func TestResizeAllScreensDoesNotPanic(t *testing.T) {
 					deliver(m, tea.WindowSizeMsg{Width: w, Height: h})
 					_ = m.View()
 
-					// Navigation after a resize must also be safe.
-					press(m, tea.KeyMsg{Type: tea.KeyDown})
-					press(m, tea.KeyMsg{Type: tea.KeyUp})
+					// Navigation after a resize must also be safe: down
+					// well past the end, to the bottom and the top, a page
+					// either way, each drawn.
+					for range 60 {
+						press(m, tea.KeyMsg{Type: tea.KeyDown})
+					}
 					_ = m.View()
+					for _, k := range []tea.KeyType{tea.KeyUp, tea.KeyEnd, tea.KeyHome, tea.KeyPgDown, tea.KeyPgUp, tea.KeyEnd} {
+						press(m, tea.KeyMsg{Type: k})
+						_ = m.View()
+					}
 				})
 			}
 		}

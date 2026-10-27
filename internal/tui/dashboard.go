@@ -631,7 +631,7 @@ func (d *dashboardScreen) renderFooter(m *Model) string {
 	keysView := helpFooter(d.keyMap(), m.width-lipgloss.Width(pollInfo)-4)
 
 	// Create footer layout
-	leftCol := lipgloss.NewStyle().Width(m.width - lipgloss.Width(pollInfo) - 2).Render(keysView)
+	leftCol := lipgloss.NewStyle().Width(max(1, m.width-lipgloss.Width(pollInfo)-2)).Render(keysView)
 	footerContent := lipgloss.JoinHorizontal(lipgloss.Right, leftCol, pollInfo)
 
 	return FooterStyle.Width(m.width).Padding(0, 1).Render(footerContent)
