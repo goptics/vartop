@@ -153,11 +153,14 @@ func Health(latest *Snapshot) HealthView {
 }
 
 // Stale reports whether latest, the newest snapshot of a server polled
-// every interval, is stale at now: two polls missed, and 2s of slack. With
-// no snapshot (nil) there is nothing old to show: it is not stale. Both
-// UIs call a server stale by this one rule.
+// every interval, is stale at now: older than 3 intervals and 2s of slack.
+// A server whose polls run to their 0.8·interval deadline has snapshots
+// interval + 0.8·interval apart, each stored 0.8·interval after its At: up
+// to 2.6 intervals old while the daemon collects as it should. With no
+// snapshot (nil) there is nothing old to show: it is not stale. Both UIs
+// call a server stale by this one rule.
 func Stale(latest *Snapshot, interval time.Duration, now time.Time) bool {
-	return latest != nil && now.Sub(latest.At) > 2*interval+2*time.Second
+	return latest != nil && now.Sub(latest.At) > 3*interval+2*time.Second
 }
 
 // BalancerNote says how many instances answered behind each balancer endpoint

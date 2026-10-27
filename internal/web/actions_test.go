@@ -1349,10 +1349,15 @@ func TestOldFormPOSTSendsNothing(t *testing.T) {
 func TestActionResponseShowsStale(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
-		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}}, // stale after 6s
+		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}}, // stale after 3·2s + 2s = 8s
 	}})
 	f.claim() // a daemon runs, as far as the lease says, but answers no poke
-	f.write("multi", snap(time.Now().Add(-5*time.Second),
+	// 6.2s old: fresh to bind the action with 1.8s to spare (for the write
+	// and the POST); stale once the response has waited out the whole
+	// SettleWait (2s) for a snapshot no daemon takes, 8.2s or more old.
+	// The two margins can only sum to SettleWait; the response's is sure,
+	// time moving only forward.
+	f.write("multi", snap(time.Now().Add(-6200*time.Millisecond),
 		labelled(okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1"),
 		labelled(okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2")))
 

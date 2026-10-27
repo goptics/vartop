@@ -940,18 +940,21 @@ func TestFilterFollowsLabel(t *testing.T) {
 	}
 }
 
-// TestStale: a server's newest snapshot is stale once two polls were
-// missed and 2s more passed, not a moment before; no snapshot is not stale.
+// TestStale: a server's newest snapshot is stale once it is 3 intervals
+// and 2s old, not a moment before (R35: a server whose polls run to their
+// 0.8·interval deadline reaches 2.6 intervals between snapshots); no
+// snapshot is not stale.
 func TestStale(t *testing.T) {
 	const interval = 5 * time.Second
 	latest := &Snapshot{At: viewT0}
-	limit := viewT0.Add(2*interval + 2*time.Second)
+	limit := viewT0.Add(3*interval + 2*time.Second)
 	for _, c := range []struct {
 		latest *Snapshot
 		now    time.Time
 		want   bool
 	}{
 		{latest, viewT0, false},
+		{latest, viewT0.Add(interval + 2*8*interval/10), false}, // the slowest cadence's worst age
 		{latest, limit, false},
 		{latest, limit.Add(time.Millisecond), true},
 		{latest, limit.Add(time.Hour), true},

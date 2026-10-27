@@ -97,7 +97,7 @@ func TestRowsFromFeed(t *testing.T) {
 	}
 }
 
-// TestStaleHeader: a newest snapshot older than 2·interval + 2s makes the
+// TestStaleHeader: a newest snapshot older than 3·interval + 2s makes the
 // header say how old, and why — the daemon is not running, the server's
 // collection error, or neither known — the way the web pages do, and the
 // current values turn to —.
