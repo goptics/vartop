@@ -195,12 +195,49 @@ func BenchmarkDayRead(b *testing.B) {
 	since := snaps[0].At
 	b.ResetTimer()
 	for range b.N {
-		d, err := r.Day(worker, since)
+		d, err := r.Day(worker, "", since)
 		if err != nil {
 			b.Fatal(err)
 		}
-		if pts, _ := d.Rates("", false, snaps[len(snaps)-1].At, fleet.NounFor(nil)); len(pts) == 0 {
+		if pts, _ := d.Rates("", false, fleet.DayWindow, snaps[len(snaps)-1].At, fleet.NounFor(nil)); len(pts) == 0 {
 			b.Fatal("no points")
 		}
+	}
+}
+
+// BenchmarkLongRead measures reading one view of a worker's buckets over
+// a longer chart's span, and charting it, on a 10 × 20 server whose
+// buckets are written straight in (a poll per bucket, every bucket full):
+// what a 7d or 30d chart reads.
+func BenchmarkLongRead(b *testing.B) {
+	dir := b.TempDir()
+	claimed(b, dir)
+	db := newWriter(b, dir, "prod")
+	end := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	if _, err := db.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 30 * 288),
+		w(j) AS (SELECT 0 UNION ALL SELECT j + 1 FROM w WHERE j < 19),
+		l(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM l WHERE k < 10)
+		INSERT INTO buckets SELECT 'worker-' || j, ? - i * 300, CASE k WHEN 0 THEN '' ELSE 'instance-' || k END,
+			60, 100, 1, 3, 1, 10, 10 FROM n, w, l`, end.Unix()); err != nil {
+		b.Fatal(err)
+	}
+	r, err := OpenServer(dir, "prod", false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer r.Close()
+	for _, days := range []int{1, 7, 30} {
+		span := time.Duration(days) * fleet.DayWindow
+		b.Run(fmt.Sprintf("%dd", days), func(b *testing.B) {
+			for range b.N {
+				d, err := r.Day("worker-3", "", fleet.ChartStart(span, end))
+				if err != nil {
+					b.Fatal(err)
+				}
+				if pts, _ := d.Rates("", false, span, end, fleet.NounFor(nil)); len(pts) == 0 || pts[0].Gap {
+					b.Fatal("no first point")
+				}
+			}
+		})
 	}
 }

@@ -45,7 +45,7 @@ func axisLabels(fig string) []string {
 	_, axis, _ := strings.Cut(fig, `class="axis-x"`)
 	axis, _, _ = strings.Cut(axis, "</div>")
 	var out []string
-	for _, m := range regexp.MustCompile(`>(\d\d:\d\d)<`).FindAllStringSubmatch(axis, -1) {
+	for _, m := range regexp.MustCompile(`>([^<>]+)</span>`).FindAllStringSubmatch(axis, -1) {
 		out = append(out, m[1])
 	}
 	return out
@@ -153,6 +153,131 @@ func TestDayChartTopsUp(t *testing.T) {
 	_, body = fetch(t, f.srv, "/workers/orders?server=multi&completed=24h", true)
 	if c, _ := figures(t, body); !strings.Contains(c, "peak 50/s") {
 		t.Errorf("after a new snapshot at 25/s per instance: want peak 50/s:\n%s", c)
+	}
+}
+
+// switchLink finds the switch choice labelled label in a chart: its link,
+// and whether it is the current one.
+func switchLinkOf(t *testing.T, fig, label string) (href string, current bool) {
+	t.Helper()
+	m := regexp.MustCompile(`<a href="([^"]*)"[^>]*?( aria-current="true")?[^>]*>` + label + `</a>`).FindStringSubmatch(fig)
+	if m == nil {
+		t.Fatalf("no %s switch in:\n%s", label, fig)
+	}
+	return html.UnescapeString(m[1]), m[2] != ""
+}
+
+// switchTexts is the choices of a chart's switch, in order.
+func switchTexts(fig string) (out []string) {
+	_, sw, _ := strings.Cut(fig, `class="seg"`)
+	sw, _, _ = strings.Cut(sw, "</span>")
+	for _, m := range regexp.MustCompile(`>([^<>]+)</a>`).FindAllStringSubmatch(sw, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// longFixture serves a server of 30 days' history whose orders ran at
+// 3/s (per instance) at the start of a 30d chart's first point — before
+// 30 days back, in that point all the same — at 9/s completed and 1/s
+// failed 5 days ago, and at 1/s now.
+func longFixture(t *testing.T) (f *fixture, first, fiveDays time.Time) {
+	t.Helper()
+	_, _, aSrv, bSrv := twoFakes(t)
+	f = newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL, bSrv.URL}, History: "30d"},
+	}})
+	f.claim()
+	now := time.Now()
+	first, fiveDays = fleet.ChartStart(30*fleet.DayWindow, now), now.Add(-5*fleet.DayWindow)
+	f.write("multi", ordersAt(first, aSrv.URL, bSrv.URL, 3, 0))
+	f.write("multi", ordersAt(fiveDays, aSrv.URL, bSrv.URL, 9, 1))
+	f.write("multi", ordersAt(now, aSrv.URL, bSrv.URL, 1, 0))
+	return f, first, fiveDays
+}
+
+// TestLongerSpans (R48): a server's history gives each chart a choice per
+// span up to it. A 7d chart has a point per 15 minutes, dated, its axis
+// at local midnights; a 30d chart's first point holds what was polled
+// in it before 30 days back. The poller and the picker keep the choice.
+func TestLongerSpans(t *testing.T) {
+	f, first, fiveDays := longFixture(t)
+	_, body := fetch(t, f.srv, "/workers/orders?server=multi&completed=7d", false)
+	completed, failed := figures(t, body)
+
+	for _, fig := range []string{completed, failed} {
+		if got := switchTexts(fig); !slices.Equal(got, []string{"1h", "24h", "7d", "30d"}) {
+			t.Errorf("switch = %q, want 1h 24h 7d 30d", got)
+		}
+	}
+	if href, cur := switchLinkOf(t, completed, "7d"); !cur || href != "/workers/orders?completed=7d&server=multi" {
+		t.Errorf("Completed 7d = %q current %v, want the current choice", href, cur)
+	}
+	if href, cur := switchLinkOf(t, failed, "30d"); cur || href != "/workers/orders?completed=7d&failed=30d&server=multi" {
+		t.Errorf("Failed 30d = %q current %v, want a link keeping completed=7d", href, cur)
+	}
+	at := fiveDays.Truncate(15 * time.Minute)
+	tip := at.Local().Format("Mon 2 Jan 15:04") + "–" + at.Add(15*time.Minute).Local().Format("15:04") + " · avg 18.0/s · peak 18.0/s · 2/2 instances"
+	if !strings.Contains(completed, tip) || !strings.Contains(completed, `<span class="peak">peak 18/s</span>`) {
+		t.Errorf("the 7d Completed chart lacks the point %q or the week's peak 18/s:\n%s", tip, completed)
+	}
+	labels := axisLabels(completed)
+	if len(labels) < 6 || slices.ContainsFunc(labels, func(l string) bool { return !regexp.MustCompile(`^[A-Z][a-z]{2} \d{1,2}$`).MatchString(l) }) {
+		t.Errorf("7d axis labels = %q, want a weekday and date a day", labels)
+	}
+	if !strings.Contains(body, `id="poller" hidden hx-get="`+html.EscapeString("/workers/orders?completed=7d&server=multi")+`"`) {
+		t.Errorf("the poller loses completed=7d:\n%s", body)
+	}
+	if !strings.Contains(body, `<input type="hidden" name="completed" value="7d">`) {
+		t.Errorf("the instance picker loses completed=7d:\n%s", body)
+	}
+
+	_, body = fetch(t, f.srv, "/workers/orders?server=multi&completed=30d", false)
+	completed, _ = figures(t, body)
+	if tip := first.Local().Format("Mon 2 Jan 15:04") + "–" + first.Add(time.Hour).Local().Format("15:04") + " · avg 6.0/s"; !strings.Contains(completed, tip) {
+		t.Errorf("the 30d chart's first point lacks %q, polled in it before 30 days back:\n%s", tip, completed)
+	}
+}
+
+// TestSpansFollowHistory: the spans offered are 24h, 7d and 30d as far as
+// the history reaches, and the history itself when none of those; a span
+// not offered — past the history, or made up — shows the hour.
+func TestSpansFollowHistory(t *testing.T) {
+	day := fleet.DayWindow
+	for history, want := range map[time.Duration][]time.Duration{
+		day: {day}, 2 * day: {day, 2 * day}, 7 * day: {day, 7 * day},
+		14 * day: {day, 7 * day, 14 * day}, 30 * day: {day, 7 * day, 30 * day},
+	} {
+		if got := spansOf(history); !slices.Equal(got, want) {
+			t.Errorf("spansOf(%v) = %v, want %v", history, got, want)
+		}
+	}
+	f := dayFixture(t) // no history set: the day
+	for _, q := range []string{"completed=7d", "completed=30d", "completed=1d", "completed=2h", "completed=-24h"} {
+		_, body := fetch(t, f.srv, "/workers/orders?server=multi&"+q, false)
+		completed, _ := figures(t, body)
+		if got := switchTexts(completed); !slices.Equal(got, []string{"1h", "24h"}) || strings.Contains(completed, "avg ") {
+			t.Errorf("%s: switch %q, want 1h 24h and the hour shown:\n%s", q, got, completed)
+		}
+		if _, cur := switchLinkOf(t, completed, "1h"); !cur {
+			t.Errorf("%s: want 1h current", q)
+		}
+	}
+}
+
+// TestActionKeepsLongerSpan: an action from a page showing a 7d chart
+// refreshes it as a 7d chart.
+func TestActionKeepsLongerSpan(t *testing.T) {
+	f, _, _ := longFixture(t)
+	req := postRequest(t, f.srv, "/workers/orders/actions/pause", url.Values{"server": {"multi"}})
+	req.Header.Set("HX-Current-URL", f.srv.URL+"/workers/orders?server=multi&completed=7d")
+	resp, body := send(t, f.srv, req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST = %d:\n%s", resp.StatusCode, body)
+	}
+	_, live, _ := strings.Cut(body, `hx-swap-oob="outerHTML"`)
+	if c, _ := figures(t, live); !strings.Contains(c, "peak 18/s") || !regexp.MustCompile(`aria-current="true"[^>]*>7d</a>`).MatchString(c) {
+		t.Errorf("the refreshed Completed chart lost its 7 days:\n%s", c)
 	}
 }
 

@@ -28,8 +28,8 @@ import (
 const (
 	// Retention is how long a snapshot is kept.
 	Retention = 24 * time.Hour
-	// ServerCapBytes caps the bytes in use in one server's file; Prune
-	// deletes its oldest snapshots past it.
+	// ServerCapBytes caps the bytes one server's snapshots take in its
+	// file; Prune deletes the oldest past it.
 	ServerCapBytes = 256 << 20
 	// LeaseTTL is how long a lease stays fresh after its last beat.
 	LeaseTTL = 15 * time.Second

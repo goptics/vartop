@@ -413,7 +413,7 @@ func (w *writer) prune(now time.Time) {
 		}
 		w.fresh = true
 	}
-	err := w.db.Prune(now)
+	err := w.db.Prune(now, w.c.srv.HistorySpan())
 	if store.IsCorrupt(err) {
 		if w.db, err = w.c.reopen(w.db, err); err == nil {
 			w.fresh = true

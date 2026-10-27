@@ -732,10 +732,10 @@ func TestNoRefreshForGonePod(t *testing.T) {
 	for _, from := range []string{"/", "/workers/orders"} {
 		req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
 		req.Header.Set("HX-Current-URL", "http://127.0.0.1"+from)
-		if set, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, snaps, "http://a", "orders", ""); ok {
+		if set, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, nil, snaps, "http://a", "orders", ""); ok {
 			t.Errorf("from %s: livePage refreshes %s for a gone unit", from, set)
 		}
-		if _, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, snaps, "http://b", "orders", ""); !ok {
+		if _, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, nil, snaps, "http://b", "orders", ""); !ok {
 			t.Errorf("from %s: livePage refuses a reported unit", from)
 		}
 	}
@@ -753,7 +753,7 @@ func TestLiveRefreshBreaksAtGaps(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
 	req.Header.Set("HX-Current-URL", "http://127.0.0.1/workers/orders?server=multi")
-	set, p, ok := livePage(req, "multi", instanceNoun, 5*time.Second, snaps, "", "orders", "")
+	set, p, ok := livePage(req, "multi", instanceNoun, 5*time.Second, nil, snaps, "", "orders", "")
 	if !ok || set != "detail" {
 		t.Fatalf("livePage = %q, %v; want the detail", set, ok)
 	}

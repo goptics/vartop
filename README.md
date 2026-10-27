@@ -33,7 +33,7 @@
 ### Features
 
 - **Web Dashboard** — `vartop web` serves an auto-refreshing worker grid in your browser on a loopback address, with trend sparklines, per-worker 1 h charts with axes and a hover readout, and pause/resume/restart/stop and concurrency controls
-- **History** — while `vartop web` runs it polls every configured server into a local SQLite store with 24 hours of history, so the charts are still there after you restart it
+- **History** — while `vartop web` runs it polls every configured server into a local SQLite store with 24 hours of polls and, per server, up to 30 days of each worker's rates (its `history`), so the charts are still there after you restart it
 - **Worker Detail** — drill into a single worker to see its runtime metrics (submitted, completed, successful, failed) and success rate
 - **Multi-Server & Multi-Pod Support** — configure multiple varmq servers, each with a static list of pod endpoints. View merged worker stats across all pods, or a single pod or instance
 - **Kubernetes Discovery** — point a server at a Service or label selector and vartop watches its EndpointSlices, following pods as they scale, restart, or roll out; pods are labelled by pod name
@@ -112,7 +112,7 @@ make build   # binary at bin/vartop
 | `vartop server use <name>` | Set the default server |
 | `vartop server remove <name>` | Remove a server |
 | `vartop server remove --all` | Remove all servers |
-| `vartop server set <name> endpoint\|token\|interval <value>` | Update a server property (`endpoint` accepts a comma-separated list; static servers only) |
+| `vartop server set <name> endpoint\|token\|interval\|history <value>` | Update a server property (`endpoint` accepts a comma-separated list; static servers only; `history` is whole days, `1d` to `30d`) |
 
 #### Worker Operations
 
@@ -159,7 +159,7 @@ vartop web --no-open                   # print the URL, don't launch a browser
 - **Only current data is shown or acted on.** A snapshot is current when it is not stale, the collector's configuration is this vartop's, and it was not taken before that collector started: an older one is a previous collector's. Right after vartop web starts, or takes over from another, the page therefore shows `—` and *No new data for {age}.* and refuses actions (HTTP 409, nothing sent) until its first snapshot, up to about two polling intervals (longer while Kubernetes discovery connects). With nothing collecting, an action is refused at once, with *… — vartop web is not collecting.* If the collector's lease cannot be read, actions are refused with *cannot read the collector's lease: {err}* and the page keeps showing data by the stale rule above. After a server's endpoints (or Kubernetes or DNS settings) are edited, its newest snapshot still names the old units until the collector restarts it, a few seconds; an action meanwhile is refused with *The configuration of {server} changed; actions wait for its first snapshot under it. Try again in a few seconds.*, and nothing is sent: this server's token must not go to endpoints the config no longer lists.
 - **Charts keep the time axis.** The sparklines span a fixed 10 minutes and the detail charts a fixed hour, each point placed at the time it was taken; a line breaks where polls are missing (vartop web was not running, or the server unreachable), so a gap shows as a gap.
 - **The detail charts have axes and a hover readout.** The two 1 h charts on a worker's page show the clock every 10 minutes along the bottom and a scale of 0, half the peak and the peak on the left, with faint gridlines. Hovering a chart draws a crosshair at the nearest poll and shows its time, value and how many instances answered, at once; over a stretch with no polls it shows nothing. A tap does the same on a touch screen. The dashboard's sparklines stay compact, with no axes.
-- **Each chart shows the hour or the day.** Completed /s and Failed /s on a worker's page each have a **1h | 24h** switch of their own. At 24h a chart spans the last day in 5-minute buckets: each point is the bucket's average rate, hovering one shows *13:05–13:10 · avg 12.4/s · peak 15.1/s · 3/3 instances* (how many answered at the poll in that window that missed the most; a poll at which none answered shows only on the 1h chart), the caption's peak is the day's highest single poll, and the clock is marked every 6 hours. The choice is in the address (`?completed=24h&failed=24h`), so a reload, the refresh, the instance picker and a shared link keep it. The dashboard's 10-minute trends stay as they are.
+- **Each chart shows the hour, the day, or longer.** Completed /s and Failed /s on a worker's page each have a switch of their own: **1h | 24h**, then **7d** and **30d** as far as the server's [`history`](#schema) reaches, and the history itself when it is neither (**14d**, say). At 24h a chart spans the last day in 5-minute buckets: each point is the bucket's average rate, hovering one shows *13:05–13:10 · avg 12.4/s · peak 15.1/s · 3/3 instances* (how many answered at the poll in that window that missed the most; a poll at which none answered shows only on the 1h chart), the caption's peak is the span's highest single poll, and the clock is marked every 6 hours. A longer chart merges the buckets into the shortest of 5, 10, 15, 20, 30 and 60 minutes that gives it at most 720 points (7d: 15 minutes, 30d: an hour), dates its points (*Tue 27 Oct 13:00–14:00 · …*) and marks local midnights: every day for a week, every few days beyond. The choice is in the address (`?completed=24h&failed=7d`), so a reload, the refresh, the instance picker and a shared link keep it; a span the server's history does not offer (a link from before it was shortened, say) shows the hour. The dashboard's 10-minute trends stay as they are.
 - **Connecting takes a moment.** While vartop web is still connecting to a server (a Kubernetes watcher can take a few seconds to sync), the page says it is waiting for the server's first snapshot. If the connection fails, the real cause (for example an RBAC `forbidden` error) is shown with the server's name.
 
 Outside Kubernetes the page says **instance** where Kubernetes says pod, and labels each one instance-1, instance-2, … in the order vartop first sees them, static and DNS endpoints included; hover a label for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number. Labels are stored per server, so they survive restarting vartop web; a number not seen for 24 hours is freed, and a new instance takes the lowest free number.
@@ -182,7 +182,7 @@ Without `instance` or `pod` the page shows every instance (on Kubernetes, every 
 
 ## Collection
 
-`vartop web` polls **every configured server** while it runs, not only the one on screen, and writes what it sees to a local SQLite store with 24 hours of history. Its pages read that store. When it stops, collection stops too: nothing keeps running in the background.
+`vartop web` polls **every configured server** while it runs, not only the one on screen, and writes what it sees to a local SQLite store with 24 hours of polls, and each worker's rates for the server's `history`. Its pages read that store. When it stops, collection stops too: nothing keeps running in the background.
 
 - **It follows the config file.** Adding, editing or removing a server (with `vartop server add` in another terminal, say) takes effect within a few seconds. Deleting `config.json` stops all collection, as if every server were removed; the servers' files stay for 24 hours after their last write, so putting the config back within a day resumes the history. A config that stops parsing or validating while vartop web runs changes nothing: it keeps collecting with the last good one and logs the error. (A broken config keeps vartop web from starting.)
 - **One collector per data directory.** A second `vartop web` on the same machine (on another `--port`) does not collect: it logs *another vartop is collecting into this data directory; this one shows what it collects, and takes over once it stops* and shows what the first one collects. Within about 5 seconds of the first one stopping (about 11 if it crashed), it collects itself.
@@ -208,13 +208,13 @@ The store lives in `VARTOP_DATA_DIR` when that is set, else in `vartop` under yo
 | File | Holds |
 | --- | --- |
 | `control.db` | The collector's lease, the pages' requests to poll now, and each server's last collection error |
-| `servers/<name>-<hash>.db` | One file per configured server: its snapshots (24 hours), each worker's rates in 5-minute buckets for the 24h charts (summed as each poll is stored), and its instance labels |
+| `servers/<name>-<hash>.db` | One file per configured server: its snapshots (24 hours), each worker's rates in 5-minute buckets for the 24h and longer charts (summed as each poll is stored, kept for the server's `history`), and its instance labels |
 
 The directory is created `0700` and its files `0600`. Tokens are never stored there: vartop web reads them from the [config](#configuration) when it polls. A server's file is deleted 24 hours after its last write. A configured server is written every poll while vartop web runs, so that is about 24 hours after the server left the config: removing a server by mistake and adding it back under the same name within a day keeps its history. A vartop web started after more than 24 hours deletes the file of a server that is no longer configured as soon as it starts: its history was past retention anyway, and only the server's instance numbers are lost.
 
 ### Disk use
 
-A busy server, with 10 instances of 20 workers each, polled every 5 seconds, takes about **149 MB a day** (roughly 8.6 KB on disk per poll). History is kept for 24 hours, and each server's file is capped at **256 MB**: past that, the oldest rows go first. A server about 1.7 times busier than that one, by workers, instances or a shorter interval, therefore keeps less than 24 hours of snapshots. The 1h charts are not affected, and neither are the 24h charts: they read the 5-minute buckets, which the cap leaves alone and which take about **4 MB a day** for that server. Smaller fleets and longer intervals scale the figure down roughly in proportion: per day, bytes per poll × 86,400 ÷ the interval in seconds.
+A busy server, with 10 instances of 20 workers each, polled every 5 seconds, takes about **149 MB a day** (roughly 8.6 KB on disk per poll). Snapshots are kept for 24 hours, and each server's snapshots are capped at **256 MB**: past that, the oldest go first. A server about 1.7 times busier than that one, by workers, instances or a shorter interval, therefore keeps less than 24 hours of snapshots. The 1h charts are not affected, and neither are the longer ones: they read the 5-minute buckets, which the cap leaves alone. Those take about **4 MB a day** for that server, whatever its interval, and are kept for the server's `history`: about 115 MB beside the snapshots at `30d`. Smaller fleets and longer intervals scale the snapshot figure down roughly in proportion: per day, bytes per poll × 86,400 ÷ the interval in seconds; the buckets scale with workers × (instances + 1).
 
 ## Configuration
 
@@ -240,7 +240,8 @@ Each server uses **exactly one** of `endpoints` (static list), `kubernetes` or `
       "name": "production",
       "endpoints": ["http://pod-0:8080/varmq", "http://pod-1:8080/varmq"],
       "token": "optional-bearer-token",
-      "interval": 5
+      "interval": 5,
+      "history": "30d"
     },
     "cluster": {
       "name": "cluster",
@@ -273,6 +274,7 @@ Each server uses **exactly one** of `endpoints` (static list), `kubernetes` or `
 | `servers.<name>.dns` | DNS discovery block, see [DNS](#dns) | *(one of endpoints / kubernetes / dns)* |
 | `servers.<name>.token` | Bearer token for authentication (sent as `Authorization` header) | *(none)* |
 | `servers.<name>.interval` | How often vartop web polls the server, in seconds | `5` |
+| `servers.<name>.history` | How far back a worker page's charts reach: whole days, `1d` to `30d`. Each worker's rates are kept that long, in 5-minute buckets (about 4 MB a day for 10 instances of 20 workers); lowering it drops the older ones within 5 minutes | `1d` |
 
 ### Kubernetes
 

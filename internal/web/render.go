@@ -75,8 +75,11 @@ type Page struct {
 	Grid      *fleet.GridView
 	Detail    *fleet.DetailView
 
-	// Ranges says which of Detail's charts show the day; CompletedDay and
-	// FailedDay are those days (nil: the chart shows the hour).
+	// Spans are the spans besides the hour the server's charts may show
+	// (spansOf its history); Ranges says which each of Detail's charts
+	// shows, and CompletedDay and FailedDay are those charts (nil: the
+	// chart shows the hour).
+	Spans                   []time.Duration
 	Ranges                  ChartRanges
 	CompletedDay, FailedDay *DayChart
 }
@@ -132,8 +135,7 @@ var funcs = template.FuncMap{
 	"noData":        noData,
 	"trendWindow":   func() time.Duration { return fleet.TrendWindow },
 	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
-	"dayWindow":     func() time.Duration { return fleet.DayWindow },
-	"dayBucket":     func() time.Duration { return fleet.DayBucket },
+	"spanParam":     spanParam,
 	"rangeSwitch":   rangeSwitch,
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
 	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
@@ -387,7 +389,8 @@ func sparkline(pts []fleet.Point, window, interval time.Duration, w, h float64) 
 }
 
 // historyTick is the step of a 1h chart's time axis, on the clock;
-// dayTick a 24h chart's.
+// dayTick a 24h chart's; a longer chart's ticks are local midnights, at
+// most about a week of them (see history).
 const (
 	historyTick = 10 * time.Minute
 	dayTick     = 6 * time.Hour
@@ -427,10 +430,25 @@ func history(pts []fleet.Point, window, interval time.Duration, w, h float64) hi
 	//
 	// A day's ticks, 6 hours apart, are found hour by hour instead, each
 	// kept when its local hour is one of 00, 06, 12, 18: a daylight-saving
-	// change, an hour, is no multiple of 6.
-	tick, step := historyTick, historyTick
-	if window > fleet.HistoryWindow {
-		tick, step = dayTick, time.Hour
+	// change, an hour, is no multiple of 6. A longer chart's are too, each
+	// kept at a local midnight, every nth day counted from 1970 for about
+	// a week of them — the same days at every refresh.
+	step, keep, format := historyTick, func(time.Time) bool { return true }, "15:04"
+	switch {
+	case window > fleet.DayWindow:
+		every := int64(math.Ceil(float64(window) / float64(7*fleet.DayWindow))) // 7d 1, 14d 2, 30d 5
+		step, format = time.Hour, "Mon 2"
+		if every > 1 {
+			format = "2 Jan"
+		}
+		keep = func(t time.Time) bool {
+			l := t.Local()
+			y, m, d := l.Date()
+			return l.Hour() == 0 && time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Unix()/86400%every == 0
+		}
+	case window > fleet.HistoryWindow:
+		step = time.Hour
+		keep = func(t time.Time) bool { return t.Local().Hour()%int(dayTick/time.Hour) == 0 }
 	}
 	_, off := a.start.Local().Zone()
 	shift := time.Duration(off) * time.Second
@@ -439,11 +457,11 @@ func history(pts []fleet.Point, window, interval time.Duration, w, h float64) hi
 		t = t.Add(step)
 	}
 	for end := a.start.Add(window); !t.After(end); t = t.Add(step) {
-		if step != tick && t.Local().Hour()%int(tick/time.Hour) != 0 {
+		if !keep(t) {
 			continue
 		}
 		x := a.xAt(t)
-		v.XTicks = append(v.XTicks, axisTick{Label: t.Local().Format("15:04"), Pct: inBox(x, w), Grid: num(x)})
+		v.XTicks = append(v.XTicks, axisTick{Label: t.Local().Format(format), Pct: inBox(x, w), Grid: num(x)})
 	}
 
 	scale := []float64{0}

@@ -494,17 +494,20 @@ func (s *ServerDB) Labels() (fleet.LabelState, bool, error) {
 }
 
 // Prune deletes the snapshots older than Retention at now, then the oldest
-// ones, a batch at a time, while the file uses more than ServerCapBytes.
-// Pages freed are reused, not returned: the file does not shrink.
-func (s *ServerDB) Prune(now time.Time) error {
+// ones, a batch at a time, while they take more than ServerCapBytes; and
+// the buckets older than history, the server's (config.Server.HistorySpan),
+// never less than the snapshots' day. The cap leaves the buckets alone:
+// history bounds them. Pages freed are reused, not returned: the file does
+// not shrink.
+func (s *ServerDB) Prune(now time.Time, history time.Duration) error {
 	if !s.writer {
 		return errReadOnly
 	}
 	if _, err := s.db.Exec(`DELETE FROM snapshots WHERE at < ?`, now.Add(-Retention).UnixMilli()); err != nil {
 		return err
 	}
-	// A bucket that ended before the retention began.
-	if _, err := s.db.Exec(`DELETE FROM buckets WHERE start <= ?`, now.Add(-Retention-fleet.DayBucket).Unix()); err != nil {
+	// A bucket that ended before the history began.
+	if _, err := s.db.Exec(`DELETE FROM buckets WHERE start <= ?`, now.Add(-max(history, Retention)-fleet.DayBucket).Unix()); err != nil {
 		return err
 	}
 	for {
@@ -522,12 +525,12 @@ func (s *ServerDB) Prune(now time.Time) error {
 	}
 }
 
-// used is the bytes of the file's pages in use: the pages, but for the
-// free ones.
+// used is the bytes of the pages the snapshots take, their index's
+// included: about 25 ms for 150 MB of them.
 func (s *ServerDB) used() (int64, error) {
 	var n int64
-	err := s.db.QueryRow(`SELECT (c.page_count - f.freelist_count) * z.page_size
-		FROM pragma_page_count() c, pragma_freelist_count() f, pragma_page_size() z`).Scan(&n)
+	err := s.db.QueryRow(`SELECT coalesce(sum(pgsize), 0) FROM dbstat('main', 1)
+		WHERE name IN ('snapshots', 'snapshots_at')`).Scan(&n)
 	return n, err
 }
 

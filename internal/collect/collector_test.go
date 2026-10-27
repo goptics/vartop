@@ -409,7 +409,7 @@ func newLabelsFixture(t *testing.T) *labelsFixture {
 		t.Fatal(err)
 	}
 	d := &holder{o: Options{DataDir: dir, Log: slog.New(slog.DiscardHandler)}, ctl: ctl, token: token, exit: make(chan exit, 1)}
-	f := &labelsFixture{t: t, dir: dir, c: &collector{d: d, name: "a", queue: make(chan queued, queueLen)}}
+	f := &labelsFixture{t: t, dir: dir, c: &collector{d: d, name: "a", srv: &config.Server{Name: "a"}, queue: make(chan queued, queueLen)}}
 	f.w = &writer{c: f.c, db: db}
 	t.Cleanup(func() {
 		if f.w.db != nil {
@@ -542,6 +542,43 @@ func TestWriterReopensRemovedFile(t *testing.T) {
 	}
 	if n := f.saved(); n != 1 {
 		t.Errorf("new file: label state %d, want the one saved last, 1", n)
+	}
+}
+
+// TestWriterPrunesBucketsByHistory: a writer's prune keeps the buckets for
+// the server's history, which outlives the snapshots' day.
+func TestWriterPrunesBucketsByHistory(t *testing.T) {
+	for history, kept := range map[string]bool{"7d": true, "": false} {
+		f := newLabelsFixture(t)
+		f.c.srv.History = history
+		now := time.Now().Round(0)
+		for _, at := range []time.Time{now.Add(-3 * fleet.DayWindow), now} {
+			sm := &fleet.Sample{At: at, CompletedRate: 2, RateOK: true}
+			sm.Name, sm.Status = "w", "running"
+			_ = f.c.sink(fleet.Tick{Snap: &fleet.Snapshot{At: at, Pods: []fleet.PodSnapshot{
+				{Key: "http://i1", Via: "http://i1", Label: "instance-1", Workers: map[string]*fleet.Sample{"w": sm}}}}})
+		}
+		f.drain(2)
+		f.w.prune(now)
+		r, err := store.OpenServer(f.dir, "a", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := r.Day("w", "", now.Add(-7*fleet.DayWindow))
+		_ = r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pts, _ := d.Rates("", false, 7*fleet.DayWindow, now, fleet.NounFor(nil))
+		var old int
+		for _, p := range pts {
+			if !p.Gap && p.At.Before(now.Add(-fleet.DayWindow)) {
+				old++
+			}
+		}
+		if (old > 0) != kept {
+			t.Errorf("history %q: %d points from 3 days back after a prune, want kept %v", history, old, kept)
+		}
 	}
 }
 
@@ -839,11 +876,11 @@ func TestFillsStoredHistoryIntoBuckets(t *testing.T) {
 			return false
 		}
 		defer r.Close()
-		d, err := r.Day("legacy", time.Now().Add(-fleet.DayWindow))
+		d, err := r.Day("legacy", "", time.Now().Add(-fleet.DayWindow))
 		if err != nil {
 			return false
 		}
-		_, peak := d.Rates("", false, time.Now(), fleet.NounFor(nil))
+		_, peak := d.Rates("", false, fleet.DayWindow, time.Now(), fleet.NounFor(nil))
 		return peak == 7
 	})
 }

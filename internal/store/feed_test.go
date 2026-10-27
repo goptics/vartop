@@ -124,7 +124,7 @@ func TestFeedSurvivesReset(t *testing.T) {
 			reopen()
 		}, 1},
 		{"pruned empty", func() {
-			if err := db.Prune(now.Add(48 * time.Hour)); err != nil {
+			if err := db.Prune(now.Add(48*time.Hour), fleet.DayWindow); err != nil {
 				t.Fatal(err)
 			}
 		}, 0},

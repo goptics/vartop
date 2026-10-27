@@ -363,7 +363,7 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 		stale = h.staleMsg(t.key, latest, now)
 	}
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}
-	if set, p, ok := livePage(r, t.key, t.noun, t.srv.PollInterval(), snaps, t.label, worker, stale); ok {
+	if set, p, ok := livePage(r, t.key, t.noun, t.srv.PollInterval(), spansOf(t.srv.HistorySpan()), snaps, t.label, worker, stale); ok {
 		if p.Detail != nil {
 			h.dayCharts(&p, t.feed, p.Detail.Name, latestOf(snaps).At)
 		}
@@ -380,7 +380,7 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 // Other pages, a worker no unit reports, and a label the newest snapshot
 // lacks get no refresh. stale is the page's Stale notice: with one, it
 // shows no current value.
-func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration, snaps []*fleet.Snapshot, label, worker, stale string) (string, Page, bool) {
+func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration, spans []time.Duration, snaps []*fleet.Snapshot, label, worker, stale string) (string, Page, bool) {
 	set := "dashboard"
 	if worker != "" {
 		set = "detail"
@@ -391,7 +391,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 		if err != nil {
 			return "", Page{}, false
 		}
-		ranges = rangesOf(u.Query()) // the charts keep showing the span they did
+		ranges = rangesOf(u.Query(), spans) // the charts keep showing the span they did
 		set, worker = "", ""
 		path := u.EscapedPath()
 		if path == "/" || path == "" {
@@ -403,7 +403,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 		}
 	}
 
-	p := Page{Server: key, Pod: label, Noun: n, IntervalSec: int(interval / time.Second), Stale: stale, Ranges: ranges}
+	p := Page{Server: key, Pod: label, Noun: n, IntervalSec: int(interval / time.Second), Stale: stale, Spans: spans, Ranges: ranges}
 	fill(&p, snaps)
 	if podGone(&p, snaps) {
 		return "", Page{}, false // the next poll shows why

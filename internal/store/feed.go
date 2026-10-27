@@ -41,15 +41,16 @@ func NewFeed(dataDir, key string, interval time.Duration) *Feed {
 	return f
 }
 
-// Day reads worker's day buckets from since on through the feed's file
-// (ServerDB.Day): an empty day while it has none open. Sync first.
-func (f *Feed) Day(worker string, since time.Time) (*fleet.Day, error) {
+// Day reads worker's buckets of the view label from since on through the
+// feed's file (ServerDB.Day): an empty day while it has none open. Sync
+// first.
+func (f *Feed) Day(worker, label string, since time.Time) (*fleet.Day, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.db == nil {
 		return fleet.NewDay(worker), nil
 	}
-	return f.db.Day(worker, since)
+	return f.db.Day(worker, label, since)
 }
 
 // Interval is the poll interval the feed was made for.

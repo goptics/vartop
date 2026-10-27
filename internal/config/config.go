@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -46,6 +48,9 @@ type Server struct {
 	DNS        *DNSRef        `json:"dns,omitempty"`
 	Token      string         `json:"token,omitempty"`
 	Interval   int            `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+	// History is how far back the server's longer charts reach, in whole
+	// days: "7d". Empty is DefaultHistory.
+	History string `json:"history,omitempty"`
 }
 
 // defaultPollInterval is used when Server.Interval is unset or non-positive.
@@ -58,6 +63,34 @@ func (s *Server) PollInterval() time.Duration {
 		return defaultPollInterval
 	}
 	return time.Duration(s.Interval) * time.Second
+}
+
+const (
+	// DefaultHistory is a server's history when it sets none: the 24h charts.
+	DefaultHistory = 24 * time.Hour
+	// MaxHistory is the longest history a server may set: a 30d chart is
+	// 720 hourly points, a point per pixel of its 720 px.
+	MaxHistory = 30 * 24 * time.Hour
+)
+
+// ParseHistory reads a server's history: whole days, "1d" to "30d".
+func ParseHistory(v string) (time.Duration, error) {
+	n, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+	d := time.Duration(n) * 24 * time.Hour
+	if !strings.HasSuffix(v, "d") || err != nil || d < DefaultHistory || d > MaxHistory {
+		return 0, fmt.Errorf("history must be whole days from 1d to %dd, got %q", MaxHistory/(24*time.Hour), v)
+	}
+	return d, nil
+}
+
+// HistorySpan returns History as a duration: DefaultHistory when it is
+// unset, or not one Validate accepts.
+func (s *Server) HistorySpan() time.Duration {
+	d, err := ParseHistory(s.History)
+	if err != nil {
+		return DefaultHistory
+	}
+	return d
 }
 
 // Validate checks that exactly one of Endpoints, Kubernetes or DNS is
@@ -78,6 +111,12 @@ func (s *Server) Validate() error {
 	}
 	if set == 0 {
 		return fmt.Errorf("server %q: exactly one of endpoints, kubernetes or dns must be set, got neither", s.Name)
+	}
+
+	if s.History != "" {
+		if _, err := ParseHistory(s.History); err != nil {
+			return fmt.Errorf("server %q: %w", s.Name, err)
+		}
 	}
 
 	if hasDNS {

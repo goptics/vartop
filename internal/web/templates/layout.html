@@ -1,6 +1,6 @@
 {{define "server_field"}}<input type="hidden" name="server" value="{{.Server}}">{{end}}
 {{define "label_field"}}<input type="hidden" name="{{.Noun.Param}}" value="{{.Pod}}">{{end}}
-{{define "range_fields"}}{{if .Ranges.Completed}}<input type="hidden" name="completed" value="24h">{{end}}{{if .Ranges.Failed}}<input type="hidden" name="failed" value="24h">{{end}}{{end}}
+{{define "range_fields"}}{{with .Ranges.Completed}}<input type="hidden" name="completed" value="{{spanParam .}}">{{end}}{{with .Ranges.Failed}}<input type="hidden" name="failed" value="{{spanParam .}}">{{end}}{{end}}
 {{define "range_switch"}}<span class="seg" role="group" aria-label="Span">{{range .}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}} hx-get="{{.URL}}" hx-target="body" hx-push-url="true" hx-sync="#page:replace">{{.Text}}</a>{{end}}</span>{{end}}
 {{define "spark"}}<svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>{{end}}
 {{define "history"}}<div class="history">

@@ -68,7 +68,7 @@ func healthyAndDeadServers(t *testing.T) (healthy, dead string) {
 func TestServerListShowsAllKindsAndStatus(t *testing.T) {
 	healthy, dead := healthyAndDeadServers(t)
 	saveServersConfig(t, "live",
-		&config.Server{Name: "live", Endpoints: []string{healthy}, Token: "super-secret", Interval: 5},
+		&config.Server{Name: "live", Endpoints: []string{healthy}, Token: "super-secret", Interval: 5, History: "7d"},
 		&config.Server{Name: "down", Endpoints: []string{dead}, Interval: 3},
 		&config.Server{Name: "kube", Kubernetes: &config.KubernetesRef{Context: "ctx", Namespace: "ns", Service: "varmq"}},
 		&config.Server{Name: "dnsy", DNS: &config.DNSRef{Host: "varmq.local", Port: 8080}},
@@ -90,6 +90,8 @@ func TestServerListShowsAllKindsAndStatus(t *testing.T) {
 		"Token:    ***",
 		"Interval: 5s",
 		"Interval: 3s",
+		"History:  7d",
+		"History:  1d", // unset: the default
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)

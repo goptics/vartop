@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -22,20 +23,27 @@ func ratedTick(at time.Time, completed float64) fleet.Tick {
 	return fleet.Tick{Snap: &fleet.Snapshot{At: at, Pods: []fleet.PodSnapshot{unit("instance-1"), unit("instance-2")}}}
 }
 
-// sameDay fails the test unless got charts, merged and for instance-2,
-// completed and failed, as want does, up to end.
-func sameDay(t *testing.T, got, want *fleet.Day, end time.Time) {
+// sameDay fails the test unless worker w's buckets read from db since
+// since chart, merged and per label, completed and failed, over a day and
+// over a week, as want does, up to end.
+func sameDay(t *testing.T, db *ServerDB, since time.Time, want *fleet.Day, end time.Time) {
 	t.Helper()
 	for _, label := range []string{"", "instance-2", "i1", "i2", "i3", "i4"} {
-		for _, failed := range []bool{false, true} {
-			g, gp := got.Rates(label, failed, end, fleet.NounFor(nil))
-			w, wp := want.Rates(label, failed, end, fleet.NounFor(nil))
-			if gp != wp {
-				t.Errorf("label %q failed %v: peak %v, want %v", label, failed, gp, wp)
-			}
-			for i := range w {
-				if g[i] != w[i] {
-					t.Fatalf("label %q failed %v: point %d = %+v, want %+v", label, failed, i, g[i], w[i])
+		got, err := db.Day("w", label, since)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, span := range []time.Duration{fleet.DayWindow, 7 * fleet.DayWindow} {
+			for _, failed := range []bool{false, true} {
+				g, gp := got.Rates(label, failed, span, end, fleet.NounFor(nil))
+				w, wp := want.Rates(label, failed, span, end, fleet.NounFor(nil))
+				if gp != wp {
+					t.Errorf("label %q span %v failed %v: peak %v, want %v", label, span, failed, gp, wp)
+				}
+				for i := range w {
+					if g[i] != w[i] {
+						t.Fatalf("label %q span %v failed %v: point %d = %+v, want %+v", label, span, failed, i, g[i], w[i])
+					}
 				}
 			}
 		}
@@ -55,18 +63,14 @@ func TestAppendStoresBuckets(t *testing.T) {
 		appendAll(t, db, token, tk)
 		want.Add(tk.Snap)
 	}
-	got, err := db.Day("w", bucketT0.Add(-time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sameDay(t, got, want, bucketT0.Add(6*time.Minute))
+	sameDay(t, db, bucketT0.Add(-time.Hour), want, bucketT0.Add(6*time.Minute))
 
 	// Only the window since since.
-	got, err = db.Day("w", bucketT0.Add(fleet.DayBucket))
+	got, err := db.Day("w", "", bucketT0.Add(fleet.DayBucket))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pts, _ := got.Rates("", false, bucketT0.Add(6*time.Minute), fleet.NounFor(nil)); !pts[len(pts)-2].Gap || pts[len(pts)-1].Gap {
+	if pts, _ := got.Rates("", false, fleet.DayWindow, bucketT0.Add(6*time.Minute), fleet.NounFor(nil)); !pts[len(pts)-2].Gap || pts[len(pts)-1].Gap {
 		t.Errorf("Day since the second bucket = %+v, %+v; want the first bucket left out", pts[len(pts)-2], pts[len(pts)-1])
 	}
 }
@@ -79,7 +83,7 @@ func TestPruneDropsOldBuckets(t *testing.T) {
 	db := newWriter(t, dir, "prod")
 	old := bucketT0.Add(-Retention - time.Hour)
 	appendAll(t, db, token, ratedTick(old, 5), ratedTick(bucketT0, 7))
-	if err := db.Prune(bucketT0); err != nil {
+	if err := db.Prune(bucketT0, fleet.DayWindow); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -104,11 +108,11 @@ func TestVersionResetDropsBuckets(t *testing.T) {
 	_ = db.Close()
 	setVersion(t, PathFor(dir, "prod"), StoreVersion+1)
 	db = newWriter(t, dir, "prod")
-	d, err := db.Day("w", bucketT0.Add(-time.Hour))
+	d, err := db.Day("w", "", bucketT0.Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pts, peak := d.Rates("", false, bucketT0, fleet.NounFor(nil)); !pts[len(pts)-1].Gap || peak != 0 {
+	if pts, peak := d.Rates("", false, fleet.DayWindow, bucketT0, fleet.NounFor(nil)); !pts[len(pts)-1].Gap || peak != 0 {
 		t.Errorf("after a reset: %+v, peak %v; want no buckets", pts[len(pts)-1], peak)
 	}
 }
@@ -162,11 +166,7 @@ func TestFillBuckets(t *testing.T) {
 	if err != nil || more {
 		t.Fatalf("FillBuckets = %v, %v; want done", more, err)
 	}
-	got, err := db.Day("w", bucketT0.Add(-time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sameDay(t, got, want, bucketT0.Add(6*time.Minute))
+	sameDay(t, db, bucketT0.Add(-time.Hour), want, bucketT0.Add(6*time.Minute))
 	if more, err := db.FillBuckets(bucketT0.Add(-time.Hour), 2); more || err != nil {
 		t.Errorf("FillBuckets once done = %v, %v; want nothing to do", more, err)
 	}
@@ -183,11 +183,11 @@ func TestReaderOfAnOldFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	d, err := r.Day("w", bucketT0.Add(-time.Hour))
+	d, err := r.Day("w", "", bucketT0.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("Day = %v, want an empty day", err)
 	}
-	if pts, _ := d.Rates("", false, bucketT0, fleet.NounFor(nil)); !pts[len(pts)-1].Gap {
+	if pts, _ := d.Rates("", false, fleet.DayWindow, bucketT0, fleet.NounFor(nil)); !pts[len(pts)-1].Gap {
 		t.Errorf("Day of an old file = %+v, want a gap", pts[len(pts)-1])
 	}
 }
@@ -316,11 +316,7 @@ func TestBucketsSumAsDay(t *testing.T) {
 		_, token := claimed(t, dir)
 		db := newWriter(t, dir, "prod")
 		appendAll(t, db, token, ticks...)
-		got, err := db.Day("w", bucketT0.Add(-time.Hour))
-		if err != nil {
-			t.Fatal(err)
-		}
-		sameDay(t, got, want, end)
+		sameDay(t, db, bucketT0.Add(-time.Hour), want, end)
 	})
 	t.Run("fill", func(t *testing.T) {
 		dir := t.TempDir()
@@ -336,10 +332,95 @@ func TestBucketsSumAsDay(t *testing.T) {
 				break
 			}
 		}
-		got, err := db.Day("w", bucketT0.Add(-time.Hour))
+		sameDay(t, db, bucketT0.Add(-time.Hour), want, end)
+	})
+}
+
+// TestPruneKeepsBucketsForHistory: buckets stay for the server's history,
+// past the snapshots' day, and go once older; a history under the day
+// keeps the day's.
+func TestPruneKeepsBucketsForHistory(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	days := func(n int) time.Time { return bucketT0.Add(-time.Duration(n) * fleet.DayWindow) }
+	appendAll(t, db, token, ratedTick(days(8), 1), ratedTick(days(3), 2), ratedTick(bucketT0.Add(-time.Hour), 3), ratedTick(bucketT0, 4))
+	starts := func() (out []int64) {
+		rows, err := db.db.Query(`SELECT DISTINCT start FROM buckets ORDER BY start`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sameDay(t, got, want, end)
-	})
+		defer rows.Close()
+		for rows.Next() {
+			var s int64
+			if err := rows.Scan(&s); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, s)
+		}
+		return out
+	}
+	if err := db.Prune(bucketT0, 7*fleet.DayWindow); err != nil {
+		t.Fatal(err)
+	}
+	want := []int64{days(3).Unix(), bucketT0.Add(-time.Hour).Unix(), bucketT0.Unix()}
+	if got := starts(); !slices.Equal(got, want) {
+		t.Errorf("after a 7d prune: bucket starts %v, want %v (3 days back kept, 8 gone)", got, want)
+	}
+	if n, err := count(db); err != nil || n != 2 {
+		t.Errorf("%d snapshots, %v; want the 2 of the last day", n, err)
+	}
+	if err := db.Prune(bucketT0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := starts(); !slices.Equal(got, want[1:]) {
+		t.Errorf("after a prune with no history: bucket starts %v, want the day's %v", got, want[1:])
+	}
 }
+
+// TestCapCountsSnapshotsOnly: the size cap is on the snapshots' bytes; a
+// long history's buckets, however many, cost no snapshot.
+func TestCapCountsSnapshotsOnly(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	appendAll(t, db, token, ratedTick(bucketT0.Add(-time.Minute), 1), ratedTick(bucketT0, 2))
+	db.capBytes = 4 * usedBytes(t, db)
+	// A month of buckets, many times the cap.
+	if _, err := db.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+		INSERT INTO buckets SELECT 'w' || (i % 20), ? - (i / 20) * 300, 'instance-' || (i % 7), 1, 1, 0, 1, 0, 1, 1 FROM n`, bucketT0.Unix()-300); err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	if err := db.db.QueryRow(`SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()`).Scan(&total); err != nil || total <= db.capBytes {
+		t.Fatalf("file %d bytes, %v; want it past the cap of %d for the test to mean anything", total, err, db.capBytes)
+	}
+	if err := db.Prune(bucketT0, 30*fleet.DayWindow); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := count(db); err != nil || n != 2 {
+		t.Errorf("%d snapshots after Prune, %v; want both kept: the buckets are not counted", n, err)
+	}
+}
+
+// TestDayReadsOneLabel: Day reads the buckets of the label asked for
+// alone, merged ("") or of one unit.
+func TestDayReadsOneLabel(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	appendAll(t, db, token, ratedTick(bucketT0, 5))
+	d, err := db.Day("w", "instance-2", bucketT0.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pts, _ := d.Rates("instance-2", false, fleet.DayWindow, bucketT0, fleet.NounFor(nil)); last(pts).V != 5 {
+		t.Errorf("instance-2 = %+v, want 5", last(pts))
+	}
+	if pts, peak := d.Rates("", false, fleet.DayWindow, bucketT0, fleet.NounFor(nil)); !last(pts).Gap || peak != 0 {
+		t.Errorf("merged, from a read of instance-2 = %+v, peak %v; want nothing read", last(pts), peak)
+	}
+}
+
+// last is the newest point of a series.
+func last(pts []fleet.Point) fleet.Point { return pts[len(pts)-1] }

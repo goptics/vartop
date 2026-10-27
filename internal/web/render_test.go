@@ -235,6 +235,38 @@ func TestHistoryAxes(t *testing.T) {
 			}
 		}
 	})
+	// Longer spans: local midnights, every day for a week (across New
+	// York's fall-back), every 5th day (counted from 1970) for 30 days.
+	t.Run("days", func(t *testing.T) {
+		local := time.Local
+		t.Cleanup(func() { time.Local = local })
+		for _, tc := range []struct {
+			zone   string
+			newest time.Time
+			span   time.Duration
+			want   []string
+		}{
+			{"America/New_York", time.Date(2026, 11, 4, 15, 0, 0, 0, time.UTC), 7 * 24 * time.Hour,
+				[]string{"Thu 29", "Fri 30", "Sat 31", "Sun 1", "Mon 2", "Tue 3", "Wed 4"}},
+			{"Asia/Kathmandu", time.Date(2026, 10, 27, 6, 0, 0, 0, time.UTC), 30 * 24 * time.Hour,
+				[]string{"29 Sep", "4 Oct", "9 Oct", "14 Oct", "19 Oct", "24 Oct"}},
+		} {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no zone data: %v", err)
+			}
+			time.Local = loc
+			step := fleet.StepFor(tc.span)
+			h := history(series(tc.newest.Add(-tc.span), step, int(tc.span/step)+1, 1), tc.span, step, 720, 120)
+			var xs []string
+			for _, tk := range h.XTicks {
+				xs = append(xs, tk.Label)
+			}
+			if !slices.Equal(xs, tc.want) {
+				t.Errorf("%s %v: ticks = %q, want %q", tc.zone, tc.span, xs, tc.want)
+			}
+		}
+	})
 }
 
 func TestPolylines(t *testing.T) {

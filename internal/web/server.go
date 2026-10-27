@@ -326,7 +326,8 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	p.Pod = labelOf(srv, r.FormValue(p.Noun.Param))
 	// The poller asks for what this page shows, its server and unit named,
 	// whatever the URL left out or carried besides; the path stays escaped.
-	p.Ranges = rangesOf(r.URL.Query())
+	p.Spans = spansOf(srv.HistorySpan())
+	p.Ranges = rangesOf(r.URL.Query(), p.Spans)
 	p.SelfURL = p.Ranges.addTo(pageURL(r.URL.EscapedPath(), p.Server, p.Noun.Param, p.Pod))
 	interval := srv.PollInterval()
 	p.IntervalSec = int(interval / time.Second)

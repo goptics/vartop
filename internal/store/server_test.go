@@ -279,7 +279,7 @@ func TestPruneRetentionAndCap(t *testing.T) {
 		tick(base.Add(-Retention+time.Second), 3),
 		tick(base, 4),
 	)
-	if err := db.Prune(base); err != nil {
+	if err := db.Prune(base, fleet.DayWindow); err != nil {
 		t.Fatal(err)
 	}
 	if snaps, _, err := db.Window(time.Time{}); err != nil || !reflect.DeepEqual(completed(snaps), []uint64{3, 4}) {
@@ -300,7 +300,7 @@ func TestPruneRetentionAndCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.capBytes, db.batch = usedBytes(t, db)/2, 10
-	if err := db.Prune(base); err != nil {
+	if err := db.Prune(base, fleet.DayWindow); err != nil {
 		t.Fatal(err)
 	}
 	after, err := count(db)

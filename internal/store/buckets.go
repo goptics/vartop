@@ -71,13 +71,16 @@ func addBuckets(tx *sql.Tx, snap *fleet.Snapshot) error {
 	return nil
 }
 
-// Day reads worker's buckets from since on into a fleet.Day. A file whose
-// writer has not made its buckets yet (one written before they were) has
-// none: an empty day.
-func (s *ServerDB) Day(worker string, since time.Time) (*fleet.Day, error) {
+// Day reads worker's buckets of the view label ("" merged) from since on
+// into a fleet.Day: read and charted, 6 ms for a week of a 10 × 20 server,
+// 23 ms for 30 days (BenchmarkLongRead). A file whose writer has not made
+// its buckets yet (one written before they were) has none: an empty day.
+func (s *ServerDB) Day(worker, label string, since time.Time) (*fleet.Day, error) {
 	d := fleet.NewDay(worker)
+	// ponytail: the key leads with (worker, start), so a read scans every
+	// label's rows of its span; (worker, label, start) if a long read slows.
 	rows, err := s.db.Query(`SELECT start, label, polls, completed, failed, peak_c, peak_f, fewest, out_of
-		FROM buckets WHERE worker = ? AND start >= ?`, worker, since.Truncate(fleet.DayBucket).Unix())
+		FROM buckets WHERE worker = ? AND start >= ? AND label = ?`, worker, since.Truncate(fleet.DayBucket).Unix(), label)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
 			return d, nil

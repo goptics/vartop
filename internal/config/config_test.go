@@ -419,3 +419,38 @@ func TestPollInterval(t *testing.T) {
 		}
 	}
 }
+
+func TestParseHistory(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{{"1d", 24 * time.Hour}, {"7d", 7 * 24 * time.Hour}, {"30d", MaxHistory}} {
+		if got, err := ParseHistory(tc.in); err != nil || got != tc.want {
+			t.Errorf("ParseHistory(%q) = %v, %v; want %v", tc.in, got, err, tc.want)
+		}
+	}
+	for _, in := range []string{"", "0d", "31d", "-1d", "7", "24h", "d", "1.5d", "7 d"} {
+		if got, err := ParseHistory(in); err == nil {
+			t.Errorf("ParseHistory(%q) = %v, want an error", in, got)
+		}
+	}
+}
+
+func TestHistorySpan(t *testing.T) {
+	for in, want := range map[string]time.Duration{"": DefaultHistory, "7d": 7 * 24 * time.Hour, "31d": DefaultHistory} {
+		if got := (&Server{History: in}).HistorySpan(); got != want {
+			t.Errorf("History %q: got %v want %v", in, got, want)
+		}
+	}
+}
+
+func TestValidateHistory(t *testing.T) {
+	ok := &Server{Name: "local", Endpoints: []string{"http://localhost:8080/varmq"}, History: "30d"}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("history 30d: %v", err)
+	}
+	bad := &Server{Name: "local", Endpoints: []string{"http://localhost:8080/varmq"}, History: "90d"}
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), `server "local": history`) {
+		t.Errorf("history 90d: err %v, want one naming the server and history", err)
+	}
+}
