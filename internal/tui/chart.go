@@ -120,39 +120,27 @@ func draw(cols []fleet.Point, levels []rune) string {
 	return b.String()
 }
 
-// byTime folds pts into width points by time. at holds the times the
-// points were taken, oldest first; a series that is of the last snapshots
-// only (as fleet's are, of the newest window) has fewer points than there
-// are times, or the other way round, and lines up at its end. The window up
-// to the newest time is split into width equal spans, and each point goes
-// to the span its time falls in — a span with no snapshots, say while no
-// daemon ran, comes out a gap, not squeezed away by the polls around it.
-// A time outside the window is left out; the newest is in the last span.
-func byTime(at []time.Time, pts []fleet.Point, window time.Duration, width int) []fleet.Point {
-	if len(pts) > len(at) {
-		pts = pts[len(pts)-len(at):]
-	} else {
-		at = at[len(at)-len(pts):]
-	}
-	if len(at) == 0 || window <= 0 {
+// byTime folds pts into width points by time: each point's At, when the
+// snapshot it was built from was taken (fleet sets it on every point, gaps
+// too), oldest first. The window up to the newest point's time is split into
+// width equal spans, and each point goes to the span its time falls in — a
+// span with no snapshots, say while no daemon ran, comes out a gap, not
+// squeezed away by the polls around it. A time outside the window is left
+// out; the newest is in the last span.
+func byTime(pts []fleet.Point, window time.Duration, width int) []fleet.Point {
+	if len(pts) == 0 || window <= 0 {
 		return bucketed(nil, width, nil)
 	}
-	end := at[len(at)-1]
+	end := pts[len(pts)-1].At
 	start := end.Add(-window)
 	return bucketed(pts, width, func(i int) (int, bool) {
-		since := at[i].Sub(start)
-		if since < 0 || at[i].After(end) {
+		at := pts[i].At
+		since := at.Sub(start)
+		if since < 0 || at.After(end) {
 			return 0, false
 		}
 		return min(int(since*time.Duration(width)/window), width-1), true
 	})
-}
-
-// series is what a sparkline charts: points, each with the time of the
-// snapshot it was taken from.
-type series struct {
-	at  []time.Time
-	pts []fleet.Point
 }
 
 // chart draws sparklines, and block charts of the history, of series polled
@@ -167,15 +155,15 @@ func newChart(interval time.Duration) chart {
 	return chart{levels: sparkLevels(), interval: interval}
 }
 
-// spark draws s over the trend window, up to its newest time, in a cell
+// spark draws pts over the trend window, up to their newest time, in a cell
 // width columns wide: the window is cut into slices (see columns), a column
 // each, and the drawing is right-aligned in the cell.
-func (c chart) spark(s series, width int) string {
+func (c chart) spark(pts []fleet.Point, width int) string {
 	if width < 1 {
 		return ""
 	}
 	cols := c.columns(fleet.TrendWindow, width)
-	return strings.Repeat(" ", width-cols) + draw(byTime(s.at, s.pts, fleet.TrendWindow, cols), c.levels)
+	return strings.Repeat(" ", width-cols) + draw(byTime(pts, fleet.TrendWindow, cols), c.levels)
 }
 
 // columns is how many columns of a plot width wide a window of history is
@@ -196,14 +184,14 @@ const kpiValueW = 7
 
 // kpiLine is the line under the dashboard header: the completed/s,
 // failed/min and pending of k, each its current value and a sparkline of
-// the series (of the snapshots taken at at). The sparklines take a third
+// the series. The sparklines take a third
 // each of the width the text leaves, at most 12 columns, and are left out
 // below 4; the text is sized for the widest values, so that the sparklines
 // keep their width as the values change, or turn to —. A current value is —
 // while stale, and when the newest point of its series has no data (the web
 // pages' rule); the sparklines are drawn all the same. It is never wider than
 // width.
-func (c chart) kpiLine(width int, k fleet.KPIView, at []time.Time, stale bool) string {
+func (c chart) kpiLine(width int, k fleet.KPIView, stale bool) string {
 	if width < 1 {
 		return ""
 	}
@@ -245,7 +233,7 @@ func (c chart) kpiLine(width int, k fleet.KPIView, at []time.Time, stale bool) s
 		pad := strings.Repeat(" ", max(0, kpiValueW-lipgloss.Width(values[i])))
 		parts[i] = label.Render(labels[i]) + " " + pad + style.Render(values[i])
 		if spark > 0 {
-			parts[i] += " " + line.Render(c.spark(series{at, pts[i]}, spark))
+			parts[i] += " " + line.Render(c.spark(pts[i], spark))
 		}
 	}
 	return lipgloss.NewStyle().MaxWidth(width).Render("  " + strings.Join(parts, "  "))
@@ -261,9 +249,6 @@ const (
 	// blockMin is the width under which there is no block chart: the gutter and
 	// a plot of 12 columns, room for the axis' text.
 	blockMin = 20
-	// historyWindow is how far back a block chart of the history reaches, up to
-	// the newest snapshot.
-	historyWindow = time.Hour
 )
 
 // rateLabel is a rate in at most 7 columns, for the gutter of a block chart:
@@ -415,14 +400,14 @@ func blockChart(pts []fleet.Point, width, rows int) []string {
 	return lines
 }
 
-// history draws s, the series of the history of a worker a feed holds, over
-// the last hour up to its newest time, as a block chart width columns wide
-// and rows tall (see block): the hour is cut into slices (see columns) — a
-// stretch with no snapshots, say while no daemon ran, comes out blank, not
-// squeezed away by the polls around it.
-func (c chart) history(s series, width, rows int) ([]string, []bool) {
+// history draws pts, the series of the history of a worker a feed holds,
+// over the hour up to their newest time (fleet.HistoryWindow), as a block
+// chart width columns wide and rows tall (see block): the hour is cut into
+// slices (see columns) — a stretch with no snapshots, say while no daemon
+// ran, comes out blank, not squeezed away by the polls around it.
+func (c chart) history(pts []fleet.Point, width, rows int) ([]string, []bool) {
 	if width < blockMin {
 		return nil, nil
 	}
-	return c.block(byTime(s.at, s.pts, historyWindow, c.columns(historyWindow, width-gutterW)), width, rows)
+	return c.block(byTime(pts, fleet.HistoryWindow, c.columns(fleet.HistoryWindow, width-gutterW)), width, rows)
 }

@@ -459,11 +459,10 @@ type detailKey struct {
 
 // detailSeries is what the detail screen's charts draw, of the hour of
 // snapshots a feed holds: the completed/s and failed/s of its worker on its
-// unit, one point to a snapshot, so the times are those of the snapshots.
-// The zero value has none.
+// unit, one point to a snapshot, each with its snapshot's time (Point.At),
+// which places it. The zero value has none.
 type detailSeries struct {
 	key               detailKey
-	at                []time.Time // when the snapshots of the series were taken, oldest first
 	completed, failed []fleet.Point
 }
 
@@ -472,15 +471,10 @@ type detailSeries struct {
 // them, as it does the web charts', without their tooltips: nothing here
 // draws one.
 func newDetailSeries(snaps []*fleet.Snapshot, label, worker string) detailSeries {
-	s := detailSeries{
-		at:        make([]time.Time, len(snaps)),
+	return detailSeries{
 		completed: fleet.CompletedRates1h(snaps, label, worker),
 		failed:    fleet.FailedRates1h(snaps, label, worker),
 	}
-	for i, snap := range snaps {
-		s.at[i] = snap.At
-	}
-	return s
 }
 
 // install takes in series built by a sync command, if they are of what the
@@ -537,7 +531,7 @@ func (d *detailScreen) charts(m *Model, width int) [2]plot {
 	}
 	d.drawn.key = key
 	for i, pts := range [][]fleet.Point{held.completed, held.failed} {
-		lines, partial := c.history(series{held.at, pts}, width, detailRows)
+		lines, partial := c.history(pts, width, detailRows)
 		d.drawn.plots[i] = plot{lines, partial}
 	}
 	return d.drawn.plots

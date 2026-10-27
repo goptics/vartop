@@ -287,7 +287,7 @@ func (d *dashboardScreen) rebuild(m *Model, was selection) {
 
 	d.kpiLine = ""
 	if text, _ := m.notice(); text == "" && latest != nil {
-		d.kpiLine = ch.kpiLine(m.width, tr.kpis, tr.at, stale)
+		d.kpiLine = ch.kpiLine(m.width, tr.kpis, stale)
 	}
 	d.setRows(rows, labels, was)
 }
@@ -317,10 +317,10 @@ type trendsKey struct {
 // trendSet is what the dashboard's sparklines chart, of the last 10 minutes of
 // snapshots: the completed/s of each worker on each unit shown, and the KPIs
 // of the view. Each series is of the last snapshots, one point to a snapshot,
-// so the times are those of the last snapshots too. The zero value has none.
+// each point with its snapshot's time (Point.At), which places it. The zero
+// value has none.
 type trendSet struct {
 	key     trendsKey
-	at      []time.Time // when the snapshots of the series were taken, oldest first
 	workers map[unitWorker][]fleet.Point
 	kpis    fleet.KPIView
 }
@@ -344,19 +344,12 @@ func newTrends(snaps []*fleet.Snapshot, label string, interval time.Duration, n 
 		}
 	}
 	ts.kpis = fleet.BuildDashboard(snaps, label, interval, n).KPIs
-	// Every series covers the same snapshots: those within the window of the
-	// newest.
-	last := snaps[len(snaps)-min(len(ts.kpis.Completed), len(snaps)):]
-	ts.at = make([]time.Time, len(last))
-	for i, s := range last {
-		ts.at[i] = s.At
-	}
 	return ts
 }
 
 // worker is the completed/s series of worker on the unit labelled label.
-func (ts trendSet) worker(label, worker string) series {
-	return series{ts.at, ts.workers[unitWorker{label, worker}]}
+func (ts trendSet) worker(label, worker string) []fleet.Point {
+	return ts.workers[unitWorker{label, worker}]
 }
 
 // workersOf is the names of the workers p lists, answered or not, sorted.

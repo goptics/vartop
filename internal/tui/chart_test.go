@@ -145,19 +145,28 @@ func timesAt(t0 time.Time, offsets ...time.Duration) []time.Time {
 	return at
 }
 
+// timed is pts, each taken at its time in at, as fleet builds them: a point
+// has the time of the snapshot it was built from.
+func timed(at []time.Time, pts []fleet.Point) []fleet.Point {
+	out := slices.Clone(pts)
+	for i := range out {
+		out[i].At = at[i]
+	}
+	return out
+}
+
 // TestTimeBuckets: the 10 minutes up to the newest snapshot are split into
-// width equal spans, and each point goes where its snapshot's time is, so a
-// stretch with no snapshots is blank — not squeezed away by the polls
-// around it.
+// width equal spans, and each point goes where its snapshot's time is — its
+// own At (R39) — so a stretch with no snapshots is blank, not squeezed away
+// by the polls around it.
 func TestTimeBuckets(t *testing.T) {
 	end := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	m := time.Minute
 	const window = fleet.TrendWindow
 
 	// width 4: spans of 2m30s, [−10m, −7m30s) [−7m30s, −5m) [−5m, −2m30s) [−2m30s, 0].
-	at := timesAt(end, -10*m, -9*m, -4*m, -3*m, 0)
-	pts := vals(2, 4, 8, 6, 5)
-	got := byTime(at, pts, window, 4)
+	pts := timed(timesAt(end, -10*m, -9*m, -4*m, -3*m, 0), vals(2, 4, 8, 6, 5))
+	got := byTime(pts, window, 4)
 	if len(got) != 4 {
 		t.Fatalf("byTime returned %d buckets, want 4", len(got))
 	}
@@ -170,12 +179,12 @@ func TestTimeBuckets(t *testing.T) {
 		}
 	}
 	// The same points as the columns of a series: the blank stretch shows.
-	if line := newChart(5*time.Second).spark(series{at: at, pts: pts}, 4); line != "▄ █▆" {
+	if line := newChart(5*time.Second).spark(pts, 4); line != "▄ █▆" {
 		t.Errorf("series.spark(4) = %q, want %q", line, "▄ █▆")
 	}
 
 	t.Run("the newest point is in the last bucket", func(t *testing.T) {
-		got := byTime(timesAt(end, 0), vals(5), window, 5)
+		got := byTime(timed(timesAt(end, 0), vals(5)), window, 5)
 		for i, b := range got {
 			if wantGap := i != 4; b.Gap != wantGap {
 				t.Errorf("bucket %d gap = %v, want %v", i, b.Gap, wantGap)
@@ -183,50 +192,52 @@ func TestTimeBuckets(t *testing.T) {
 		}
 	})
 	t.Run("a short history leaves the left blank", func(t *testing.T) {
-		at := timesAt(end, -4*m, -3*m, -2*m, -m, 0)
-		if line := newChart(5*time.Second).spark(series{at: at, pts: vals(1, 2, 3, 4, 5)}, 10); !strings.HasPrefix(line, "      ") || strings.HasSuffix(line, " ") {
+		pts := timed(timesAt(end, -4*m, -3*m, -2*m, -m, 0), vals(1, 2, 3, 4, 5))
+		if line := newChart(5*time.Second).spark(pts, 10); !strings.HasPrefix(line, "      ") || strings.HasSuffix(line, " ") {
 			t.Errorf("5 minutes of history in a 10-minute window = %q, want its left half blank, its right drawn", line)
 		}
 	})
 	t.Run("gaps do not count in a bucket", func(t *testing.T) {
 		at := timesAt(end, -30*time.Second, -20*time.Second, -10*time.Second)
-		got := byTime(at, []fleet.Point{{V: 4}, {Gap: true}, {V: 8}}, window, 1)
+		got := byTime(timed(at, []fleet.Point{{V: 4}, {Gap: true}, {V: 8}}), window, 1)
 		if len(got) != 1 || got[0].Gap || got[0].V != 6 {
 			t.Errorf("byTime = %+v, want one bucket of 6", got)
 		}
-		got = byTime(at, []fleet.Point{{Gap: true}, {Gap: true}, {Gap: true}}, window, 1)
+		got = byTime(timed(at, []fleet.Point{{Gap: true}, {Gap: true}, {Gap: true}}), window, 1)
 		if len(got) != 1 || !got[0].Gap {
 			t.Errorf("a bucket of gaps = %+v, want a gap", got)
 		}
 	})
 	t.Run("a point before the window is left out", func(t *testing.T) {
-		got := byTime(timesAt(end, -11*m, 0), vals(100, 1), window, 2)
+		got := byTime(timed(timesAt(end, -11*m, 0), vals(100, 1)), window, 2)
 		if !got[0].Gap || got[1].Gap || got[1].V != 1 {
 			t.Errorf("byTime = %+v, want the early point left out", got)
 		}
 	})
-	t.Run("a series of another length lines up at its end", func(t *testing.T) {
-		// 3 times, 2 points: the points are those of the last 2 snapshots,
-		// the ones at -7m and 0.
-		got := byTime(timesAt(end, -9*m, -7*m, 0), vals(1, 2), window, 2)
-		if got[0].Gap || got[0].V != 1 || got[1].Gap || got[1].V != 2 {
-			t.Errorf("byTime = %+v, want 1 then 2: the points on the last two times", got)
+	t.Run("each point by its own time", func(t *testing.T) {
+		// Two points, the second taken 30s after the first: the window ends
+		// at the newest, and the first falls in the last of 20 spans too.
+		got := byTime(timed(timesAt(end, -30*time.Second, 0), vals(2, 4)), window, 20)
+		for i, b := range got[:19] {
+			if !b.Gap {
+				t.Errorf("bucket %d = %+v, want a gap", i, b)
+			}
 		}
-		if got := byTime(timesAt(end, -m, 0), vals(1, 2, 3, 4), window, 2); len(got) != 2 {
-			t.Errorf("byTime with more points than times = %d buckets, want 2", len(got))
+		if b := got[19]; b.Gap || b.V != 3 {
+			t.Errorf("last bucket = %+v, want both points, 3", b)
 		}
 	})
 	t.Run("nothing", func(t *testing.T) {
-		if got := byTime(nil, nil, window, 3); len(got) != 3 || !got[0].Gap || !got[1].Gap || !got[2].Gap {
+		if got := byTime(nil, window, 3); len(got) != 3 || !got[0].Gap || !got[1].Gap || !got[2].Gap {
 			t.Errorf("byTime of nothing = %+v, want 3 gaps", got)
 		}
-		if got := byTime(timesAt(end, 0), vals(1), window, 0); len(got) != 0 {
+		if got := byTime(timed(timesAt(end, 0), vals(1)), window, 0); len(got) != 0 {
 			t.Errorf("byTime at width 0 = %+v, want none", got)
 		}
-		if line := newChart(5*time.Second).spark(series{}, 5); line != "     " {
+		if line := newChart(5*time.Second).spark(nil, 5); line != "     " {
 			t.Errorf("an empty series = %q, want 5 spaces", line)
 		}
-		if line := newChart(5*time.Second).spark(series{at: timesAt(end, 0), pts: vals(1)}, 0); line != "" {
+		if line := newChart(5*time.Second).spark(timed(timesAt(end, 0), vals(1)), 0); line != "" {
 			t.Errorf("width 0 = %q, want nothing", line)
 		}
 	})
@@ -239,11 +250,11 @@ func TestKPILineFits(t *testing.T) {
 	at := timesAt(end, -2*time.Minute, -time.Minute, 0)
 	k := fleet.KPIView{
 		CompletedPerSec: 1234.5, FailedPerMin: 99999.9, PendingMax: 1234567,
-		Completed: vals(1, 2, 3), Failed: vals(3, gap, 1), Pending: vals(5, 6, 7),
+		Completed: timed(at, vals(1, 2, 3)), Failed: timed(at, vals(3, gap, 1)), Pending: timed(at, vals(5, 6, 7)),
 	}
 	for width := range 140 {
 		for _, stale := range []bool{false, true} {
-			line := newChart(5*time.Second).kpiLine(width, k, at, stale)
+			line := newChart(5*time.Second).kpiLine(width, k, stale)
 			if w := lipgloss.Width(line); w > width {
 				t.Errorf("kpiLine(%d, stale %v) is %d wide: %q", width, stale, w, line)
 			}
@@ -252,7 +263,7 @@ func TestKPILineFits(t *testing.T) {
 			}
 		}
 	}
-	if line := newChart(5*time.Second).kpiLine(140, k, at, false); !strings.Contains(line, "completed/s  1234.5") || !strings.Contains(line, "failed/min 99999.9") || !strings.Contains(line, "pending 1234567") {
+	if line := newChart(5*time.Second).kpiLine(140, k, false); !strings.Contains(line, "completed/s  1234.5") || !strings.Contains(line, "failed/min 99999.9") || !strings.Contains(line, "pending 1234567") {
 		t.Errorf("kpiLine = %q, want the values whole, in fields 7 wide", line)
 	}
 }
@@ -282,9 +293,9 @@ func TestSparklineNonFinite(t *testing.T) {
 // everyInterval is a series of one snapshot each interval over the window up
 // to end, each up to jitter of an interval early or late (the newest on
 // time), with the value 1; those within the gap (offsets from end) missing.
-func everyInterval(end time.Time, interval time.Duration, jitter float64, gapFrom, gapTo time.Duration) series {
+func everyInterval(end time.Time, interval time.Duration, jitter float64, gapFrom, gapTo time.Duration) []fleet.Point {
 	rng := rand.New(rand.NewPCG(1, 2))
-	var s series
+	var s []fleet.Point
 	for k := int(fleet.TrendWindow / interval); k >= 0; k-- {
 		off := time.Duration(k) * interval
 		if k > 0 {
@@ -296,8 +307,7 @@ func everyInterval(end time.Time, interval time.Duration, jitter float64, gapFro
 		if off >= gapFrom && off < gapTo {
 			continue
 		}
-		s.at = append(s.at, end.Add(-off))
-		s.pts = append(s.pts, fleet.Point{V: 1})
+		s = append(s, fleet.Point{At: end.Add(-off), V: 1})
 	}
 	return s
 }
@@ -344,7 +354,7 @@ func TestChartLevelsPickedOnce(t *testing.T) {
 	t.Setenv("RUNEWIDTH_EASTASIAN", "1")
 	c := newChart(5 * time.Second)
 	t.Setenv("RUNEWIDTH_EASTASIAN", "0")
-	s := series{at: timesAt(time.Now(), 0), pts: vals(3)}
+	s := timed(timesAt(time.Now(), 0), vals(3))
 	if got := c.spark(s, 1); got != "#" {
 		t.Errorf("a chart made where blocks are wide draws %q, want #", got)
 	}
@@ -360,13 +370,13 @@ func TestKPILineWidthIsSteady(t *testing.T) {
 	end := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	at := timesAt(end, -2*time.Minute, -time.Minute, 0)
 	for _, k := range []fleet.KPIView{
-		{CompletedPerSec: 3, FailedPerMin: 0, PendingMax: 7, Completed: vals(1, 2, 3), Failed: vals(0, 0, 0), Pending: vals(5, 6, 7)},
-		{CompletedPerSec: 1234.5, FailedPerMin: 99.9, PendingMax: 1234567, Completed: vals(1, 2, 3), Failed: vals(0, 0, 0), Pending: vals(5, 6, 7)},
-		{Completed: vals(1, gap, gap), Failed: vals(gap, gap, gap), Pending: vals(5, 6, 7)}, // no current rate
+		{CompletedPerSec: 3, FailedPerMin: 0, PendingMax: 7, Completed: timed(at, vals(1, 2, 3)), Failed: timed(at, vals(0, 0, 0)), Pending: timed(at, vals(5, 6, 7))},
+		{CompletedPerSec: 1234.5, FailedPerMin: 99.9, PendingMax: 1234567, Completed: timed(at, vals(1, 2, 3)), Failed: timed(at, vals(0, 0, 0)), Pending: timed(at, vals(5, 6, 7))},
+		{Completed: timed(at, vals(1, gap, gap)), Failed: timed(at, vals(gap, gap, gap)), Pending: timed(at, vals(5, 6, 7))}, // no current rate
 	} {
 		for width := 40; width < 130; width++ {
 			c := newChart(5 * time.Second)
-			fresh, stale := c.kpiLine(width, k, at, false), c.kpiLine(width, k, at, true)
+			fresh, stale := c.kpiLine(width, k, false), c.kpiLine(width, k, true)
 			if lipgloss.Width(fresh) != lipgloss.Width(stale) {
 				t.Fatalf("%d columns: the line is %d wide with values, %d without:\n%s\n%s", width, lipgloss.Width(fresh), lipgloss.Width(stale), fresh, stale)
 			}
@@ -695,16 +705,15 @@ func TestBlockChartASCII(t *testing.T) {
 // hourEvery is a series of one snapshot each interval over the hour up to
 // end, each up to jitter of an interval early or late (the newest on time),
 // of the value 1.
-func hourEvery(end time.Time, interval time.Duration, jitter float64) series {
+func hourEvery(end time.Time, interval time.Duration, jitter float64) []fleet.Point {
 	rng := rand.New(rand.NewPCG(3, 4))
-	var s series
+	var s []fleet.Point
 	for k := int(time.Hour / interval); k >= 0; k-- {
 		off := time.Duration(k) * interval
 		if k > 0 {
 			off += time.Duration((rng.Float64()*2 - 1) * jitter * float64(interval))
 		}
-		s.at = append(s.at, end.Add(-min(off, time.Hour)))
-		s.pts = append(s.pts, fleet.Point{V: 1})
+		s = append(s, fleet.Point{At: end.Add(-min(off, time.Hour)), V: 1})
 	}
 	return s
 }
@@ -751,15 +760,10 @@ func TestHistoryLongIntervals(t *testing.T) {
 	}
 
 	// Polls missed over a stretch are blank, not squeezed away.
-	s := hourEvery(end, 5*time.Second, 0)
-	keep := 0
-	for i := range s.at {
-		if off := end.Sub(s.at[i]); off < 20*time.Minute || off >= 40*time.Minute {
-			s.at[keep], s.pts[keep] = s.at[i], s.pts[i]
-			keep++
-		}
-	}
-	s.at, s.pts = s.at[:keep], s.pts[:keep]
+	s := slices.DeleteFunc(hourEvery(end, 5*time.Second, 0), func(p fleet.Point) bool {
+		off := end.Sub(p.At)
+		return off >= 20*time.Minute && off < 40*time.Minute
+	})
 	lines, _ := newChart(5*time.Second).history(s, 128, 1) // 120 columns of 30s
 	// Columns of 30s: those of the polls missed are blank (the 39 whose
 	// spans have none), the rest drawn.
@@ -768,7 +772,7 @@ func TestHistoryLongIntervals(t *testing.T) {
 	}
 
 	// No history: the rows are blank, the axis is there.
-	lines, partial := newChart(5*time.Second).history(series{}, 80, 5)
+	lines, partial := newChart(5*time.Second).history(nil, 80, 5)
 	for r, line := range lines[:5] {
 		if line != strings.Repeat(" ", 80) {
 			t.Errorf("no history: row %d = %q, want it blank", r, line)
