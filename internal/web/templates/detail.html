@@ -15,15 +15,15 @@
   <div class="card failed"><h3>Failed</h3><p class="big">{{.Failed}}</p></div>
   <div class="card"><h3>Success rate</h3><p class="big">{{.SuccessRate}}</p></div>{{end}}
 </section>
-<figure class="chart">
-  <figcaption>Completed /s <span class="peak">peak {{printf "%.1f" (peak .Completed1h)}}/s</span></figcaption>
-  {{template "spark" (sparkline .Completed1h 720 120)}}
+<figure class="chart">{{$c := sparkline .Completed1h historyWindow $.Interval 720 120}}
+  <figcaption>Completed /s <span class="peak">peak {{printf "%.1f" $c.Peak}}/s</span></figcaption>
+  {{template "spark" $c}}
 </figure>
-<figure class="chart failed">
-  <figcaption>Failed /s <span class="peak">peak {{printf "%.1f" (peak .Failed1h)}}/s</span></figcaption>
-  {{template "spark" (sparkline .Failed1h 720 120)}}
+<figure class="chart failed">{{$c = sparkline .Failed1h historyWindow $.Interval 720 120}}
+  <figcaption>Failed /s <span class="peak">peak {{printf "%.1f" $c.Peak}}/s</span></figcaption>
+  {{template "spark" $c}}
 </figure>
-<p class="pods">{{$.Noun.CapMany}} reporting: {{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}</p>
+<p class="pods">{{$.Noun.CapMany}} reporting: {{if $.Stale}}—{{else}}{{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}{{end}}</p>
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}

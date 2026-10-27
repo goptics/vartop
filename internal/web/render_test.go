@@ -70,13 +70,24 @@ func coords(t *testing.T, s string) [][2]float64 {
 	return out
 }
 
-func pt(v float64) fleet.Point { return fleet.Point{V: v, Title: "t"} }
+// ptAt is a point of value v taken at at.
+func ptAt(at time.Time, v float64) fleet.Point { return fleet.Point{At: at, V: v, Title: "t"} }
 
-var gap = fleet.Point{Gap: true, Title: "no data"}
+// series is n points of value v, every interval from start.
+func series(start time.Time, interval time.Duration, n int, v float64) []fleet.Point {
+	pts := make([]fleet.Point, n)
+	for i := range pts {
+		pts[i] = ptAt(start.Add(time.Duration(i)*interval), v)
+	}
+	return pts
+}
 
 func TestPolylines(t *testing.T) {
+	const iv = 5 * time.Second
+	t0 := viewT0
+	gapAt := func(at time.Time) fleet.Point { return fleet.Point{At: at, Gap: true, Title: "no data"} }
 	t.Run("a gap splits runs", func(t *testing.T) {
-		runs := polylines([]fleet.Point{pt(1), pt(2), gap, pt(4)}, 30, 10)
+		runs := polylines([]fleet.Point{ptAt(t0, 1), ptAt(t0.Add(iv), 2), gapAt(t0.Add(2 * iv)), ptAt(t0.Add(3*iv), 4)}, 3*iv, iv, 30, 10)
 		if len(runs) != 2 {
 			t.Fatalf("runs = %q, want 2", runs)
 		}
@@ -84,7 +95,7 @@ func TestPolylines(t *testing.T) {
 		if len(first) != 2 || len(second) != 1 {
 			t.Fatalf("run lengths = %d, %d, want 2, 1 (%q)", len(first), len(second), runs)
 		}
-		// x follows the point's index over the whole series: 0, 10, (gap at 20), 30.
+		// x follows the point's time over the window: 0, 10, (gap at 20), 30.
 		if first[0][0] != 0 || first[1][0] != 10 || second[0][0] != 30 {
 			t.Errorf("x = %v %v, want 0 10 30", first, second)
 		}
@@ -94,21 +105,21 @@ func TestPolylines(t *testing.T) {
 		}
 	})
 	t.Run("empty draws nothing", func(t *testing.T) {
-		if runs := polylines(nil, 30, 10); len(runs) != 0 {
+		if runs := polylines(nil, time.Minute, iv, 30, 10); len(runs) != 0 {
 			t.Errorf("runs = %q, want none", runs)
 		}
-		if runs := polylines([]fleet.Point{gap, gap}, 30, 10); len(runs) != 0 {
+		if runs := polylines([]fleet.Point{gapAt(t0), gapAt(t0.Add(iv))}, time.Minute, iv, 30, 10); len(runs) != 0 {
 			t.Errorf("all-gap runs = %q, want none", runs)
 		}
 	})
-	t.Run("one point is one coordinate", func(t *testing.T) {
-		runs := polylines([]fleet.Point{pt(3)}, 30, 10)
-		if len(runs) != 1 || len(coords(t, runs[0])) != 1 {
-			t.Errorf("runs = %q, want one run of one coordinate", runs)
+	t.Run("one point is one coordinate, at the newest end", func(t *testing.T) {
+		runs := polylines([]fleet.Point{ptAt(t0, 3)}, time.Minute, iv, 30, 10)
+		if len(runs) != 1 || len(coords(t, runs[0])) != 1 || coords(t, runs[0])[0][0] != 30 {
+			t.Errorf("runs = %q, want one run of one coordinate at x 30", runs)
 		}
 	})
 	t.Run("all zero is a flat line at the bottom", func(t *testing.T) {
-		runs := polylines([]fleet.Point{pt(0), pt(0), pt(0)}, 30, 10)
+		runs := polylines(series(t0, iv, 3, 0), time.Minute, iv, 30, 10)
 		if len(runs) != 1 {
 			t.Fatalf("runs = %q, want 1", runs)
 		}
@@ -118,6 +129,43 @@ func TestPolylines(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSparklinePlacesByTime (R39): a web chart places each point at its
+// time over the chart's fixed window, up to the newest point: a stretch
+// with no snapshots — no daemon ran — is blank space of its width, the
+// line broken where points are more than two intervals apart (a late poll
+// is not a break). Points older than the window are not drawn, nor counted
+// in its peak.
+func TestSparklinePlacesByTime(t *testing.T) {
+	const iv = 5 * time.Second
+	t0 := viewT0
+	var pts []fleet.Point
+	pts = append(pts, series(t0.Add(-3*time.Minute), iv, 36, 99)...) // older than the window: not drawn
+	pts = append(pts, series(t0, iv, 25, 1)...)                      // 0–2 min
+	pts = append(pts, ptAt(t0.Add(2*time.Minute+9*time.Second), 2))  // a late poll, 9s after
+	pts = append(pts, series(t0.Add(7*time.Minute), iv, 37, 3)...)   // 7–10 min: after 5 minutes with none
+	v := sparkline(pts, fleet.TrendWindow, iv, 120, 20)
+
+	if len(v.Lines) != 2 {
+		t.Fatalf("lines = %d, want 2, broken at the 5 minutes with no point:\n%q", len(v.Lines), v.Lines)
+	}
+	first, second := coords(t, v.Lines[0]), coords(t, v.Lines[1])
+	if len(first) != 26 || len(second) != 37 {
+		t.Errorf("run lengths = %d, %d, want 26 (the late poll joined) and 37", len(first), len(second))
+	}
+	// 12 units a minute: the first run from 0 to 2m9s, the second from 7 min to 10.
+	if first[0][0] != 0 || first[len(first)-1][0] != 25.8 || second[0][0] != 84 || second[len(second)-1][0] != 120 {
+		t.Errorf("runs span x %v–%v and %v–%v, want 0–25.8 and 84–120", first[0][0], first[len(first)-1][0], second[0][0], second[len(second)-1][0])
+	}
+	if v.Peak != 3 {
+		t.Errorf("peak = %v, want 3: the points older than the window are left out", v.Peak)
+	}
+	for _, h := range v.Hits {
+		if x, _ := strconv.ParseFloat(h.X, 64); x < -1 {
+			t.Errorf("a hover target at x %v, before the window", x)
+		}
+	}
 }
 
 func TestTemplatesParse(t *testing.T) {
@@ -138,7 +186,7 @@ func sampleRows() []fleet.RowView {
 			Name: "orders", ID: "w-6f7264657273", Status: "Running", Class: "active",
 			StatusTip: "a: Running\nb: Running", Concurrency: "4 ×2 pods", Busy: 3, Idle: 5,
 			PendingMax: 7, PendingTip: "a: 7\nb: 2",
-			Spark: []fleet.Point{pt(1), pt(2), {V: 3, Partial: true, Title: "half"}},
+			Spark: []fleet.Point{ptAt(atTick(0), 1), ptAt(atTick(1), 2), {At: atTick(2), V: 3, Partial: true, Title: "half"}},
 		},
 		{
 			Name: "<script>x</script>", ID: "w-3c7363", Status: "mixed", Class: "mixed",
@@ -158,7 +206,7 @@ func dashboardPage() Page {
 			KPIs: fleet.KPIView{
 				CompletedPerSec: 12.5, FailedPerMin: 3, PendingMax: 9,
 				StatusCounts: map[string]int{"active": 3, "paused": 1},
-				Completed:    []fleet.Point{pt(1), pt(12.5)}, Failed: []fleet.Point{pt(0), pt(3)}, Pending: []fleet.Point{pt(9)},
+				Completed:    []fleet.Point{ptAt(atTick(0), 1), ptAt(atTick(1), 12.5)}, Failed: []fleet.Point{ptAt(atTick(0), 0), ptAt(atTick(1), 3)}, Pending: []fleet.Point{ptAt(atTick(1), 9)},
 			},
 			Rows: sampleRows(),
 		},
@@ -260,7 +308,7 @@ func TestUnknownRowShowsNoValues(t *testing.T) {
 func TestKPIShowsDashWhenLastPointIsGap(t *testing.T) {
 	p := dashboardPage()
 	p.Dashboard.KPIs.CompletedPerSec = 99.9
-	p.Dashboard.KPIs.Completed = []fleet.Point{pt(1), gap}
+	p.Dashboard.KPIs.Completed = []fleet.Point{ptAt(atTick(0), 1), {At: atTick(1), Gap: true, Title: "no data"}}
 	p.Dashboard.KPIs.Failed = nil
 	body := run(t, "dashboard", "layout", p)
 	if strings.Contains(body, "99.9") {
@@ -426,7 +474,7 @@ func detailPage() Page {
 		Name: "a/b c", Status: "Running", Class: "active", StatusTip: "a: Running",
 		Submitted: 10, Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
 		ConcurrencyStart: 4, ConcurrencyMax: 64,
-		Completed1h: []fleet.Point{pt(1), pt(2)}, Failed1h: []fleet.Point{pt(0), pt(0)},
+		Completed1h: []fleet.Point{ptAt(atTick(0), 1), ptAt(atTick(1), 2)}, Failed1h: []fleet.Point{ptAt(atTick(0), 0), ptAt(atTick(1), 0)},
 		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}},
 	}
 	return p
@@ -618,18 +666,20 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 }
 
 func TestSparklineHitTargetsAreBounded(t *testing.T) {
-	// 3600 one-second points in a 120-wide box must not emit 3600 hover targets.
+	// An hour of one-second points in a 120-wide box must not emit 3600
+	// hover targets.
 	pts := make([]fleet.Point, 3600)
 	for i := range pts {
-		pts[i] = pt(float64(i % 7))
+		pts[i] = ptAt(viewT0.Add(time.Duration(i)*time.Second), float64(i%7))
 	}
-	v := sparkline(pts, 120, 26)
+	v := sparkline(pts, time.Hour, time.Second, 120, 26)
 	if len(v.Hits) == 0 || len(v.Hits) > 130 {
 		t.Errorf("hits = %d, want 1..130", len(v.Hits))
 	}
-	// At the default density every point keeps its own target.
-	if n := len(sparkline(pts[:120], 120, 26).Hits); n != 120 {
-		t.Errorf("hits for 120 points = %d, want 120", n)
+	// At the default density, 5s polls over 10 minutes, every point keeps
+	// its own target.
+	if n := len(sparkline(series(viewT0, 5*time.Second, 121, 1), fleet.TrendWindow, 5*time.Second, 120, 26).Hits); n != 121 {
+		t.Errorf("hits for 121 points = %d, want 121", n)
 	}
 }
 
@@ -712,8 +762,20 @@ func TestControlsFollowBalancedScope(t *testing.T) {
 func TestStaleHidesCurrentValues(t *testing.T) {
 	const stale = "No new data for 1m0s — the vartop daemon is not running."
 	for set, p := range map[string]Page{"dashboard": dashboardPage(), "detail": detailPage(), "grid": gridPage()} {
+		p.Note = "3 instances behind lb:8080"
+		fresh := run(t, set, "layout", p)
 		p.Stale, p.DaemonDown = stale, true
 		body := run(t, set, "layout", p)
+		// Current state beyond the values: the balancers' note, a unit's
+		// error and down mark, the units reporting the worker.
+		for _, current := range []string{"3 instances behind lb:8080", `class="down"`, "connection refused", ">a</span>"} {
+			if strings.Contains(fresh, current) && strings.Contains(body, current) {
+				t.Errorf("%s: a stale page shows the current %q", set, current)
+			}
+		}
+		if set == "detail" && !strings.Contains(body, `<p class="pods">Pods reporting: —</p>`) {
+			t.Errorf("detail: a stale page lacks %q:\n%s", "Pods reporting: —", body)
+		}
 		_, banner, _ := strings.Cut(body, `<div id="banner" role="status">`)
 		banner, _, _ = strings.Cut(banner, "</div>")
 		for _, want := range []string{`<p class="banner stale">` + stale + `</p>`, `hx-post="/daemon/start"`, `<input type="hidden" name="server" value="dev">`, `>Start collector</button>`} {

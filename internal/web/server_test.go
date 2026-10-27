@@ -811,6 +811,61 @@ func TestWaitingForFirstSnapshot(t *testing.T) {
 	noPatches(t, fa, fb)
 }
 
+// TestDetailChartIsTheHourByTime (R39): a feed held open across a
+// 40-minute collection gap keeps its older snapshots; the detail chart
+// still shows only the hour up to the newest, each point at its time, the
+// gap as blank space 40 minutes wide between two lines, and a peak of the
+// hour alone. The clock cannot be moved, so the snapshots after the gap
+// run 10 minutes ahead of it: the hour then starts at now−50m, and the
+// first ones taken, from now−58m, have aged out of it in the feed.
+func TestDetailChartIsTheHourByTime(t *testing.T) {
+	_, aSrv := fleettest.NewVarmq(t, "a", nil)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}},
+	}})
+	now := time.UnixMilli(time.Now().UnixMilli())
+	rows := func(from, to time.Duration, v func(at time.Time) float64) {
+		for d := from; d <= to; d += 10 * time.Second {
+			at := now.Add(d)
+			s := smp("Running", 4, 1, 3, 0)
+			s.CompletedRate, s.RateOK = v(at), true
+			f.write("multi", snap(at, okPod(aSrv.URL, map[string]*fleet.Sample{"orders": s})))
+		}
+	}
+	f.claim()
+	rows(-58*time.Minute, -45*time.Minute, func(at time.Time) float64 {
+		if at.Before(now.Add(-50 * time.Minute)) {
+			return 99 // older than the hour once the rows below are in
+		}
+		return 2
+	})
+	if status, _ := fetch(t, f.srv, "/workers/orders?server=multi", false); status != http.StatusOK {
+		t.Fatalf("GET detail = %d before the gap", status)
+	}
+	rows(-5*time.Minute, 10*time.Minute, func(time.Time) float64 { return 3 })
+
+	_, body := fetch(t, f.srv, "/workers/orders?server=multi", false)
+	_, chart, _ := strings.Cut(body, `<figure class="chart">`)
+	chart, _, _ = strings.Cut(chart, "</figure>")
+	lines := regexp.MustCompile(`<polyline points="([^"]*)"/>`).FindAllStringSubmatch(chart, -1)
+	if len(lines) != 2 {
+		t.Fatalf("Completed /s chart has %d lines, want 2, broken at the gap:\n%s", len(lines), chart)
+	}
+	before, after := coords(t, lines[0][1]), coords(t, lines[1][1])
+	// 720 wide for the hour: 12 units a minute. The hour from now−50m holds
+	// 31 snapshots before the gap (to now−45m) and 91 after (from now−5m).
+	if len(before) != 31 || len(after) != 91 {
+		t.Errorf("lines of %d and %d points, want 31 and 91: the hour's alone", len(before), len(after))
+	}
+	if before[0][0] != 0 || before[len(before)-1][0] != 60 || after[0][0] != 540 || after[len(after)-1][0] != 720 {
+		t.Errorf("lines span x %v–%v and %v–%v, want 0–60 and 540–720 (a gap 480 wide: 40 minutes)",
+			before[0][0], before[len(before)-1][0], after[0][0], after[len(after)-1][0])
+	}
+	if !strings.Contains(chart, `<span class="peak">peak 3.0/s</span>`) {
+		t.Errorf("the chart's peak is not the hour's 3.0/s:\n%s", chart)
+	}
+}
+
 // TestOldHistoryShowsStale (R43): a server whose file holds only rows
 // older than the hour — the daemon down for longer than that — shows its
 // newest snapshot stale, with its age and the Start collector button, not

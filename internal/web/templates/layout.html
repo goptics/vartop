@@ -32,7 +32,7 @@
   <span class="health" title="healthy / total {{.Noun.Many}}">{{if .Stale}}—{{else}}{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}}{{end}} {{.Noun.Many}}</span>
   {{if gt .IntervalSec 0}}<span class="interval">refresh every {{.IntervalSec}}s</span>{{end}}
   {{with .Updated}}<span class="updated{{if $.Stale}} stale{{end}}">updated {{.}}</span>{{end}}
-  {{if .Note}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}
+  {{if and .Note (not .Stale)}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}
 </div>
 <div id="errors" role="alert"></div>
 <div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}{{if .DaemonDown}}<form class="start" hx-post="/daemon/start" hx-target="#start-error" hx-swap="innerHTML" hx-sync="#page:replace">

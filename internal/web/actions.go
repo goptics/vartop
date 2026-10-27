@@ -361,20 +361,21 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 		stale, _ = h.staleMsg(t.key, latest, now)
 	}
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}
-	if set, p, ok := livePage(r, t.key, t.noun, snaps, t.label, worker, stale); ok {
+	if set, p, ok := livePage(r, t.key, t.noun, t.srv.PollInterval(), snaps, t.label, worker, stale); ok {
 		frags = append(frags, fragment{set, "live_oob", p})
 	}
 	h.fragments(w, frags...)
 }
 
 // livePage is the page whose #live an action response refreshes, from
-// snaps of the server keyed key: the one htmx says the request came from
-// (HX-Current-URL), "/" being the dashboard and "/workers/{name}" that
-// worker's detail; without the header, the page that carries the route's
-// controls (detail of worker, or the dashboard). Other pages, a worker no
-// unit reports, and a label the newest snapshot lacks get no refresh.
-// stale is the page's Stale notice: with one, it shows no current value.
-func livePage(r *http.Request, key string, n fleet.Noun, snaps []*fleet.Snapshot, label, worker, stale string) (string, Page, bool) {
+// snaps of the server keyed key, polled every interval: the one htmx says
+// the request came from (HX-Current-URL), "/" being the dashboard and
+// "/workers/{name}" that worker's detail; without the header, the page
+// that carries the route's controls (detail of worker, or the dashboard).
+// Other pages, a worker no unit reports, and a label the newest snapshot
+// lacks get no refresh. stale is the page's Stale notice: with one, it
+// shows no current value.
+func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration, snaps []*fleet.Snapshot, label, worker, stale string) (string, Page, bool) {
 	set := "dashboard"
 	if worker != "" {
 		set = "detail"
@@ -395,7 +396,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, snaps []*fleet.Snapshot
 		}
 	}
 
-	p := Page{Server: key, Pod: label, Noun: n, Stale: stale}
+	p := Page{Server: key, Pod: label, Noun: n, IntervalSec: int(interval / time.Second), Stale: stale}
 	fill(&p, snaps)
 	if podGone(&p, snaps) {
 		return "", Page{}, false // the next poll shows why

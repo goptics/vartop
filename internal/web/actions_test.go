@@ -744,12 +744,36 @@ func TestNoRefreshForGonePod(t *testing.T) {
 	for _, from := range []string{"/", "/workers/orders"} {
 		req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
 		req.Header.Set("HX-Current-URL", "http://127.0.0.1"+from)
-		if set, _, ok := livePage(req, "multi", instanceNoun, snaps, "http://a", "orders", ""); ok {
+		if set, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, snaps, "http://a", "orders", ""); ok {
 			t.Errorf("from %s: livePage refreshes %s for a gone unit", from, set)
 		}
-		if _, _, ok := livePage(req, "multi", instanceNoun, snaps, "http://b", "orders", ""); !ok {
+		if _, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, snaps, "http://b", "orders", ""); !ok {
 			t.Errorf("from %s: livePage refuses a reported unit", from)
 		}
+	}
+}
+
+// TestLiveRefreshBreaksAtGaps (R39): the #live an action response
+// refreshes draws its charts as the page's poll does, by time and broken
+// where polls are missing: it knows the server's interval.
+func TestLiveRefreshBreaksAtGaps(t *testing.T) {
+	var snaps []*fleet.Snapshot
+	for _, n := range []int{0, 1, 2, 480, 481, 482} { // 40 minutes with none between
+		s := smp("Running", 1, 0, 0, 0)
+		s.CompletedRate, s.RateOK = 1, true
+		snaps = append(snaps, snap(atTick(n), okPod("http://a", map[string]*fleet.Sample{"orders": s})))
+	}
+	req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
+	req.Header.Set("HX-Current-URL", "http://127.0.0.1/workers/orders?server=multi")
+	set, p, ok := livePage(req, "multi", instanceNoun, 5*time.Second, snaps, "", "orders", "")
+	if !ok || set != "detail" {
+		t.Fatalf("livePage = %q, %v; want the detail", set, ok)
+	}
+	body := run(t, set, "live_oob", p)
+	_, chart, _ := strings.Cut(body, `<figure class="chart">`)
+	chart, _, _ = strings.Cut(chart, "</figure>")
+	if n := strings.Count(chart, "<polyline"); n != 2 {
+		t.Errorf("the refreshed chart has %d lines, want 2, broken at the 40 minutes with no poll:\n%s", n, chart)
 	}
 }
 

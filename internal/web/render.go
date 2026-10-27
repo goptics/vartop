@@ -6,8 +6,10 @@ import (
 	"html/template"
 	"math"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goptics/vartop/internal/fleet"
 )
@@ -48,8 +50,9 @@ type Page struct {
 	// down, or its worker is not found. Waiting is the whole "Waiting for
 	// the first snapshot of {server}…" message of a full page (htmx
 	// reloads instead, see reload). Stale says how old the newest
-	// snapshot is, and why: the page then shows no current value — health
-	// included — only history.
+	// snapshot is, and why: the page then shows no current value — health,
+	// the balancers' note, the units' errors and the units reporting a
+	// worker included — only history.
 	Note, Banner, Waiting, Stale string
 
 	// DaemonDown: no daemon collects; the banner offers to start it.
@@ -73,6 +76,9 @@ type Page struct {
 	Grid      *fleet.GridView
 	Detail    *fleet.DetailView
 }
+
+// Interval is the server's poll interval; 0 with no server.
+func (p Page) Interval() time.Duration { return time.Duration(p.IntervalSec) * time.Second }
 
 // Scope names what an action on this page touches: the selected unit's
 // label, or "all pods" ("all instances" off Kubernetes).
@@ -118,7 +124,8 @@ var funcs = template.FuncMap{
 	"pathOf":        pathOf,
 	"sparkline":     sparkline,
 	"noData":        noData,
-	"peak":          peak,
+	"trendWindow":   func() time.Duration { return fleet.TrendWindow },
+	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
 	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
 }
@@ -206,13 +213,46 @@ type placed struct {
 	p    fleet.Point
 }
 
-// xAt is the x of the i-th of n points: evenly spread over w, newest on the
-// right. A lone point sits in the middle.
-func xAt(i, n int, w float64) float64 {
-	if n < 2 {
-		return w / 2
+// chartArea is a w×h plot of the window up to the newest of a series'
+// points, which it places by time (fleet.Point.At), as the TUI does: a
+// stretch with no snapshot is blank space of its width, not squeezed away
+// by the points around it. interval is the series' poll interval: points
+// more than two apart are not joined. 0 joins every pair, gaps aside.
+type chartArea struct {
+	start         time.Time
+	window        time.Duration
+	interval      time.Duration
+	width, height float64
+}
+
+// newChartArea is the area pts are drawn in, and the points of pts it
+// shows: those taken within window of the newest, oldest first.
+func newChartArea(pts []fleet.Point, window, interval time.Duration, w, h float64) (chartArea, []fleet.Point) {
+	a := chartArea{window: window, interval: interval, width: w, height: h}
+	if len(pts) == 0 {
+		return a, nil
 	}
-	return float64(i) * w / float64(n-1)
+	a.start = pts[len(pts)-1].At.Add(-window)
+	i := slices.IndexFunc(pts, func(p fleet.Point) bool { return !p.At.Before(a.start) })
+	if i < 0 { // a window below zero: nothing in it
+		return a, nil
+	}
+	return a, pts[i:]
+}
+
+// xAt is the x of a point taken at at: its time into the window, scaled to
+// the width, the newest on the right edge.
+func (a chartArea) xAt(at time.Time) float64 {
+	if a.window <= 0 {
+		return a.width
+	}
+	return float64(at.Sub(a.start)) / float64(a.window) * a.width
+}
+
+// apart reports whether two points taken at prev and at are too far apart
+// to be joined: more than two intervals, so polls missed, not one late.
+func (a chartArea) apart(prev, at time.Time) bool {
+	return a.interval > 0 && at.Sub(prev) > 2*a.interval
 }
 
 // yAt scales v into [0, h] against top, 0 at the bottom (y == h). A series
@@ -224,25 +264,39 @@ func yAt(v, top, h float64) float64 {
 	return h - min(v, top)/top*h
 }
 
-// runsOf positions the points of pts in a w×h plot and splits them at gaps.
-func runsOf(pts []fleet.Point, w, h float64) [][]placed {
-	top := peak(pts)
+// runsOf positions pts, the points a shows, scaled to top, and splits
+// them where a point is a gap or the points are apart.
+func (a chartArea) runsOf(pts []fleet.Point, top float64) [][]placed {
 	var runs [][]placed
 	var cur []placed
-	for i, p := range pts {
-		if p.Gap {
+	for _, p := range pts {
+		if p.Gap || cur != nil && a.apart(cur[len(cur)-1].p.At, p.At) {
 			if cur != nil {
 				runs = append(runs, cur)
 				cur = nil
 			}
-			continue
+			if p.Gap {
+				continue
+			}
 		}
-		cur = append(cur, placed{xAt(i, len(pts), w), yAt(p.V, top, h), p})
+		cur = append(cur, placed{a.xAt(p.At), yAt(p.V, top, a.height), p})
 	}
 	if cur != nil {
 		runs = append(runs, cur)
 	}
 	return runs
+}
+
+// hitWidth is the width of a hover target: a poll's width, where the
+// interval is known, but never under minHit.
+func (a chartArea) hitWidth(n int) float64 {
+	switch {
+	case a.interval > 0 && a.window > 0:
+		return max(minHit, a.width*float64(a.interval)/float64(a.window))
+	case n > 1:
+		return max(minHit, a.width/float64(n-1))
+	}
+	return max(minHit, a.width)
 }
 
 func num(f float64) string { return strconv.FormatFloat(f, 'f', 1, 64) }
@@ -255,17 +309,14 @@ func joinRun(run []placed) string {
 	return strings.Join(coords, " ")
 }
 
-// polylines returns one "x,y x,y" string per gap-free run of pts in a w×h
-// plot, y scaled to the series maximum.
-func polylines(pts []fleet.Point, w, h float64) []string {
-	var out []string
-	for _, run := range runsOf(pts, w, h) {
-		out = append(out, joinRun(run))
-	}
-	return out
+// polylines returns one "x,y x,y" string per run of pts (see runsOf) in a
+// w×h plot of window, y scaled to the maximum of the points shown.
+func polylines(pts []fleet.Point, window, interval time.Duration, w, h float64) []string {
+	return sparkline(pts, window, interval, w, h).Lines
 }
 
-// sparkView is what the "spark" template draws.
+// sparkView is what the "spark" template draws. Peak is the largest value
+// it draws, for the caption.
 type sparkView struct {
 	ViewBox       string
 	Width, Height string
@@ -273,6 +324,7 @@ type sparkView struct {
 	Lines         []string
 	Dots          []sparkDot
 	Hits          []sparkHit
+	Peak          float64
 }
 
 // sparkDot is a circle: a partial point (hollow) or a solid point that has no
@@ -283,17 +335,22 @@ type sparkDot struct{ X, Y, Class string }
 // <title> is the hover text. Gaps get one too, so "no data" can be hovered.
 type sparkHit struct{ X, W, Title string }
 
-// sparkline lays pts out in a w×h plot: a polyline per run, hollow circles
-// for partial points, dots for isolated ones, and hover targets on top.
-func sparkline(pts []fleet.Point, w, h float64) sparkView {
+// sparkline lays pts, a series polled every interval, out in a w×h plot of
+// the window up to its newest point, each at its time (see chartArea): a
+// polyline per run, hollow circles for partial points, dots for isolated
+// ones, and hover targets on top. Points older than the window are not
+// drawn, nor counted in its peak.
+func sparkline(pts []fleet.Point, window, interval time.Duration, w, h float64) sparkView {
+	a, pts := newChartArea(pts, window, interval, w, h)
 	v := sparkView{
 		ViewBox: fmt.Sprintf("%d %d %s %s", -sparkPad, -sparkPad, num(w+2*sparkPad), num(h+2*sparkPad)),
 		Width:   num(w + 2*sparkPad),
 		Height:  num(h + 2*sparkPad),
 		Top:     strconv.Itoa(-sparkPad),
 		HitH:    num(h + 2*sparkPad),
+		Peak:    peak(pts),
 	}
-	for _, run := range runsOf(pts, w, h) {
+	for _, run := range a.runsOf(pts, v.Peak) {
 		v.Lines = append(v.Lines, joinRun(run))
 		for _, p := range run {
 			switch {
@@ -305,23 +362,17 @@ func sparkline(pts []fleet.Point, w, h float64) sparkView {
 		}
 	}
 
-	n := len(pts)
-	step := w
-	if n > 1 {
-		step = w / float64(n-1)
-	}
-	stride := 1
-	if step < minHit {
-		stride = int(math.Ceil(minHit / step))
-	}
-	for lo := 0; lo < n; lo += stride {
-		hi := min(lo+stride, n)
-		mid := lo + (hi-lo-1)/2
-		v.Hits = append(v.Hits, sparkHit{
-			X:     num(xAt(lo, n, w) - step/2),
-			W:     num(step * float64(hi-lo)),
-			Title: pts[mid].Title,
-		})
+	// A target per column of the plot holding points, gaps included,
+	// titled by the middle one of them.
+	col := a.hitWidth(len(pts))
+	for lo := 0; lo < len(pts); {
+		c := math.Round(a.xAt(pts[lo].At) / col)
+		hi := lo + 1
+		for hi < len(pts) && math.Round(a.xAt(pts[hi].At)/col) == c {
+			hi++
+		}
+		v.Hits = append(v.Hits, sparkHit{X: num(c*col - col/2), W: num(col), Title: pts[lo+(hi-lo-1)/2].Title})
+		lo = hi
 	}
 	return v
 }

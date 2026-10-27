@@ -3,17 +3,17 @@
   <div class="card">
     <h3>Completed /s</h3>
     <p class="big">{{if or $.Stale (noData $k.Completed)}}—{{else}}{{printf "%.1f" $k.CompletedPerSec}}{{end}}</p>
-    {{template "spark" (sparkline $k.Completed 160 32)}}
+    {{template "spark" (sparkline $k.Completed trendWindow $.Interval 160 32)}}
   </div>
   <div class="card failed">
     <h3>Failed /min</h3>
     <p class="big">{{if or $.Stale (noData $k.Failed)}}—{{else}}{{printf "%.1f" $k.FailedPerMin}}{{end}}</p>
-    {{template "spark" (sparkline $k.Failed 160 32)}}
+    {{template "spark" (sparkline $k.Failed trendWindow $.Interval 160 32)}}
   </div>
   <div class="card pending">
     <h3>Pending (max/{{$.Noun.One}})</h3>
     <p class="big">{{if or $.Stale (noData $k.Pending)}}—{{else}}{{$k.PendingMax}}{{end}}</p>
-    {{template "spark" (sparkline $k.Pending 160 32)}}
+    {{template "spark" (sparkline $k.Pending trendWindow $.Interval 160 32)}}
   </div>
   <div class="card">
     <h3>Workers by status</h3>
@@ -42,7 +42,7 @@
     <td class="num">{{if or .Unknown $.Stale}}—{{else}}{{.Busy}}{{end}}</td>
     <td class="num">{{if or .Unknown $.Stale}}—{{else}}{{.Idle}}{{end}}</td>
     <td class="num"{{with .PendingTip}}{{if not $.Stale}} title="{{.}}"{{end}}{{end}}>{{if or .Unknown $.Stale}}—{{else}}{{.PendingMax}}{{end}}</td>
-    <td class="trend">{{template "spark" (sparkline .Spark 120 24)}}</td>
+    <td class="trend">{{template "spark" (sparkline .Spark trendWindow $.Interval 120 24)}}</td>
   </tr>{{end}}
   </tbody>
 </table>
