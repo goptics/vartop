@@ -10,7 +10,7 @@ build:
 	go build -o $(BIN_DIR)/$(BINARY_NAME) main.go
 
 run: build
-	./$(BIN_DIR)/$(BINARY_NAME)
+	./$(BIN_DIR)/$(BINARY_NAME) web
 
 clean:
 	rm -rf $(BIN_DIR)

@@ -2,6 +2,8 @@
 
 Amends `2026-10-25-web-ui-design.md` and `2026-10-26-web-ui-instances-design.md`. Where they disagree, this one wins.
 
+> **Superseded in part on 2026-10-27 (R46).** The daemon, its login service and the TUI are gone: `vartop web` runs the collector itself while it runs. The store, its lease, pokes, the R44 current-snapshot rule and the label URLs stand. Read R46 first.
+
 ## Context
 
 Two gaps the owner hit while using the instances-behind-a-balancer build (PR goptics/vartop#1):
@@ -230,3 +232,15 @@ What the whole-branch review (`39d7ac7..e1f8c65`) found and the fix wave changed
   - `{Pods|Instances} reporting: —` on a stale detail page
   - log lines `the daemon holding the lease does not beat; taking it over`, and `server removed` for each server when the config is deleted
 - **Left open** (ledgered, not fixed): `RequestStop` is not bound to a token; `daemon stop` does not stop a supervised daemon that is crash-looping or not responding; a balanced unit unreached on the first tick after more than 24 h loses its number; the web detail form still prefills concurrency from a stale snapshot (its actions are refused anyway); the web Start collector button and the TUI's `r` drop the detached-start warning; each TUI trend build allocates about 85 MB at 200×10 and 1 s, two thirds of its time in `BuildDashboard` (a KPI-only builder would cut both).
+
+### Web-only (R46)
+
+- **R46** (owner's decision, 2026-10-27; plan `docs/superpowers/plans/2026-10-27-web-only.md`) vartop is the CLI plus `vartop web`; the daemon, its login service, the detached process and the TUI are removed — the owner wants one simple way to run it — the TUI's users lose it.
+  - **Collection.** `vartop web` runs `collect.Run` (the daemon package, renamed `internal/collect`) in `collectLoop` for as long as it serves, and stops it when it exits, letting the lease go. Runs start at least 5 s apart; Run returns at once when another collector beats, so a second `vartop web` on the same data dir shows what the first collects and takes over within about 5 s of it stopping. Who collects is logged once per holder, not by Run on every call.
+  - **The lease** is the one-writer guard between `vartop web` processes. It records pid, config path, `KUBECONFIG`, started and beat; the `build`, `path_env` and `stop` columns stay in `control.db`, written empty, so existing data dirs open unchanged (the table keeps its name, `daemon`). `RequestStop` and `Beat`'s stop result are gone.
+  - **No longer apply:** the environment swap and version skew of R16/R31 (a vartop no longer restarts another's collector; the R31 check of the lease against this vartop's environment stays), R32 (detached fallback), R33 (kill guard), the login service and its environment allow-list, `daemon.log`, the Start collector button and `POST /daemon/start`, onboarding's login-service offer.
+  - **Copy.** `… — vartop web is not collecting.` (stale, nothing collecting); `Another vartop (pid {pid}) is collecting with another configuration; this vartop web collects once it stops.` (banner and 409); `cannot read the collector's lease: {err}`; log `another vartop is collecting into this data directory; this one shows what it collects, and takes over once it stops`.
+  - **Data directory deleted** under `vartop web`: Run returns `collect.ErrDataDirRemoved` and `vartop web` stops with `data directory removed: {dir} no longer holds the control.db this collector opened; start vartop web again` — its pages would read the deleted files while the collector wrote new ones. A `vartop web` that only reads (another holds the lease) is not stopped by it: open.
+  - **Flags.** `--host` (default `127.0.0.1`, loopback only, as before) and `--port` (default `7070`, `0` any free port) replace `--addr`.
+  - **Removed with the TUI:** `fleet.CompletedRates`, `CompletedRatesOf`, `CompletedRates1h`, `FailedRates1h`; `workerRates` folded back into `WorkerRates`.
+
