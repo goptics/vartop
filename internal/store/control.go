@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"time"
+
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 // DeadAfter is how long a lease that looks fresh may go without a beat
@@ -78,6 +80,7 @@ func OpenControl(dataDir string) (*Control, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
+	pinID(fi)
 	return &Control{db: db, path: path, file: fi}, nil
 }
 
@@ -200,6 +203,13 @@ func (c *Control) beatOf(token string) (beat int64, held bool, err error) {
 // while another daemon claims the new file's.
 func (c *Control) Replaced() (bool, error) { return replaced(c.path, c.file) }
 
+// pinID makes fi, a stat of a file just opened, identify that file. On
+// Windows os.Stat leaves the file's ID to the first os.SameFile, which
+// reads it from whatever has the path by then: a file put in its place
+// before Replaced first looked would go unnoticed. Elsewhere it does
+// nothing.
+func pinID(fi os.FileInfo) { _ = os.SameFile(fi, fi) }
+
 // replaced reports whether the file at path is no longer file.
 func replaced(path string, file os.FileInfo) (bool, error) {
 	fi, err := os.Stat(path)
@@ -236,6 +246,63 @@ func (c *Control) Lease() (Lease, bool, error) {
 	}
 	l.Started, l.Beat = time.UnixMilli(started), time.UnixMilli(beat)
 	return l, fresh(l.Token, beat, time.Now()), nil
+}
+
+// DaemonState is what a UI reads of the daemon in control.db (see
+// ReadDaemon), and what that makes of the snapshots the store holds: which
+// newest snapshot is current, and may be acted on (R44). Both UIs judge by
+// it alone.
+type DaemonState struct {
+	Lease Lease // the last daemon's, fresh or not; the zero Lease when none ever claimed
+	Fresh bool  // a daemon holds the lease: it collects
+	// Other: the lease — fresh, released or stale — is of another
+	// environment than the reader's (R31). Release and a crash keep its
+	// config path and KUBECONFIG: the snapshots stored under it are of
+	// that configuration's servers, whose units this one's token must not
+	// reach.
+	Other bool
+	Err   error // the lease could not be read: nothing above is known
+}
+
+// ReadDaemon reads c's lease, and checks its environment with sameEnv; nil
+// takes every daemon's for the reader's. A lease no daemon ever claimed is
+// of no environment.
+func ReadDaemon(c *Control, sameEnv func(Lease) bool) DaemonState {
+	l, fresh, err := c.Lease()
+	if err != nil {
+		return DaemonState{Err: err}
+	}
+	return DaemonState{Lease: l, Fresh: fresh, Other: !l.Started.IsZero() && sameEnv != nil && !sameEnv(l)}
+}
+
+// Running reports whether a daemon runs to answer a poke, as far as d
+// knows: a lease that cannot be read counts as held, since nothing says
+// the daemon is down.
+func (d DaemonState) Running() bool { return d.Fresh || d.Err != nil }
+
+// Current reports whether latest, the newest snapshot of a server polled
+// every interval, is current at now (R44): not stale (fleet.Stale), the
+// lease of the reader's environment, and latest taken under it — not
+// before its daemon claimed it. An older one is a previous daemon's; once
+// a daemon claims, the previous one's appends fail (the token check), so
+// every newer one is its own. A lease that cannot be read leaves the stale
+// rule alone. No snapshot (nil) is not current.
+func (d DaemonState) Current(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
+	switch {
+	case latest == nil || fleet.Stale(latest, interval, now):
+		return false
+	case d.Err != nil:
+		return true
+	}
+	return !d.Other && !latest.At.Before(d.Lease.Started)
+}
+
+// Acts reports whether an action may be sent on latest at now (R44): a
+// daemon of the reader's environment holds a fresh lease, and latest is
+// current under it. A lease that cannot be read refuses it: whose units
+// latest names is not known.
+func (d DaemonState) Acts(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
+	return d.Err == nil && d.Fresh && d.Current(latest, interval, now)
 }
 
 // RequestStop asks the daemon holding the lease to stop: its next Beat

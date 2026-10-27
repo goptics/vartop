@@ -20,6 +20,7 @@ type Feed struct {
 	dataDir, key, path string
 	interval           time.Duration
 	now                func() time.Time // the clock the window is reckoned by: time.Now but in tests
+	windowRead         func()           // called once a load has read its window: nil but in tests, which append there
 
 	ring atomic.Pointer[fleet.Ring] // replaced whole on a reload, so readers never see a mix
 
@@ -123,6 +124,9 @@ func (f *Feed) sync() error {
 	if err != nil {
 		return err
 	}
+	if f.windowRead != nil {
+		f.windowRead()
+	}
 	if same && len(snaps) == 0 && last >= f.cursor {
 		// Nothing within the window, and nothing dropped: the server was
 		// not collected for longer than the window (the daemon down). What
@@ -133,9 +137,11 @@ func (f *Feed) sync() error {
 	if len(snaps) == 0 && last > 0 {
 		// The same, on a first load (or one after a reset): the file's
 		// newest row is held, for the UIs to show stale with its age,
-		// rather than as a server never collected (R43). One that cannot
-		// be decoded is none.
-		latest, err := f.db.Latest()
+		// rather than as a server never collected (R43). The newest Window
+		// counted, whose id the cursor takes: one appended since is the
+		// next Sync's, and taken in once. One that cannot be decoded, or
+		// pruned since, is none.
+		latest, err := f.db.snapshot(last)
 		if err != nil && !errors.Is(err, ErrUndecodable) {
 			return err
 		}

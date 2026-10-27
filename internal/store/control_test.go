@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 func openControl(t *testing.T, dataDir string) *Control {
@@ -366,5 +368,95 @@ func TestControlReplaced(t *testing.T) {
 	openControl(t, dir) // a UI makes it anew
 	if gone, err := ctl.Replaced(); !gone || err != nil {
 		t.Errorf("Replaced once made anew = %v, %v; want true", gone, err)
+	}
+}
+
+// TestReadDaemon (R31, R44): what a UI reads of the daemon. The lease's
+// environment is checked whether it is fresh, released or stale: whatever
+// the store holds came from that daemon. A lease no daemon ever claimed is
+// of no environment; one that cannot be read says nothing, but that it
+// cannot.
+func TestReadDaemon(t *testing.T) {
+	dir := t.TempDir()
+	ctl := openControl(t, dir)
+	checked := 0
+	ownEnv := func(l Lease) bool { checked++; return l.ConfigPath == "/a/config.json" }
+
+	if d := ReadDaemon(ctl, ownEnv); d.Fresh || d.Other || d.Err != nil || checked != 0 || d.Running() {
+		t.Errorf("no daemon ever: %+v, %d checks; want not fresh, not other, unchecked, not running", d, checked)
+	}
+	now := time.Now()
+	token, ok, err := ctl.Claim(Lease{PID: 1, ConfigPath: "/b/config.json"}, now)
+	if !ok || err != nil {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	d := ReadDaemon(ctl, ownEnv)
+	if !d.Fresh || !d.Other || d.Err != nil || !d.Running() || d.Lease.ConfigPath != "/b/config.json" ||
+		!d.Lease.Started.Equal(time.UnixMilli(now.UnixMilli())) {
+		t.Errorf("another environment's daemon: %+v; want fresh, other, running, its lease", d)
+	}
+	if err := ctl.Release(token); err != nil {
+		t.Fatal(err)
+	}
+	if d := ReadDaemon(ctl, ownEnv); d.Fresh || !d.Other || d.Running() {
+		t.Errorf("its lease released: %+v; want not fresh, still other, not running", d)
+	}
+	if d := ReadDaemon(ctl, nil); d.Other {
+		t.Errorf("no environment check: %+v; want every lease this environment's", d)
+	}
+	if _, ok, err := ctl.Claim(Lease{PID: 2, ConfigPath: "/a/config.json"}, now.Add(-LeaseTTL)); !ok || err != nil {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	if d := ReadDaemon(ctl, ownEnv); d.Fresh || d.Other || d.Running() {
+		t.Errorf("own environment's lease, stale: %+v; want not fresh, not other", d)
+	}
+
+	gone := openControl(t, dir)
+	_ = gone.Close()
+	if d := ReadDaemon(gone, ownEnv); d.Err == nil || !d.Running() || d.Other || d.Fresh {
+		t.Errorf("lease unreadable: %+v; want its error, counted running (nothing says it is down)", d)
+	}
+}
+
+// TestDaemonStateCurrent (R44): a server's newest snapshot is current only
+// when it is not stale, the lease is of the reader's environment (fresh,
+// released or stale), and the snapshot was taken under it: not before its
+// daemon claimed it, which makes an older one a previous daemon's. An
+// action needs, besides, a fresh lease that can be read: one that cannot
+// refuses it (fail closed), while pages keep the stale rule alone.
+func TestDaemonStateCurrent(t *testing.T) {
+	now := time.UnixMilli(time.Now().UnixMilli())
+	started := now.Add(-2 * time.Second) // the snapshots at and before it are fresh
+	own := Lease{Token: "t", ConfigPath: "/a", Started: started, Beat: now}
+	ownReleased := own
+	ownReleased.Token = ""
+	other := own
+	other.ConfigPath = "/b"
+	at := func(at time.Time) *fleet.Snapshot { return &fleet.Snapshot{At: at} }
+	const interval = time.Second // stale past 5s
+	for _, c := range []struct {
+		name          string
+		d             DaemonState
+		latest        *fleet.Snapshot
+		current, acts bool
+	}{
+		{"own daemon's, fresh", DaemonState{Lease: own, Fresh: true}, at(now.Add(-time.Second)), true, true},
+		{"taken as it claimed", DaemonState{Lease: own, Fresh: true}, at(started), true, true},
+		{"taken before it claimed: a previous daemon's", DaemonState{Lease: own, Fresh: true}, at(started.Add(-time.Millisecond)), false, false},
+		{"stale", DaemonState{Lease: own, Fresh: true}, at(now.Add(-5*time.Second - time.Millisecond)), false, false},
+		{"none", DaemonState{Lease: own, Fresh: true}, nil, false, false},
+		{"own daemon stopped: no action", DaemonState{Lease: ownReleased}, at(now.Add(-time.Second)), true, false},
+		{"another environment's daemon", DaemonState{Lease: other, Fresh: true, Other: true}, at(now), false, false},
+		{"another environment's, released", DaemonState{Lease: other, Other: true}, at(now), false, false},
+		{"no daemon ever", DaemonState{}, at(now), true, false},
+		{"lease unreadable", DaemonState{Err: errors.New("database is locked")}, at(now), true, false},
+		{"lease unreadable, stale", DaemonState{Err: errors.New("database is locked")}, at(now.Add(-time.Minute)), false, false},
+	} {
+		if got := c.d.Current(c.latest, interval, now); got != c.current {
+			t.Errorf("%s: Current = %v, want %v", c.name, got, c.current)
+		}
+		if got := c.d.Acts(c.latest, interval, now); got != c.acts {
+			t.Errorf("%s: Acts = %v, want %v", c.name, got, c.acts)
+		}
 	}
 }

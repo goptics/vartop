@@ -119,7 +119,9 @@ func openWriter(dataDir, path, key string) (*ServerDB, error) {
 		capBytes: ServerCapBytes, batch: 1000}
 	err = s.init()
 	if err == nil {
-		s.file, err = os.Stat(path)
+		if s.file, err = os.Stat(path); err == nil {
+			pinID(s.file)
+		}
 	}
 	if err != nil {
 		_ = s.db.Close()
@@ -423,6 +425,25 @@ func (s *ServerDB) Latest() (*fleet.Snapshot, error) {
 	snap, err := decodeSnapshot(at, data)
 	if err != nil {
 		return nil, fmt.Errorf("latest snapshot: %w: %w", ErrUndecodable, err)
+	}
+	return snap, nil
+}
+
+// snapshot returns the snapshot of id, or nil when there is none (pruned,
+// say); an error wrapping ErrUndecodable when it cannot be decoded.
+func (s *ServerDB) snapshot(id int64) (*fleet.Snapshot, error) {
+	var at int64
+	var data []byte
+	err := s.db.QueryRow(`SELECT at, data FROM snapshots WHERE id = ?`, id).Scan(&at, &data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	snap, err := decodeSnapshot(at, data)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot %d: %w: %w", id, ErrUndecodable, err)
 	}
 	return snap, nil
 }

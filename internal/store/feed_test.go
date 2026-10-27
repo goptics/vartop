@@ -457,6 +457,33 @@ func TestFeedSeedsWithNewest(t *testing.T) {
 	}
 }
 
+// TestFeedSeedAgreesWithCursor (R43): the row a load with an empty window
+// holds is the one its Window counted to, not one the daemon appended
+// right after: the next Sync takes that one in, once.
+func TestFeedSeedAgreesWithCursor(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	t0 := time.UnixMilli(time.Now().Add(-3 * time.Hour).UnixMilli())
+	appendAll(t, db, token, tick(t0, 1))
+	f := newFeed(t, dir, "prod")
+	clock := t0.Add(2 * time.Hour) // the window, the hour before, holds no row
+	f.now = func() time.Time { return clock }
+	f.windowRead = func() {
+		f.windowRead = nil
+		appendAll(t, db, token, tick(clock, 2)) // the daemon, started as the UI loads
+	}
+
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{1}) {
+		t.Errorf("first load: %v, want the row its window counted to, 1", got)
+	}
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{2}) {
+		t.Errorf("next Sync: %v, want the row appended meanwhile, once", got)
+	}
+}
+
 // TestFeedCloseIsFinal: a Sync after Close (one in flight when the feed
 // was dropped) opens nothing, and keeps what the feed held.
 func TestFeedCloseIsFinal(t *testing.T) {
