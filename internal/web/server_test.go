@@ -811,6 +811,28 @@ func TestWaitingForFirstSnapshot(t *testing.T) {
 	noPatches(t, fa, fb)
 }
 
+// TestOldHistoryShowsStale (R43): a server whose file holds only rows
+// older than the hour — the daemon down for longer than that — shows its
+// newest snapshot stale, with its age and the Start collector button, not
+// "Waiting for the first snapshot".
+func TestOldHistoryShowsStale(t *testing.T) {
+	_, aSrv := fleettest.NewVarmq(t, "a", nil)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}},
+	}})
+	f.claim()
+	f.write("multi", snap(time.Now().Add(-2*time.Hour), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 2)})))
+	f.release() // the daemon stopped
+
+	down := regexp.MustCompile(`<p class="banner stale">No new data for 2h0m\ds — the vartop daemon is not running\.</p>`)
+	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
+		status, body := fetch(t, f.srv, path, false)
+		if status != http.StatusOK || !down.MatchString(body) || !strings.Contains(body, ">Start collector</button>") || strings.Contains(body, "Waiting for the first snapshot") {
+			t.Errorf("GET %s = %d, want 200 with %q and the Start collector button, not waiting:\n%s", path, status, down, body)
+		}
+	}
+}
+
 // TestStaleBannerAndStart: a server whose newest snapshot is older than
 // two intervals and 2s shows how old, and why: the daemon is not running —
 // with a button that starts it — or the server's own error. Current values

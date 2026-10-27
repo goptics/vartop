@@ -411,6 +411,52 @@ func TestFeedKeepsHistoryWhenIdle(t *testing.T) {
 	}
 }
 
+// TestFeedSeedsWithNewest (R43): a feed loading a window that is empty
+// while the file has rows — the daemon down for longer than the window —
+// holds the file's newest row, so that the UIs show it stale, with its
+// age, instead of waiting for a first snapshot. It stays while nothing
+// new comes, and the window replaces it once rows do. An undecodable
+// newest row seeds nothing and is no error.
+func TestFeedSeedsWithNewest(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	t0 := time.UnixMilli(time.Now().Add(-3 * time.Hour).UnixMilli())
+	ids := appendAll(t, db, token, tick(t0.Add(-time.Minute), 1), tick(t0, 2))
+	f := newFeed(t, dir, "prod")
+	clock := t0.Add(2 * time.Hour) // the window, the hour before, holds no row
+	f.now = func() time.Time { return clock }
+
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{2}) {
+		t.Fatalf("a first load of a window with no row: %v, want the file's newest, 2", got)
+	}
+	sync1(t, f)
+	if l := f.Latest(); l == nil || !l.At.Equal(t0) || len(f.Snapshots()) != 1 {
+		t.Errorf("nothing new since: Latest %v of %d, want the snapshot of t0 alone", l, len(f.Snapshots()))
+	}
+	appendAll(t, db, token, tick(clock, 3))
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{3}) {
+		t.Errorf("once collected again: %v, want the window's 3", got)
+	}
+
+	// A fresh feed whose file's newest row cannot be decoded: nothing to
+	// show, and no error.
+	if _, err := db.db.Exec(`DELETE FROM snapshots WHERE id > ?`, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.Exec(`UPDATE snapshots SET data = x'00ff' WHERE id = ?`, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	g := newFeed(t, dir, "prod")
+	g.now = f.now
+	sync1(t, g)
+	if l := g.Latest(); l != nil {
+		t.Errorf("newest row undecodable: Latest = %v, want none", l)
+	}
+}
+
 // TestFeedCloseIsFinal: a Sync after Close (one in flight when the feed
 // was dropped) opens nothing, and keeps what the feed held.
 func TestFeedCloseIsFinal(t *testing.T) {

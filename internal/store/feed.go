@@ -11,8 +11,9 @@ import (
 	"github.com/goptics/vartop/internal/fleet"
 )
 
-// Feed is a UI's view of one server's file: the last hour of snapshots,
-// loaded once and then followed as the daemon appends. It rates nothing:
+// Feed is a UI's view of one server's file: the last hour of snapshots
+// (with none that recent, the newest alone), loaded once and then followed
+// as the daemon appends. It rates nothing:
 // the rates come stored. Sync may be called from several goroutines; the
 // snapshots it holds are read-only.
 type Feed struct {
@@ -55,8 +56,9 @@ func (f *Feed) Latest() *fleet.Snapshot { return f.ring.Load().Latest() }
 // pruned away, or the file set aside as corrupt and recreated, or removed —
 // is noticed and its contents loaded anew, never added to what was held.
 // A feed not synced for longer than its window (hidden, say) loads the
-// window anew too, rather than everything stored since. After Close, Sync
-// does nothing: the snapshots held stay.
+// window anew too, rather than everything stored since. A window with no
+// row of a file that has some holds the file's newest, for the UIs to show
+// stale. After Close, Sync does nothing: the snapshots held stay.
 func (f *Feed) Sync() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -127,6 +129,19 @@ func (f *Feed) sync() error {
 		// the feed holds stays, for the UIs to show stale.
 		f.cursor = last
 		return nil
+	}
+	if len(snaps) == 0 && last > 0 {
+		// The same, on a first load (or one after a reset): the file's
+		// newest row is held, for the UIs to show stale with its age,
+		// rather than as a server never collected (R43). One that cannot
+		// be decoded is none.
+		latest, err := f.db.Latest()
+		if err != nil && !errors.Is(err, ErrUndecodable) {
+			return err
+		}
+		if latest != nil {
+			snaps = []*fleet.Snapshot{latest}
+		}
 	}
 	ring := fleet.NewRing(f.interval)
 	for _, s := range snaps {
