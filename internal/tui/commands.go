@@ -23,12 +23,12 @@ const (
 	// syncEvery is how often the TUI syncs the feed it shows: the daemon
 	// polls at the server's interval, the TUI only reads what it stored.
 	syncEvery = time.Second
-	// resyncAfter is how long after an action the TUI syncs again: the poke
-	// has the daemon poll at once, so its effect shows within a second.
-	resyncAfter = 300 * time.Millisecond
-	// settlePoll is how often an action on a stale server syncs, waiting for
-	// the snapshot its poke asked for.
+	// settlePoll is how often an action or a refresh syncs, waiting for the
+	// snapshot its poke asked for.
 	settlePoll = 100 * time.Millisecond
+	// hiddenFeedTTL is how long the feed of a server not shown is kept: as
+	// long as vartop web keeps a feed no page reads.
+	hiddenFeedTTL = 10 * time.Minute
 )
 
 // tickCmd sends the next tickMsg in syncEvery.
@@ -175,39 +175,47 @@ func readLatest(dataDir, key string) *fleet.Snapshot {
 }
 
 // refreshCmd pokes the server shown, so that the daemon polls it now, and
-// starts the daemon when none holds a fresh lease. One collecting with
-// another configuration (R31) is not poked: this vartop's is started first,
-// which replaces it (ensureDaemon), as vartop web's Start collector does.
-// nil when the server is not configured: there is nothing to poke.
+// starts the daemon when none holds a fresh lease; then waits, as an action
+// does, for the snapshot the poke asked for (see actor.await). One
+// collecting with another configuration (R31) is not poked: this vartop's
+// is started first, which replaces it (ensureDaemon), as vartop web's Start
+// collector does. nil when the server is not configured: there is nothing
+// to poke.
 func (m *Model) refreshCmd() tea.Cmd {
 	m.err = nil
-	if m.server() == nil {
+	if m.server() == nil || m.feed == nil {
 		return nil
 	}
-	key, ctl, start, sameEnv := m.key, m.ctl, m.start, m.sameEnv
+	start := m.start
+	a := actor{feed: m.feed, ctl: m.ctl, sameEnv: m.sameEnv, key: m.key, wait: m.settleWait}
 	return func() tea.Msg {
-		down, other := daemonState(ctl, sameEnv)
+		down, other := daemonState(a.ctl, a.sameEnv)
 		if other {
 			if start == nil {
-				return actedMsg{server: key, err: errors.New(otherConfigMsg)}
+				return actedMsg{server: a.key, err: errors.New(otherConfigMsg)}
 			}
 			if err := start(); err != nil {
-				return actedMsg{server: key, err: err}
+				return actedMsg{server: a.key, err: err}
 			}
 		}
-		_, err := ctl.Poke(key)
+		at, err := a.ctl.Poke(a.key)
 		if down && start != nil {
 			err = errors.Join(err, start())
 		}
-		return actedMsg{server: key, err: err}
+		if err == nil {
+			a.await(at)
+		}
+		return actedMsg{server: a.key, err: err}
 	}
 }
 
 // actCmd sends action to worker on the unit labelled label of the server
 // shown, as its newest snapshot has it: a direct unit is sent it, with the
-// server's token, and the server is poked; a unit behind a load balancer
-// is refused (fleet.OneBalancedMsg), as is a snapshot still stale after a
-// poke. nil when there is nothing to act on.
+// server's token, and the server is poked, the command ending with the
+// snapshot that shows what it did (up to fleet.SettleWait); a unit behind a
+// load balancer is refused (fleet.OneBalancedMsg), as is a snapshot still
+// stale after a poke, and any under a daemon collecting with another
+// configuration (R31). nil when there is nothing to act on.
 func (m *Model) actCmd(worker, label, action string) tea.Cmd {
 	srv := m.server()
 	if srv == nil || m.feed == nil || worker == "" || label == "" {
@@ -229,7 +237,7 @@ type actor struct {
 	interval time.Duration
 	token    string
 	noun     fleet.Noun
-	wait     time.Duration // how long a stale server is given to take a newer snapshot (fleet.SettleWait)
+	wait     time.Duration // how long a poke is given to bring a snapshot (fleet.SettleWait)
 }
 
 func (a actor) act(worker, label, action string) error {
@@ -259,22 +267,35 @@ func (a actor) act(worker, label, action string) error {
 	}
 	// Escaped, as fleet.Act sends it: the name is one segment of the path.
 	err := api.NewClient(units[0].Key, a.token).Action(url.PathEscape(worker), action)
-	_, _ = a.ctl.Poke(a.key) // sent, or maybe sent: the daemon polls now, to show what it did
+	// Sent, or maybe sent: the daemon polls now, and the action ends with
+	// the snapshot that shows what it did, as vartop web's does.
+	if at, perr := a.ctl.Poke(a.key); perr == nil {
+		a.await(at)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to %s worker %s on %s: %w", action, worker, label, err)
 	}
 	return nil
 }
 
-// settle pokes the server and syncs its feed until it holds a snapshot
-// taken after the poke, for up to a.wait. With no daemon running, which
-// would answer the poke, it returns at once.
+// settle pokes the server and waits for the snapshot the poke asks for
+// (see await). With no daemon running, which would answer the poke, it
+// pokes nothing and returns at once.
 func (a actor) settle() {
 	if down, _ := daemonState(a.ctl, a.sameEnv); down {
 		return
 	}
-	at, err := a.ctl.Poke(a.key)
-	if err != nil {
+	if at, err := a.ctl.Poke(a.key); err == nil {
+		a.await(at)
+	}
+}
+
+// await syncs the feed until it holds a snapshot taken at or after at, when
+// the server was poked — the one the poke had the daemon take — for up to
+// a.wait (fleet.SettleWait). With no daemon running to answer the poke, it
+// returns at once.
+func (a actor) await(at time.Time) {
+	if down, _ := daemonState(a.ctl, a.sameEnv); down {
 		return
 	}
 	for deadline := time.Now().Add(a.wait); time.Now().Before(deadline); time.Sleep(settlePoll) {

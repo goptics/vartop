@@ -130,7 +130,10 @@ func (f *fixture) envChecked() int {
 }
 
 // model is a 120×40 TUI showing the server keyed key, its feed synced once.
-// Its feeds are closed when the test ends.
+// Its feeds are closed when the test ends. An action or a refresh waits
+// 100ms, not fleet.SettleWait, for the snapshot its poke asks for: the
+// daemon is mostly the test itself, which takes none unless it says so —
+// a test of that wait sets its own.
 func (f *fixture) model(key string) *Model {
 	f.t.Helper()
 	return f.modelFor(f.t, key)
@@ -142,6 +145,7 @@ func (f *fixture) modelFor(t *testing.T, key string) *Model {
 	cfg, _ := f.config()
 	m := NewModel(cfg, key, f.dir, f.ctl, f.daemon())
 	m.load = f.config
+	m.settleWait = 100 * time.Millisecond
 	t.Cleanup(func() { _ = m.Close() })
 	deliver(&m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	syncNow(t, &m)

@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"time"
-
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/goptics/vartop/internal/store"
@@ -17,6 +15,9 @@ import (
 // of another server, or of one shown before (an older generation), is
 // dropped.
 func (m *Model) handleSynced(msg syncedMsg) {
+	if msg.gen == m.syncing {
+		m.syncing = 0 // a tick may sync again
+	}
 	if msg.server != m.key || msg.gen != m.gen {
 		return
 	}
@@ -50,32 +51,25 @@ func (m *Model) handleConfig(msg configMsg) tea.Cmd {
 		if srv := m.cfg.Servers[k.server]; srv == nil || srv.PollInterval() != k.interval {
 			unwanted = append(unwanted, f)
 			delete(m.feeds, k)
+			delete(m.hidden, k)
 		}
 	}
-	if len(unwanted) > 0 {
-		closeFeed := m.closeFeed
-		cmds = append(cmds, func() tea.Msg {
-			for _, f := range unwanted {
-				_ = closeFeed(f)
-			}
-			return nil
-		})
-	}
-	return tea.Batch(cmds...)
+	return tea.Batch(append(cmds, m.closeCmd(unwanted))...)
 }
 
 // handleActed takes in the end of an action or a refresh on the shown
-// server: its error goes on the error line, and the server is synced
-// again shortly, when the poke had the daemon poll it. It applies whatever
-// generation it began in — the action may have been sent — but not to
-// another server.
+// server: its error goes on the error line, and the rows show at once what
+// the feed holds now — the snapshot the poke had the daemon take, which the
+// command waited for — and the server is synced, for the rest (its trends,
+// what control.db says). It applies whatever generation it began in — the
+// action may have been sent — but not to another server.
 func (m *Model) handleActed(msg actedMsg) tea.Cmd {
 	if msg.server != m.key {
 		return nil
 	}
 	m.err = msg.err
-	key, gen := m.key, m.gen
-	return tea.Tick(resyncAfter, func(time.Time) tea.Msg { return resyncMsg{server: key, gen: gen} })
+	m.dashboardScreen().refresh(m)
+	return m.startSync()
 }
 
 // handleWindowSize processes terminal resize events

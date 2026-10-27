@@ -6,6 +6,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -361,5 +362,198 @@ func TestStartErrorShown(t *testing.T) {
 	deliver(&m, press(&m, runeKey('r'))())
 	if view := m.View(); strings.Contains(view, startErr.Error()) {
 		t.Errorf("the start error stays after r started the daemon:\n%s", view)
+	}
+}
+
+// TestTickSyncsOnceAtATime (D6): a tick starts no sync of the feed shown
+// while one of its generation is under way — a build of the trends slower
+// than the tick would be started again, for the same snapshot, on every
+// tick — and starts one again once it has ended.
+func TestTickSyncsOnceAtATime(t *testing.T) {
+	end := time.Now()
+	f := trendFixture(t, end)
+	m := f.model("multi")
+	m.tick = func() tea.Cmd { return nil } // no timer: the test delivers the ticks
+	built := countTrends(m)
+	write := func(at time.Time) {
+		at = at.Round(time.Millisecond)
+		f.write("multi", snapAt(at, rated(at, "instance-1", "http://a.invalid", 40, 7), rated(at, "instance-2", "http://b.invalid", 5, 3)))
+	}
+
+	write(end.Add(15 * time.Second))
+	first := deliver(m, tickMsg(time.Now()))
+	second := deliver(m, tickMsg(time.Now())) // the first tick's sync has not ended
+	runAll(m, first)
+	runAll(m, second)
+	if n := built.Load(); n != 1 {
+		t.Errorf("trends built %d times for one new snapshot, want 1", n)
+	}
+	if m.dashboardScreen().trends.key.latest != m.latest() {
+		t.Error("the trends of the newest snapshot were not taken in")
+	}
+
+	write(end.Add(30 * time.Second))
+	runAll(m, deliver(m, tickMsg(time.Now())))
+	if n := built.Load(); n != 2 {
+		t.Errorf("trends built %d times, want 2: a tick after the sync ended syncs again", n)
+	}
+}
+
+// TestActionShowsItsEffect (D7): after an action the TUI waits, as vartop
+// web does, for the snapshot its poke has the daemon take — up to
+// fleet.SettleWait — and shows it at once, rather than syncing once a moment
+// later, maybe before the daemon answered. With no snapshot in time it shows
+// what it has; with no daemon to answer it does not wait.
+func TestActionShowsItsEffect(t *testing.T) {
+	pod := newFakePod(t)
+	f := newFixture(t, multiConfig(pod.url()))
+	f.claim()
+	f.write("multi", fresh(unit("instance-1", pod.url(), map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)})))
+	m := f.model("multi")
+	m.settleWait = 10 * time.Second
+
+	cmd := m.actCmd("orders", "instance-1", "pause")
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	fleettest.WaitUntil(t, 5*time.Second, "the poke", func() bool { return f.pokes("multi") == 1 })
+	// The daemon answers the poke: a snapshot after it, the worker paused.
+	f.write("multi", snapAt(time.Now().Add(time.Millisecond), unit("instance-1", pod.url(), map[string]*fleet.Sample{"orders": smp("Paused", 4, 0, 4, 0)})))
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the action never ended")
+	}
+	deliver(m, msg)
+	if m.err != nil {
+		t.Fatalf("error after a good action: %v", m.err)
+	}
+	if got, want := rowsOf(m), []string{"orders|instance-1|Paused|4|0|0|4"}; !slices.Equal(got, want) {
+		t.Errorf("rows right after the action = %v, want %v", got, want)
+	}
+
+	// No snapshot comes: the action ends once the wait is over, unrefused.
+	m.settleWait = 300 * time.Millisecond
+	began := time.Now()
+	deliver(m, m.actCmd("orders", "instance-1", "resume")())
+	if took := time.Since(began); took < m.settleWait || m.err != nil {
+		t.Errorf("with no snapshot coming: took %v, error %v; want the wait of %v, no error", took, m.err, m.settleWait)
+	}
+
+	// No daemon runs to answer the poke: no wait.
+	f.release()
+	m.settleWait = time.Minute
+	began = time.Now()
+	deliver(m, m.actCmd("orders", "instance-1", "stop")())
+	if took := time.Since(began); took > 30*time.Second || m.err != nil {
+		t.Errorf("with no daemon: took %v, error %v; want no wait", took, m.err)
+	}
+	if n := pod.count("PATCH /workers/orders/actions/stop"); n != 1 {
+		t.Errorf("stop sent %d times, want 1", n)
+	}
+}
+
+// twoServers is a store of servers a and b, each one unit running orders,
+// polled every 5s.
+func twoServers(t *testing.T) *fixture {
+	t.Helper()
+	return newFixture(t, &config.Config{DefaultServer: "a", Servers: map[string]*config.Server{
+		"a": {Endpoints: []string{"http://a.invalid"}, Interval: 5},
+		"b": {Endpoints: []string{"http://b.invalid"}, Interval: 5},
+	}})
+}
+
+// countCloses makes m close feeds through a counter of each, and returns it.
+func countCloses(m *Model) func(*store.Feed) int {
+	var mu sync.Mutex
+	closed := map[*store.Feed]int{}
+	m.closeFeed = func(fd *store.Feed) error {
+		mu.Lock()
+		closed[fd]++
+		mu.Unlock()
+		return fd.Close()
+	}
+	return func(fd *store.Feed) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return closed[fd]
+	}
+}
+
+// TestHiddenFeedReloaded (D4): a server shown again whose feed, kept while
+// hidden — not synced meanwhile — holds a stale newest snapshot is read
+// afresh: the hours-old snapshot is not shown as stale while the daemon has
+// been collecting all along, and the old feed is closed.
+func TestHiddenFeedReloaded(t *testing.T) {
+	f := twoServers(t)
+	f.claim()
+	orders := func(status string) map[string]*fleet.Sample {
+		return map[string]*fleet.Sample{"orders": smp(status, 4, 1, 3, 0)}
+	}
+	f.write("a", fresh(unit("instance-1", "http://a.invalid", orders("Running"))))
+	f.write("b", snapAt(time.Now().Add(-time.Minute), unit("instance-1", "http://b.invalid", orders("Running"))))
+	m := f.model("b")
+	closes := countCloses(m)
+	old := m.feed
+	runAll(m, m.show("a")) // b is hidden, its feed kept
+
+	// The daemon collects b meanwhile.
+	f.write("b", fresh(unit("instance-1", "http://b.invalid", orders("Paused"))))
+	cmd := m.show("b")
+	if m.feed == old {
+		t.Error("b's stale feed was shown again")
+	}
+	if view := m.View(); strings.Contains(view, "No new data for") {
+		t.Errorf("b shows its old snapshot as stale:\n%s", view)
+	}
+	runAll(m, cmd)
+	if got, want := rowsOf(m), []string{"orders|instance-1|Paused|4|1|0|3"}; !slices.Equal(got, want) {
+		t.Errorf("b's rows = %v, want %v", got, want)
+	}
+	if closes(old) != 1 {
+		t.Errorf("b's old feed closed %d times, want once", closes(old))
+	}
+
+	// A kept feed that is not stale is shown as it is: switching is instant.
+	held := m.feed
+	runAll(m, m.show("a"))
+	runAll(m, m.show("b"))
+	if m.feed != held || closes(held) != 0 {
+		t.Error("a fresh kept feed was not kept")
+	}
+}
+
+// TestHiddenFeedClosed (D4): the feed of a server hidden for 10 minutes is
+// closed and forgotten, as vartop web's unused feeds are: its file is let go
+// (Windows: the daemon could not remove it). The one shown stays, however
+// long.
+func TestHiddenFeedClosed(t *testing.T) {
+	f := twoServers(t)
+	m := f.model("b")
+	m.tick = func() tea.Cmd { return nil }
+	closes := countCloses(m)
+	b := m.feed
+	runAll(m, m.show("a"))
+	a := m.feed
+
+	runAll(m, deliver(m, tickMsg(time.Now().Add(hiddenFeedTTL-time.Minute))))
+	if closes(b) != 0 || len(m.feeds) != 2 {
+		t.Fatalf("hidden for 9 minutes: closed %d, %d feeds kept; want it kept", closes(b), len(m.feeds))
+	}
+	runAll(m, deliver(m, tickMsg(time.Now().Add(hiddenFeedTTL+time.Second))))
+	if closes(b) != 1 {
+		t.Errorf("b's feed closed %d times after 10 minutes hidden, want once", closes(b))
+	}
+	if _, kept := m.feeds[feedKey{"b", 5 * time.Second}]; kept {
+		t.Error("b's feed is still kept")
+	}
+	if closes(a) != 0 || m.feeds[feedKey{"a", 5 * time.Second}] != a {
+		t.Error("the feed shown was closed")
+	}
+
+	// Shown again, b has a feed anew.
+	runAll(m, m.show("b"))
+	if m.feed == nil || m.feed == b {
+		t.Error("b shown again has no new feed")
 	}
 }

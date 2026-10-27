@@ -466,6 +466,9 @@ func TestStaleActionSettles(t *testing.T) {
 			if c.fresh {
 				fleettest.WaitUntil(t, 5*time.Second, "the settle poke", func() bool { return f.pokes("multi") == 1 })
 				f.write("multi", fresh(unit("instance-1", pod.url(), orders())))
+				// Sent, the action pokes again, and waits for the answer too.
+				fleettest.WaitUntil(t, 5*time.Second, "the action's poke", func() bool { return f.pokes("multi") == 2 })
+				f.write("multi", snapAt(time.Now().Add(time.Millisecond), unit("instance-1", pod.url(), orders())))
 			}
 			var msg tea.Msg
 			select {

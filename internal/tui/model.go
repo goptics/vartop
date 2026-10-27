@@ -27,14 +27,24 @@ type Model struct {
 	sameEnv func(store.Lease) bool         // whether a daemon collects in this vartop's environment (R31); nil: every one does
 	load    func() (*config.Config, error) // reads the config again, every tick
 
-	// feeds holds the feed of every server shown so far, kept for the
-	// model's life (Close closes them): showing a server again is instant.
-	// A map, so every copy of the model shares it.
-	feeds map[feedKey]*store.Feed
-	feed  *store.Feed // the shown server's; nil when it is not configured
+	// feeds holds the feed of every server shown so far (Close closes
+	// them): showing a server again is instant. A feed hidden — its server
+	// not shown — is not synced; one hidden for hiddenFeedTTL is closed and
+	// forgotten, and one whose newest snapshot is stale when its server is
+	// shown again is read afresh (see show). hidden says since when each
+	// was. Maps, so every copy of the model shares them.
+	feeds  map[feedKey]*store.Feed
+	hidden map[feedKey]time.Time
+	feed   *store.Feed // the shown server's; nil when it is not configured
 	// gen numbers what the model showed: every switch, even back to the
 	// same server, starts a new one, and a sync of an older one is dropped.
 	gen int
+	// syncing is the generation of a sync of the feed shown under way — one
+	// a tick, a show, an action or the detail screen started — until its
+	// syncedMsg comes; 0 when none is. A tick starts none meanwhile (see
+	// tickSync). The generation names the feed too: a feed is shown in a
+	// new one.
+	syncing int
 
 	// What the last sync of this generation said.
 	syncErr error  // reading the feed failed
@@ -52,6 +62,7 @@ type Model struct {
 	switchLatest map[string]*fleet.Snapshot // the switcher's read of the store, by server key
 
 	settleWait time.Duration           // how long an action on a stale server waits for a newer snapshot
+	tick       func() tea.Cmd          // the next tick: tickCmd, but in tests
 	closeFeed  func(*store.Feed) error // closes a feed no longer wanted; (*store.Feed).Close but in tests
 	// buildTrends builds the series of the sparklines (see trendsFor); newTrends,
 	// but counted in tests.
@@ -113,8 +124,10 @@ func NewModel(cfg *config.Config, serverKey string, dataDir string, ctl *store.C
 		err:            d.StartErr,
 		load:           loadConfig,
 		feeds:          make(map[feedKey]*store.Feed),
+		hidden:         make(map[feedKey]time.Time),
 		settleWait:     fleet.SettleWait,
 		closeFeed:      (*store.Feed).Close,
+		tick:           tickCmd,
 		buildTrends:    newTrends,
 		buildDetail:    newDetailSeries,
 		showNodeColumn: true,
@@ -133,7 +146,7 @@ func NewModel(cfg *config.Config, serverKey string, dataDir string, ctl *store.C
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.syncCmd(m.feed, m.gen), tickCmd())
+	return tea.Batch(m.syncCmd(m.feed, m.gen), m.tick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -150,7 +163,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleWindowSize(msg)
 
 	case tickMsg:
-		cmds = append(cmds, tickCmd(), m.configCmd(), m.syncCmd(m.feed, m.gen))
+		cmds = append(cmds, m.tick(), m.configCmd(), m.tickSync(), m.evictHidden(time.Time(msg)))
 		if m.isSwitcherActive() {
 			cmds = append(cmds, m.switcherCmd())
 		}
@@ -167,11 +180,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actedMsg:
 		cmds = append(cmds, m.handleActed(msg))
-
-	case resyncMsg:
-		if msg.server == m.key && msg.gen == m.gen {
-			cmds = append(cmds, m.syncCmd(m.feed, m.gen))
-		}
 	}
 
 	// Non-key messages are forwarded to the active screen's embedded
@@ -187,8 +195,19 @@ func (m Model) View() string {
 
 // show makes the server keyed key the one shown, in a new generation: its
 // feed (opened once, kept after) shows at once what it held, and the
-// command returned syncs it; nil when key is not configured.
+// command returned syncs it; nil when key is not configured. The feed shown
+// before is kept, hidden (see Model.feeds).
+//
+// A kept feed whose newest snapshot is stale is not shown: hidden, it was
+// not synced, though the daemon may have collected all along, and it would
+// show its server hours old ("No new data for 3h…"). A new feed reads the
+// last hour afresh instead, and the old one is closed by the command.
 func (m *Model) show(key string) tea.Cmd {
+	now := time.Now()
+	var was feedKey // the feed shown before; none if zero
+	if m.feed != nil {
+		was = feedKey{m.key, m.feed.Interval()}
+	}
 	m.key = key
 	m.gen++
 	// The action menu is for the row it was opened on, which another server
@@ -196,15 +215,78 @@ func (m *Model) show(key string) tea.Cmd {
 	m.dashboardScreen().inActionSelection = false
 	m.syncErr, m.down, m.srvErr = nil, false, ""
 	m.feed = nil
+	var stale []*store.Feed
 	if srv := m.server(); srv != nil {
 		k := feedKey{key, srv.PollInterval()}
+		if f := m.feeds[k]; f != nil && k != was && fleet.Stale(f.Latest(), k.interval, now) {
+			stale = append(stale, f)
+			delete(m.feeds, k)
+		}
 		if m.feeds[k] == nil {
 			m.feeds[k] = store.NewFeed(m.dataDir, key, k.interval)
 		}
 		m.feed = m.feeds[k]
+		delete(m.hidden, k)
+	}
+	if f := m.feeds[was]; f != nil && f != m.feed {
+		m.hidden[was] = now
 	}
 	m.dashboardScreen().refresh(m)
-	return m.syncCmd(m.feed, m.gen)
+	return tea.Batch(m.startSync(), m.closeCmd(stale))
+}
+
+// startSync is the sync of the feed shown (syncCmd), noted as under way (see
+// Model.syncing); nil when there is no feed.
+func (m *Model) startSync() tea.Cmd {
+	cmd := m.syncCmd(m.feed, m.gen)
+	if cmd != nil {
+		m.syncing = m.gen
+	}
+	return cmd
+}
+
+// tickSync is a tick's sync of the feed shown: none while one of this
+// generation is under way — one slower than the tick (the trends of a large
+// fleet, say) would be started again, for the same snapshot, on every tick.
+func (m *Model) tickSync() tea.Cmd {
+	if m.syncing == m.gen {
+		return nil
+	}
+	return m.startSync()
+}
+
+// evictHidden forgets the feeds hidden for hiddenFeedTTL at now, and closes
+// them with the command it returns, as vartop web drops the feeds it no
+// longer reads: not synced, what they hold is old by then, and an open file
+// would keep the daemon from removing or setting it aside (Windows).
+func (m *Model) evictHidden(now time.Time) tea.Cmd {
+	var gone []*store.Feed
+	for k, since := range m.hidden {
+		if now.Sub(since) < hiddenFeedTTL {
+			continue
+		}
+		if f := m.feeds[k]; f != nil && f != m.feed {
+			gone = append(gone, f)
+			delete(m.feeds, k)
+		}
+		delete(m.hidden, k)
+	}
+	return m.closeCmd(gone)
+}
+
+// closeCmd closes feeds the model no longer holds, off the UI goroutine:
+// Close waits for a sync of the feed under way. nil for none.
+func (m *Model) closeCmd(feeds []*store.Feed) tea.Cmd {
+	if len(feeds) == 0 {
+		return nil
+	}
+	closeFeed := m.closeFeed
+	return func() tea.Msg {
+		for _, f := range feeds {
+			_ = closeFeed(f)
+		}
+		return nil
+	}
 }
 
 // server is the config of the server shown, nil when it is not configured.
@@ -267,7 +349,8 @@ func (m *Model) resetPodView() {
 	m.showNodeColumn = true
 }
 
-// Close closes the files of every feed the model opened.
+// Close closes the files of every feed the model holds: those it let go
+// were closed when it did.
 func (m *Model) Close() error {
 	for _, f := range m.feeds {
 		_ = f.Close()

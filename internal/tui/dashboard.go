@@ -169,7 +169,7 @@ func (d *dashboardScreen) handleKey(m *Model, msg tea.KeyMsg) tea.Cmd {
 			detail := newDetailScreen(name, d.selectedLabel())
 			m.pushScreen(detail)
 			detail.redraw(m)
-			return m.syncCmd(m.feed, m.gen)
+			return m.startSync()
 		}
 		return nil
 	}

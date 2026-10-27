@@ -51,13 +51,6 @@ type actedMsg struct {
 	err    error
 }
 
-// resyncMsg asks for a sync of the server keyed server, generation gen,
-// shortly after an action.
-type resyncMsg struct {
-	server string
-	gen    int
-}
-
 // List item types
 
 // switchServerItem represents a server (merged view of its units) in the
