@@ -134,8 +134,8 @@ func sameEnv(a, b store.Lease) bool {
 
 // sameEnvAsOwn returns the UIs' check of a lease (R31): whether its daemon
 // collects in this vartop's environment, sameEnv with ownLease (read
-// once). Only a fresh lease is a daemon's that collects: a stale one is
-// "not running", whatever its environment.
+// once). The UIs check the lease whether it is fresh, released or stale:
+// the snapshots stored under it are of its daemon's environment (R44).
 func sameEnvAsOwn() func(store.Lease) bool {
 	own := ownLease()
 	return func(l store.Lease) bool { return sameEnv(l, own) }

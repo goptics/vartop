@@ -171,6 +171,22 @@ func (f *fixture) claimAs(l store.Lease) {
 	f.mu.Unlock()
 }
 
+// claimSince is claim by a daemon that claimed at at and beats still: the
+// snapshots taken since at are its own (R44), and its lease is fresh.
+func (f *fixture) claimSince(at time.Time) {
+	f.t.Helper()
+	token, ok, err := f.ctl.Claim(store.Lease{PID: os.Getpid(), Build: "test"}, at)
+	if err != nil || !ok {
+		f.t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	if _, err := f.ctl.Beat(token, time.Now()); err != nil {
+		f.t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.token = token
+	f.mu.Unlock()
+}
+
 // release lets the lease the test holds go, as a daemon stopping does.
 func (f *fixture) release() {
 	f.t.Helper()

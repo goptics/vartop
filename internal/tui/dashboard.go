@@ -444,8 +444,10 @@ func (d *dashboardScreen) View(m *Model) string {
 // renderHeader renders the dashboard status bar: server name, unit health,
 // what it reaches (kube context/namespace, dns host, endpoint, or the unit
 // shown), the balancers' instance counts and when the newest snapshot was
-// taken; under it, when that snapshot is stale, how old and why, and the
-// units that answered nothing.
+// taken; under it, when that snapshot is not current (see Model.stale),
+// why, and else the units that answered nothing. A snapshot not current
+// says nothing of its balancers or units: it may be another
+// configuration's, of servers this one does not list.
 func (d *dashboardScreen) renderHeader(m *Model) string {
 	now := time.Now()
 	latest := m.latest()
@@ -457,7 +459,7 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 	if m.server() != nil {
 		parts = append(parts, renderHealth(latest, stale, m.noun()), "  ", d.renderConnection(m))
 	}
-	if note := fleet.BalancerNote(latest); note != "" {
+	if note := fleet.BalancerNote(latest); note != "" && !stale {
 		parts = append(parts, "  ", subtle.Render(note))
 	}
 	leftContent := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
@@ -486,7 +488,7 @@ func (d *dashboardScreen) renderHeader(m *Model) string {
 	if msg := m.staleMsg(now); msg != "" {
 		lines = append(lines, wrap.Foreground(ColorWarning).Render(msg))
 	}
-	if down := unitErrors(latest, m.selectedLabel); down != "" {
+	if down := unitErrors(latest, m.selectedLabel); down != "" && !stale {
 		lines = append(lines, wrap.Foreground(ColorError).Render(down))
 	}
 
@@ -562,7 +564,7 @@ func (m *Model) notice() (text string, bad bool) {
 	case latest == nil:
 		text = fleet.WaitingMsg(m.key)
 		switch {
-		case m.otherEnv: // its server errors are of that configuration's servers
+		case m.daemon.Other: // its server errors are of that configuration's servers
 			text += "\n" + otherConfigMsg
 		case m.down:
 			text += "\n" + daemonDownHint

@@ -46,6 +46,10 @@ func SyncErrMsg(server string, err error) string {
 	return "cannot read the history of " + server + ": " + err.Error()
 }
 
+// LeaseErrMsg is the refusal of an action while the daemon's lease cannot
+// be read: whose units the newest snapshot names is not known (R44).
+func LeaseErrMsg(err error) string { return "cannot read the vartop daemon's lease: " + err.Error() }
+
 // GoneLabelMsg is the notice of a unit label the newest snapshot lacks.
 func GoneLabelMsg(label string, n Noun) string {
 	return n.Cap() + " " + label + " is no longer reported"

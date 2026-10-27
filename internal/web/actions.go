@@ -42,13 +42,15 @@ type target struct {
 }
 
 // bind returns what r acts on (see target), once its form names a
-// configured server whose newest snapshot is fresh and has the unit the
-// form names. A server without a fresh snapshot is poked, and given up to
-// fleet.SettleWait to take one, unless no daemon runs to answer. Otherwise
-// it answers 409 with the notice why — not configured, the daemon
-// collecting in another environment, waiting for the first snapshot,
-// stale, the unit gone or unknown, the form out of date — and returns
-// false; nothing may reach varmq then.
+// configured server whose newest snapshot may be acted on — current, under
+// a fresh lease of this environment's daemon (store.DaemonState.Acts, R44)
+// — and has the unit the form names. A server without one is poked, and
+// given up to fleet.SettleWait to take one, unless no daemon runs to
+// answer; the lease is read again after. Otherwise it answers 409 with the
+// notice why — not configured, the lease unreadable, the daemon collecting
+// in another environment, waiting for the first snapshot, stale (or a
+// previous daemon's, or no daemon collecting), the unit gone or unknown,
+// the form out of date — and returns false; nothing may reach varmq then.
 //
 // The unit parameter is taken as it is, unlike a page's (see labelOf): a
 // form from before labels, still open in a tab, names its unit by key,
@@ -67,12 +69,6 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		conflict(w, fleet.NotConfiguredMsg(t.key))
 		return nil, false
 	}
-	if _, other := h.daemon(); other {
-		// Its snapshots name units of another environment: this config's
-		// token must not reach them. Nor is that daemon poked.
-		conflict(w, otherConfigMsg)
-		return nil, false
-	}
 	t.noun = fleet.NounFor(t.srv)
 	interval := t.srv.PollInterval()
 	t.feed = h.feeds.get(t.key, interval, time.Now())
@@ -80,8 +76,16 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		conflict(w, fleet.SyncErrMsg(t.key, err))
 		return nil, false
 	}
-	if latest := t.feed.Latest(); latest == nil || fleet.Stale(latest, interval, time.Now()) {
+	d := h.daemon() // after the Sync: what it took in was taken under this lease, or an earlier one
+	if refused(w, d) {
+		return nil, false
+	}
+	if !d.Acts(t.feed.Latest(), interval, time.Now()) {
 		h.refresh(r.Context(), t)
+		// Again: the lease may have changed hands while it waited.
+		if d = h.daemon(); refused(w, d) {
+			return nil, false
+		}
 	}
 	snaps := t.feed.Snapshots() // read once: the label is checked in the snapshot acted on
 	latest := latestOf(snaps)
@@ -89,7 +93,8 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	case latest == nil:
 		conflict(w, fleet.WaitingMsg(t.key))
 		return nil, false
-	case fleet.Stale(latest, interval, now):
+	case !d.Acts(latest, interval, now):
+		// Stale, a previous daemon's, or none collects (R44).
 		msg, _ := h.staleMsg(t.key, latest, now)
 		conflict(w, msg)
 		return nil, false
@@ -106,6 +111,23 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		}
 	}
 	return t, true
+}
+
+// refused answers 409 when d lets no action out, whatever the snapshot,
+// and reports whether it did: the lease cannot be read (R44: fail closed),
+// or the daemon collects in another environment (R31) — its snapshots name
+// units of that one, which this config's token must not reach. Nothing is
+// poked then either.
+func refused(w http.ResponseWriter, d store.DaemonState) bool {
+	switch {
+	case d.Err != nil:
+		conflict(w, fleet.LeaseErrMsg(d.Err))
+	case d.Other:
+		conflict(w, otherConfigMsg)
+	default:
+		return false
+	}
+	return true
 }
 
 // outOfDateMsg refuses a form that names a unit under the other noun's
@@ -354,9 +376,9 @@ func backTo(r *http.Request) string {
 // snapshot taken after the poke, which shows them, then the #live region
 // of the page the request came from as an out-of-band swap.
 //
-// A refresh of a server whose newest snapshot is stale by then (no
-// snapshot came, and the one held aged past the threshold) shows no
-// current value, as a page does.
+// A refresh of a server whose newest snapshot is not current by then (no
+// snapshot came, and the one held aged past the threshold, say; see
+// store.DaemonState.Current) shows no current value, as a page does.
 func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, worker string, results []fleet.ActionResult) {
 	if slices.ContainsFunc(results, func(res fleet.ActionResult) bool { return res.Outcome != "no change" }) {
 		// The snapshot held is still the best there is if none comes.
@@ -364,7 +386,11 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 	}
 	snaps := t.feed.Snapshots()
 	var stale string
-	if latest, now := latestOf(snaps), time.Now(); fleet.Stale(latest, t.srv.PollInterval(), now) {
+	latest, now := latestOf(snaps), time.Now()
+	switch d := h.daemon(); {
+	case d.Other:
+		stale = otherConfigMsg
+	case latest != nil && !d.Current(latest, t.srv.PollInterval(), now):
 		stale, _ = h.staleMsg(t.key, latest, now)
 	}
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}

@@ -950,8 +950,8 @@ func TestOtherConfigDaemon(t *testing.T) {
 
 // TestOtherConfigWaiting (R31): before the first snapshot, a daemon of
 // another environment is said so too, with the Start collector button —
-// it may never collect this server. A lease gone stale is no daemon at
-// all, whatever its environment: it is not checked.
+// it may never collect this server. Its lease let go is still that
+// environment's (R44): what the store holds came from its daemon.
 func TestOtherConfigWaiting(t *testing.T) {
 	_, aSrv := fleettest.NewVarmq(t, "a", nil)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
@@ -975,11 +975,112 @@ func TestOtherConfigWaiting(t *testing.T) {
 	f.release() // the daemon stopped
 	checks := f.envChecks()
 	_, body = fetch(t, f.srv, "/?server=multi", false)
-	if strings.Contains(body, "another configuration") || !strings.Contains(bannerOf(body), ">Start collector</button>") {
-		t.Errorf("no daemon running: want the Start button without %q:\n%s", otherConfig, body)
+	if banner := bannerOf(body); !strings.Contains(banner, otherConfig) || strings.Count(banner, ">Start collector</button>") != 1 {
+		t.Errorf("its lease let go: want %q and one Start collector button:\n%s", otherConfig, body)
 	}
-	if f.envChecks() != checks {
-		t.Error("a stale lease was checked for its environment")
+	if f.envChecks() == checks {
+		t.Error("a lease let go was not checked for its environment")
+	}
+	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST, its lease let go = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+}
+
+// handOffUnits is a snapshot taken at at of the units fa and fb: orders
+// on each, 5 idle workers in all.
+func handOffUnits(at time.Time, fa, fb *httptest.Server) *fleet.Snapshot {
+	return snap(at,
+		labelled(okPod(fa.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1"),
+		labelled(okPod(fb.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2"))
+}
+
+// TestOtherConfigHandOff (R44): while the daemons change hands — the other
+// environment's stopped (Start collector stops it, or `vartop daemon
+// stop`), and this one's not claimed yet, or claimed but not written yet —
+// the newest snapshot is still the other one's, and fresh. It is not
+// current: no value shown, every action refused, nothing sent. Once this
+// environment's daemon writes, all is as ever.
+func TestOtherConfigHandOff(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken}, // stale past 5s
+	}})
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	current := `<td class="num">5</td>` // the idle workers, shown only while current
+
+	f.leaseConfig = "/b/vartop/config.json"
+	f.claim()
+	f.write("multi", handOffUnits(time.Now().Add(-time.Second), aSrv, bSrv))
+	f.release()
+	pokes := f.pokes("multi")
+	_, body := fetch(t, f.srv, "/?server=multi", false)
+	if banner := bannerOf(body); !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) ||
+		!strings.Contains(banner, ">Start collector</button>") || strings.Contains(body, current) {
+		t.Errorf("the other environment's daemon stopped, its snapshot fresh: want %q, the button and no current value:\n%s", otherConfig, body)
+	}
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+	noPatches(t, fa, fb)
+	if got := f.pokes("multi"); got != pokes {
+		t.Errorf("pokes %d, want %d: nothing to poke for the other environment's snapshot", got, pokes)
+	}
+
+	// This environment's daemon claims: the newest snapshot, older than
+	// the claim, is still the other's.
+	f.leaseConfig = "/a/vartop/config.json"
+	f.claim()
+	notYet := regexp.MustCompile(`<p class="banner stale">No new data for \d+s\.</p>`)
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if strings.Contains(body, "another configuration") || !notYet.MatchString(bannerOf(body)) || strings.Contains(body, current) {
+		t.Errorf("claimed, not written yet: want %q, no current value:\n%s", notYet, body)
+	}
+	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">No new data for `) {
+		t.Errorf("POST before this daemon's first snapshot = %d %q, want 409 with the stale copy", resp.StatusCode, body)
+	}
+	noPatches(t, fa, fb)
+	if got := f.pokes("multi"); got != pokes+1 {
+		t.Errorf("pokes %d, want %d: this environment's daemon is poked once, and waited for", got, pokes+1)
+	}
+
+	// Its first snapshot: current, and acted on.
+	f.write("multi", handOffUnits(time.Now(), aSrv, bSrv))
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if strings.Contains(bannerOf(body), "No new data") || !strings.Contains(body, current) {
+		t.Errorf("this daemon's first snapshot: want it current:\n%s", body)
+	}
+	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST after this daemon's first snapshot = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	wantPatches(t, fa, "PATCH /workers/orders/actions/pause")
+	wantPatches(t, fb, "PATCH /workers/orders/actions/pause")
+}
+
+// TestActionRefusedWhenLeaseUnreadable (R44): with the daemon's lease
+// unreadable, whose units the newest snapshot names is not known: an
+// action is refused, nothing sent. The pages keep showing the snapshot,
+// by the stale rule.
+func TestActionRefusedWhenLeaseUnreadable(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
+	}})
+	f.claim()
+	f.write("multi", handOffUnits(time.Now(), aSrv, bSrv))
+	if err := f.ctl.Close(); err != nil { // control.db, as the web reads it, fails
+		t.Fatal(err)
+	}
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">cannot read the vartop daemon&#39;s lease: `) {
+		t.Errorf("POST = %d %q, want 409 saying the lease cannot be read", resp.StatusCode, body)
+	}
+	noPatches(t, fa, fb)
+	if _, body := fetch(t, f.srv, "/?server=multi", false); !strings.Contains(body, `<td class="num">5</td>`) {
+		t.Errorf("the page no longer shows the fresh snapshot:\n%s", body)
 	}
 }
 
@@ -1006,7 +1107,7 @@ func TestOldHistoryShowsStale(t *testing.T) {
 }
 
 // TestStaleBannerAndStart: a server whose newest snapshot is older than
-// two intervals and 2s shows how old, and why: the daemon is not running —
+// 3·interval + 2s shows how old, and why: the daemon is not running —
 // with a button that starts it — or the server's own error. Current values
 // read "—"; the history stays.
 func TestStaleBannerAndStart(t *testing.T) {

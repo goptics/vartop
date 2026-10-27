@@ -56,9 +56,9 @@ type Page struct {
 	Note, Banner, Waiting, Stale string
 
 	// DaemonDown: no daemon collects; the banner offers to start it.
-	// OtherEnv: the daemon collects in another environment than this
-	// vartop's (R31); Stale says so, and the banner offers to start this
-	// one's. Unconfigured: Server is not in the config; the server select
+	// OtherEnv: the daemon's lease, fresh or not, is of another
+	// environment than this vartop's (R31, R44); Stale says so, and the
+	// banner offers to start this one's. Unconfigured: Server is not in the config; the server select
 	// shows it chosen.
 	DaemonDown, OtherEnv, Unconfigured bool
 

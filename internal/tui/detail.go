@@ -238,7 +238,9 @@ func (d *detailScreen) renderHeader(m *Model, latest *fleet.Snapshot, u fleet.Po
 			Render(m.staleMsg(time.Now()))
 	}
 	unitInfo := u.Label
-	if tip := u.Tip(); tip != "" && tip != u.Label {
+	// A snapshot not current says not where its unit is: it may be another
+	// configuration's.
+	if tip := u.Tip(); tip != "" && tip != u.Label && !stale {
 		unitInfo += " (" + tip + ")"
 	}
 

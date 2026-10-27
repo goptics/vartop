@@ -258,7 +258,15 @@ func (f *fixture) stopDaemon() {
 // snapshots (see write).
 func (f *fixture) claim() {
 	f.t.Helper()
-	token, ok, err := f.ctl.Claim(f.lease(), time.Now())
+	f.claimAt(time.Now())
+}
+
+// claimAt is claim, as a daemon claiming at at: the snapshots it took
+// since, and only those, are its own (R44). Its beat is at's too, so the
+// lease holds until LeaseTTL after at.
+func (f *fixture) claimAt(at time.Time) {
+	f.t.Helper()
+	token, ok, err := f.ctl.Claim(f.lease(), at)
 	if err != nil || !ok {
 		f.t.Fatalf("Claim = %v, %v", ok, err)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/store"
 )
 
 // Message types for Bubble Tea
@@ -18,22 +19,21 @@ type tickMsg time.Time
 
 // syncedMsg is a sync of the feed of the server keyed server ended, for the
 // model's generation gen; Update drops it unless both are still current
-// (see Model.gen). It also says what control.db said at the sync: whether
-// no daemon holds a fresh lease (down), whether the one holding it collects
-// with another configuration (otherEnv), and the server's collection error;
-// and carries the series of the sparklines the command built from the
+// (see Model.gen). It also says what control.db said at the sync, read
+// after the feed's: of the daemon (store.DaemonState: its lease, by which
+// a snapshot is current, R44), and the server's collection error; and
+// carries the series of the sparklines the command built from the
 // snapshots it synced, unless the model had them already (see trendsFor), and
 // those of the charts of the detail screen it was made for, if there was one
 // (see detailFor).
 type syncedMsg struct {
-	server   string
-	gen      int
-	err      error
-	down     bool
-	otherEnv bool
-	srvErr   string
-	trends   trendSet
-	detail   detailSeries
+	server string
+	gen    int
+	err    error
+	daemon store.DaemonState
+	srvErr string
+	trends trendSet
+	detail detailSeries
 }
 
 // configMsg carries the config read again.

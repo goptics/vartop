@@ -24,7 +24,7 @@ type Model struct {
 	dataDir string
 	ctl     *store.Control
 	start   func() error                   // starts the daemon; nil: nothing to start
-	sameEnv func(store.Lease) bool         // whether a daemon collects in this vartop's environment (R31); nil: every one does
+	sameEnv func(store.Lease) bool         // whether a daemon's lease is of this vartop's environment (R31); nil: every one is
 	load    func() (*config.Config, error) // reads the config again, every tick
 
 	// feeds holds the feed of every server shown so far (Close closes
@@ -51,11 +51,11 @@ type Model struct {
 	down    bool   // no daemon holds a fresh lease
 	srvErr  string // the server's collection error
 
-	// otherEnv is what the last sync said of the daemon holding the lease:
-	// it collects with another configuration than this vartop's (R31), so
-	// its snapshots are of that one's servers. Not the server's: a switch
-	// keeps it.
-	otherEnv bool
+	// daemon is what the last sync read of the daemon (store.ReadDaemon):
+	// its lease, by which a snapshot is current (R44), and whether that is
+	// another configuration's than this vartop's (R31), whose snapshots are
+	// of that one's servers. Not the server's: a switch keeps it.
+	daemon store.DaemonState
 
 	err error // the error line: what the last refresh or action said
 
@@ -100,9 +100,9 @@ type Daemon struct {
 	// for r when none runs, or when one collects with another configuration;
 	// nil starts nothing.
 	Start func() error
-	// SameEnv reports whether the daemon of a fresh lease collects in this
-	// vartop's environment: its config file and KUBECONFIG (R31). nil takes
-	// every daemon for this environment's.
+	// SameEnv reports whether a daemon's lease — fresh, released or stale
+	// — is of this vartop's environment: its config file and KUBECONFIG
+	// (R31, R44). nil takes every daemon for this environment's.
 	SameEnv func(store.Lease) bool
 	// StartErr is what making sure the daemon runs said as the TUI opened —
 	// it did not start, say — shown on the error line: printed, it would
@@ -312,12 +312,17 @@ func (m *Model) interval() time.Duration {
 // noun is what the server shown calls its units.
 func (m *Model) noun() fleet.Noun { return fleet.NounFor(m.server()) }
 
-// stale reports whether what the server shown has is not current at now:
-// its newest snapshot is stale (see fleet.Stale), or the daemon collects
-// with another configuration (R31), whose snapshots are not of this one's
-// servers. Its values show —.
-func (m *Model) stale(now time.Time) bool {
-	return m.otherEnv || fleet.Stale(m.latest(), m.interval(), now)
+// stale reports whether what the server shown has is not current at now
+// (see notCurrent). Its values show —.
+func (m *Model) stale(now time.Time) bool { return m.notCurrent(m.latest(), m.interval(), now) }
+
+// notCurrent reports whether latest, the newest snapshot of a server polled
+// every interval, is not current at now, by what the last sync read of the
+// daemon (store.DaemonState.Current, R44): stale, a previous daemon's, or
+// another configuration's. With none, only the lease of another
+// configuration makes it so: its daemon's servers are not this one's.
+func (m *Model) notCurrent(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
+	return m.daemon.Other || latest != nil && !m.daemon.Current(latest, interval, now)
 }
 
 // otherConfigMsg is the notice of a daemon collecting with another
@@ -325,17 +330,18 @@ func (m *Model) stale(now time.Time) bool {
 var otherConfigMsg = fleet.OtherConfigMsg("press r")
 
 // staleMsg is the header's warning, under the status bar: why what the
-// server shown has is not current (see stale) — the daemon collects with
-// another configuration, or how old its newest snapshot is and why; "" when
-// it is current, or there is none (the body says so then).
+// server shown has is not current (see stale) — the lease is another
+// configuration's, or how old its newest snapshot is and why (stale, or a
+// previous daemon's); "" when it is current, or there is none (the body
+// says so then).
 func (m *Model) staleMsg(now time.Time) string {
 	latest := m.latest()
 	switch {
 	case latest == nil:
 		return ""
-	case m.otherEnv:
+	case m.daemon.Other:
 		return otherConfigMsg
-	case fleet.Stale(latest, m.interval(), now):
+	case m.stale(now):
 		return fleet.StaleMsg(m.key, latest, now, m.down, m.srvErr)
 	}
 	return ""

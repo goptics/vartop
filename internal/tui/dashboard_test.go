@@ -565,8 +565,8 @@ func rated(at time.Time, label, key string, rate float64, pending int) fleet.Pod
 func trendFixture(t *testing.T, end time.Time) *fixture {
 	t.Helper()
 	f := newFixture(t, multiConfig("http://a.invalid", "http://b.invalid"))
-	f.claim()
 	end = end.Round(time.Millisecond)
+	f.claimSince(end.Add(-20 * 15 * time.Second)) // the daemon that took them all (R44)
 	for j := range 21 {
 		at := end.Add(-time.Duration(20-j) * 15 * time.Second)
 		f.write("multi", snapAt(at,

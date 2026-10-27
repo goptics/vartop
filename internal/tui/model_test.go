@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -309,9 +310,9 @@ func TestOtherConfigDaemon(t *testing.T) {
 }
 
 // TestOtherConfigWaiting (R31): a server with no snapshot under a daemon of
-// another configuration waits with the notice, not "not running"; a stale
-// lease is no daemon's to check: it is not running, whatever its
-// environment.
+// another configuration waits with the notice, not "not running". Its
+// lease let go is still that configuration's (R44): what the store holds
+// came from its daemon.
 func TestOtherConfigWaiting(t *testing.T) {
 	f := newFixture(t, multiConfig("http://a.invalid"))
 	f.claimAs(store.Lease{PID: os.Getpid(), Build: "test", ConfigPath: "/b/vartop/config.json"})
@@ -337,11 +338,138 @@ func TestOtherConfigWaiting(t *testing.T) {
 	m.err = nil // the refusal the action left on the error line
 	syncNow(t, m)
 	view = m.View()
-	if strings.Contains(view, otherConfigCopy) || !strings.Contains(view, "the vartop daemon is not running") {
-		t.Errorf("after the lease is let go: want not running, no notice:\n%s", view)
+	if !strings.Contains(view, otherConfigCopy) {
+		t.Errorf("after the lease is let go: want the notice still:\n%s", view)
 	}
-	if f.envChecked() != checks {
-		t.Error("a stale lease's environment was checked")
+	if f.envChecked() == checks {
+		t.Error("a lease let go was not checked for its environment")
+	}
+}
+
+// handOffUnits is a snapshot taken at at of a unit at url, and of one at
+// demo-host that answered nothing, behind a balancer: what the header says
+// of them is the configuration's that collected it.
+func handOffUnits(at time.Time, url string) *fleet.Snapshot {
+	s := snapAt(at, unit("instance-1", url, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}),
+		downUnit("instance-2", "http://demo-host:8080", "dial tcp demo-host:8080: connection refused"))
+	s.Behind = map[string]int{"http://lb.invalid:8080": 2}
+	return s
+}
+
+// TestOtherConfigHandOff (R44): while the daemons change hands — the other
+// configuration's stopped (r stops it, or `vartop daemon stop`), and this
+// vartop's not claimed yet, or claimed but not written yet — the newest
+// snapshot is still the other one's, and fresh. It is not current: no
+// value, none of its units' errors, balancers or addresses, every action
+// refused, nothing sent. Once this vartop's daemon writes, all is as ever.
+func TestOtherConfigHandOff(t *testing.T) {
+	pod := newFakePod(t)
+	f := newFixture(t, multiConfig(pod.url()))
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	f.claimAs(store.Lease{PID: os.Getpid(), Build: "test", ConfigPath: "/b/vartop/config.json"})
+	f.write("multi", handOffUnits(time.Now().Add(-time.Second), pod.url()))
+	f.release()
+	m := f.model("multi")
+
+	theirs := []string{"connection refused", "demo-host", "behind lb.invalid", "(" + pod.url() + ")"}
+	notCurrent := func(what string) {
+		t.Helper()
+		if got, want := rowsOf(m), []string{"orders|instance-1|—|—|—|—|—"}; !slices.Equal(got, want) {
+			t.Errorf("%s: rows = %v, want %v", what, got, want)
+		}
+		views := []string{m.View()}
+		press(m, tea.KeyMsg{Type: tea.KeyEnter})
+		if !m.isDetailActive() {
+			t.Fatalf("%s: enter did not open the detail screen", what)
+		}
+		views = append(views, m.View())
+		press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		for _, view := range views {
+			for _, s := range theirs {
+				if strings.Contains(view, s) {
+					t.Errorf("%s: the view shows %q of the units of the snapshot:\n%s", what, s, view)
+				}
+			}
+		}
+	}
+	act := func() error {
+		m.err = nil
+		deliver(m, m.actCmd("orders", "instance-1", "pause")())
+		return m.err
+	}
+
+	if view := m.View(); !strings.Contains(view, otherConfigCopy) {
+		t.Errorf("the other configuration's daemon stopped, its snapshot fresh: view lacks %q:\n%s", otherConfigCopy, view)
+	}
+	notCurrent("released")
+	if err := act(); err == nil || err.Error() != otherConfigCopy {
+		t.Errorf("action = %v, want %q", err, otherConfigCopy)
+	}
+	if n := pod.total(); n != 0 || f.pokes("multi") != 0 {
+		t.Errorf("varmq got %v, %d pokes; want nothing sent, nothing poked", pod.seen(), f.pokes("multi"))
+	}
+
+	// This vartop's daemon claims: the newest snapshot, older than the
+	// claim, is still the other's.
+	f.claimAs(store.Lease{PID: os.Getpid(), Build: "test", ConfigPath: "/a/vartop/config.json"})
+	m.err = nil // the refusal the action left on the error line
+	syncNow(t, m)
+	if view := m.View(); strings.Contains(view, otherConfigCopy) || !regexp.MustCompile(`No new data for \d+s\.`).MatchString(view) {
+		t.Errorf("claimed, not written yet: want the stale notice:\n%s", view)
+	}
+	notCurrent("claimed, not written yet")
+	if err := act(); err == nil || !strings.HasPrefix(err.Error(), "No new data for ") {
+		t.Errorf("action before this daemon's first snapshot = %v, want the stale notice", err)
+	}
+	if n := pod.total(); n != 0 || f.pokes("multi") != 1 {
+		t.Errorf("varmq got %v, %d pokes; want nothing sent, this vartop's daemon poked once", pod.seen(), f.pokes("multi"))
+	}
+
+	// Its first snapshot: current, and acted on.
+	f.write("multi", handOffUnits(time.Now(), pod.url()))
+	syncNow(t, m)
+	if got, want := rowsOf(m), []string{"orders|instance-1|Running|4|1|0|3"}; !slices.Equal(got, want) {
+		t.Errorf("this daemon's first snapshot: rows = %v, want %v", got, want)
+	}
+	if view := m.View(); !strings.Contains(view, "instance-2: dial tcp demo-host:8080: connection refused") || !strings.Contains(view, "2 instances behind lb.invalid:8080") {
+		t.Errorf("this daemon's first snapshot: the header lacks its units' errors and balancers:\n%s", view)
+	}
+	press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if view := m.View(); !strings.Contains(view, "("+pod.url()+")") {
+		t.Errorf("this daemon's first snapshot: the detail header lacks the unit's address:\n%s", view)
+	}
+	press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if err := act(); err != nil {
+		t.Errorf("action after this daemon's first snapshot = %v, want sent", err)
+	}
+	if n := pod.count("PATCH /workers/orders/actions/pause"); n != 1 {
+		t.Errorf("pause sent %d times, want 1", n)
+	}
+}
+
+// TestActionRefusedWhenLeaseUnreadable (R44): with the daemon's lease
+// unreadable, whose units the newest snapshot names is not known: an
+// action is refused, nothing sent. The rows keep showing the snapshot, by
+// the stale rule.
+func TestActionRefusedWhenLeaseUnreadable(t *testing.T) {
+	pod := newFakePod(t)
+	f := newFixture(t, multiConfig(pod.url()))
+	f.claim()
+	f.write("multi", fresh(unit("instance-1", pod.url(), map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)})))
+	m := f.model("multi")
+	if err := f.ctl.Close(); err != nil { // control.db, as the TUI reads it, fails
+		t.Fatal(err)
+	}
+	deliver(m, m.actCmd("orders", "instance-1", "pause")())
+	if m.err == nil || !strings.HasPrefix(m.err.Error(), "cannot read the vartop daemon's lease: ") {
+		t.Errorf("action = %v, want refused: the lease cannot be read", m.err)
+	}
+	if n := pod.total(); n != 0 {
+		t.Errorf("varmq got %v, want nothing", pod.seen())
+	}
+	syncNow(t, m)
+	if got, want := rowsOf(m), []string{"orders|instance-1|Running|4|1|0|3"}; !slices.Equal(got, want) {
+		t.Errorf("rows = %v, want %v: shown by the stale rule", got, want)
 	}
 }
 
@@ -403,7 +531,8 @@ func TestTickSyncsOnceAtATime(t *testing.T) {
 // web does, for the snapshot its poke has the daemon take — up to
 // fleet.SettleWait — and shows it at once, rather than syncing once a moment
 // later, maybe before the daemon answered. With no snapshot in time it shows
-// what it has; with no daemon to answer it does not wait.
+// what it has; with no daemon to answer it does not wait, and refuses
+// (R44: an action needs one).
 func TestActionShowsItsEffect(t *testing.T) {
 	pod := newFakePod(t)
 	f := newFixture(t, multiConfig(pod.url()))
@@ -440,16 +569,17 @@ func TestActionShowsItsEffect(t *testing.T) {
 		t.Errorf("with no snapshot coming: took %v, error %v; want the wait of %v, no error", took, m.err, m.settleWait)
 	}
 
-	// No daemon runs to answer the poke: no wait.
+	// No daemon runs: an action needs one (R44), and none answers a poke —
+	// refused at once, nothing sent.
 	f.release()
 	m.settleWait = time.Minute
 	began = time.Now()
 	deliver(m, m.actCmd("orders", "instance-1", "stop")())
-	if took := time.Since(began); took > 30*time.Second || m.err != nil {
-		t.Errorf("with no daemon: took %v, error %v; want no wait", took, m.err)
+	if took := time.Since(began); took > 30*time.Second || m.err == nil || !strings.HasSuffix(m.err.Error(), " — the vartop daemon is not running.") {
+		t.Errorf("with no daemon: took %v, error %v; want refused at once, the daemon not running", took, m.err)
 	}
-	if n := pod.count("PATCH /workers/orders/actions/stop"); n != 1 {
-		t.Errorf("stop sent %d times, want 1", n)
+	if n := pod.count("PATCH /workers/orders/actions/stop"); n != 0 {
+		t.Errorf("stop sent %d times, want none", n)
 	}
 }
 

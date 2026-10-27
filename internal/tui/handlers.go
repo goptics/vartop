@@ -21,7 +21,7 @@ func (m *Model) handleSynced(msg syncedMsg) {
 	if msg.server != m.key || msg.gen != m.gen {
 		return
 	}
-	m.syncErr, m.down, m.otherEnv, m.srvErr = msg.err, msg.down, msg.otherEnv, msg.srvErr
+	m.syncErr, m.daemon, m.down, m.srvErr = msg.err, msg.daemon, !msg.daemon.Running(), msg.srvErr
 	d := m.dashboardScreen()
 	d.install(m, msg.trends)
 	d.refresh(m)

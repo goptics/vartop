@@ -300,8 +300,10 @@ func pageTitle(what, server string) string {
 // noun's parameter. It syncs the server's feed and returns its snapshots,
 // oldest first, and whether the page shows them; when it does not, the
 // Page says why: the config cannot be read, the server is not configured,
-// or it has no snapshot yet. A stale newest snapshot is shown, with a
-// notice saying how old it is, and why.
+// or it has no snapshot yet. A newest snapshot that is not current
+// (store.DaemonState.Current: stale, a previous daemon's, or another
+// environment's) is shown with no current value, and a notice saying why:
+// how old it is, or the other environment.
 //
 // htmx would swap in only part of a waiting page (a poll #live, #banner
 // and #status): the browser reloads it instead (see Page.reload), and
@@ -340,8 +342,8 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	snaps = feed.Snapshots()
 	latest := latestOf(snaps)
 	fill(&p, snaps)
-	running, other := h.daemon()
-	if other {
+	d := h.daemon()
+	if d.Other {
 		// Another environment's snapshots: no current value, and no
 		// action (see bind) until this environment's daemon collects.
 		p.Stale, p.OtherEnv = otherConfigMsg, true
@@ -349,13 +351,14 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	switch now := time.Now(); {
 	case latest == nil:
 		p.Waiting = fleet.WaitingMsg(p.Server)
-		p.DaemonDown = !running
-		if msg := h.serverErr(p.Server, nil); msg != "" && running && !other {
+		p.DaemonDown = !d.Running()
+		if msg := h.serverErr(p.Server, nil); msg != "" && d.Running() && !d.Other {
 			p.Banner = p.Server + ": " + msg
 		}
 		return p, nil, false
-	case other:
-	case fleet.Stale(latest, interval, now):
+	case d.Other:
+	case !d.Current(latest, interval, now):
+		// Stale, or a previous daemon's: this one has not written yet.
 		p.Stale, p.DaemonDown = h.staleMsg(p.Server, latest, now)
 	case latest.Err != "":
 		p.Banner = p.Server + ": " + latest.Err
@@ -421,22 +424,14 @@ func labelOf(srv *config.Server, value string) string {
 
 // daemonRunning reports whether a daemon holds a fresh lease. A lease that
 // cannot be read counts as held: nothing says the daemon is down.
-func (h *handler) daemonRunning() bool {
-	running, _ := h.daemon()
-	return running
-}
+func (h *handler) daemonRunning() bool { return h.daemon().Running() }
 
-// daemon reports whether a daemon holds a fresh lease (see daemonRunning),
-// and whether that daemon collects in another environment than this
-// vartop's (Source.SameEnv, R31). A stale lease is no daemon, whatever its
-// environment, and one that cannot be read is none other.
-func (h *handler) daemon() (running, otherEnv bool) {
-	l, fresh, err := h.src.Control.Lease()
-	if err != nil {
-		return true, false
-	}
-	return fresh, fresh && h.src.SameEnv != nil && !h.src.SameEnv(l)
-}
+// daemon is what control.db says of the daemon now: its lease, and whether
+// that is of another environment than this vartop's (Source.SameEnv, R31),
+// fresh or not; by which a snapshot is current or acted on (R44). Read it
+// after the feed's Sync: what that took in was taken under this lease, or
+// an earlier one.
+func (h *handler) daemon() store.DaemonState { return store.ReadDaemon(h.src.Control, h.src.SameEnv) }
 
 // serverErr is the collection error the daemon recorded for the server
 // keyed key, else latest's, else "".
