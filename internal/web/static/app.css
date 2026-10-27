@@ -1,12 +1,14 @@
-/* vartop web UI. Dark is the TUI's Tokyo Night palette (internal/tui/styles.go);
-   light is Tokyo Night Day, chosen by prefers-color-scheme. */
+/* vartop web UI. Dark is Tokyo Night, light is Tokyo Night Day, chosen by
+   prefers-color-scheme; the accent is varmq's logo teal (#44BF9E), a darker
+   shade of it on light for contrast. */
 :root {
   color-scheme: dark light;
+  accent-color: var(--accent); /* the slider and checkboxes too */
   --bg: #1A1B26;
   --panel: #24283B;
   --fg: #C0CAF5;
   --subtle: #565F89;
-  --accent: #7AA2F7;
+  --accent: #44BF9E;
   --ok: #9ECE6A;
   --warn: #E0AF68;
   --bad: #F7768E;
@@ -18,7 +20,7 @@
     --panel: #F2F3F8;
     --fg: #343B58;
     --subtle: #6C6E80;
-    --accent: #34548A;
+    --accent: #1B6E5A;
     --ok: #587539;
     --warn: #8F5E15;
     --bad: #8C4351;
@@ -74,8 +76,8 @@ button.danger { color: var(--bad); }
 #errors:empty, #banner:empty { display: none; }
 .err { color: var(--bad); margin: 8px 0; overflow-wrap: anywhere; }
 .banner { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--warn); background: var(--panel); color: var(--warn); font-weight: 600; }
-.connecting { padding: 24px 0; color: var(--accent); font-size: 1.1rem; }
-.retry { margin: 12px 0; }
+.waiting { padding: 24px 0; color: var(--accent); font-size: 1.1rem; }
+.updated.stale { color: var(--warn); }
 
 /* cards */
 .kpis, .counters {
@@ -97,6 +99,20 @@ button.danger { color: var(--bad); }
 .failed .spark .partial { fill: var(--panel); stroke: var(--bad); }
 .spark .hit { fill: transparent; stroke: none; }
 .spark .hit:hover { fill: var(--line); fill-opacity: .5; }
+
+/* 1h charts: value scale left, time axis below, gridlines, hover readout */
+.history { position: relative; display: grid; grid-template-columns: 3em 1fr; grid-template-rows: auto 1.5em; }
+.history .spark { grid-column: 2; grid-row: 1; }
+.history .axis-y { grid-column: 1; grid-row: 1; position: relative; }
+.history .axis-x { grid-column: 2; grid-row: 2; position: relative; }
+.history .axis-y span, .history .axis-x span { position: absolute; color: var(--subtle); font-size: .7rem; white-space: nowrap; }
+.history .axis-y span { right: .6em; transform: translateY(-50%); }
+.history .axis-x span { top: .3em; transform: translateX(-50%); }
+.spark .grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.spark .cross { stroke: var(--subtle); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; visibility: hidden; }
+.history.hovering .cross { visibility: visible; }
+.history .hit:hover { fill: transparent; }
+.history .tip { position: absolute; top: 4px; padding: 2px 6px; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; color: var(--fg); font-size: .75rem; white-space: nowrap; pointer-events: none; }
 .na { color: var(--subtle); font-size: .85rem; }
 
 /* tables: scroll inside the wrapper, never the page */
@@ -124,7 +140,11 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .detail-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 8px; }
 .detail-head .status { font-weight: 600; }
 .chart { margin: 16px 0; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
-.chart figcaption { color: var(--subtle); font-size: .8rem; }
+.chart figcaption { color: var(--subtle); font-size: .8rem; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; }
+.seg { display: inline-flex; margin-left: auto; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg a { padding: 1px 10px; color: var(--subtle); text-decoration: none; }
+.seg a:hover { color: var(--fg); }
+.seg a[aria-current] { background: var(--accent); color: var(--bg); font-weight: 600; }
 .chart .peak { margin-left: 8px; }
 .chart .spark { width: 100%; }
 .pods { color: var(--subtle); }

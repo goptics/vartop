@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"strconv"
 	"strings"
@@ -56,6 +57,7 @@ var serverListCmd = &cobra.Command{
 				fmt.Printf("    Token:    ***\n")
 			}
 			fmt.Printf("    Interval: %ds\n", server.Interval)
+			fmt.Printf("    History:  %s\n", cmp.Or(server.History, "1d"))
 		}
 		return nil
 	},
@@ -169,7 +171,7 @@ var serverRemoveCmd = &cobra.Command{
 
 		if len(cfg.Servers) == 0 {
 			cfg.DefaultServer = ""
-			fmt.Println("Removed the last server. vartop will prompt for a new one on next run.")
+			fmt.Println("Removed the last server. vartop web will prompt for a new one, or add one with vartop server add.")
 		} else if cfg.DefaultServer == name {
 			// Reassign default server if we just deleted the default
 			for remainingName := range cfg.Servers {
@@ -192,7 +194,7 @@ var serverRemoveCmd = &cobra.Command{
 
 var serverSetCmd = &cobra.Command{
 	Use:   "set <name> <key> <value>",
-	Short: "Update a specific property (endpoint, token, interval) of a server",
+	Short: "Update a specific property (endpoint, token, interval, history) of a server",
 	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
@@ -224,8 +226,10 @@ var serverSetCmd = &cobra.Command{
 				return fmt.Errorf("interval must be a positive integer")
 			}
 			server.Interval = interval
+		case "history":
+			server.History = value // Validate checks it
 		default:
-			return fmt.Errorf("unknown key '%s'. valid keys: endpoint, token, interval", key)
+			return fmt.Errorf("unknown key '%s'. valid keys: endpoint, token, interval, history", key)
 		}
 
 		if err := server.Validate(); err != nil {

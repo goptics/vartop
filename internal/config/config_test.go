@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,156 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSaveIsAtomic: Save replaces config.json instead of rewriting it, so a
+// reader (or a crash) never sees it half-written. A hard link to the old file
+// keeps the old content only if Save renamed a new file over it.
+func TestSaveIsAtomic(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	const old = `{"servers":{}}`
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	held := filepath.Join(t.TempDir(), "held.json")
+	if err := os.Link(path, held); err != nil {
+		t.Skipf("no hard links here: %v", err)
+	}
+
+	cfg := &Config{
+		DefaultServer: "prod",
+		Servers:       map[string]*Server{"prod": {Name: "prod", Endpoints: []string{"http://localhost:8080/varmq"}, Interval: 5}},
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	if got, _ := os.ReadFile(held); string(got) != old {
+		t.Errorf("the file Save replaced now reads %q, want it untouched: Save wrote in place", got)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(leftovers) != 0 {
+		t.Errorf("Save left %v behind", leftovers)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+		t.Errorf("config.json: %v, %v; want mode 0600", info, err)
+	}
+	loaded, err := Load()
+	if err != nil || loaded.DefaultServer != "prod" || loaded.Servers["prod"] == nil {
+		t.Errorf("Load() = %+v, %v; want the saved config", loaded, err)
+	}
+}
+
+// saveProd saves a config of one server, prod, and returns it.
+func saveProd(t *testing.T) *Config {
+	t.Helper()
+	cfg := &Config{
+		DefaultServer: "prod",
+		Servers:       map[string]*Server{"prod": {Name: "prod", Endpoints: []string{"http://localhost:8080/varmq"}, Token: "s3cr3t"}},
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	return cfg
+}
+
+// TestSaveThroughSymlink: a config.json that links to a file elsewhere (a
+// dotfiles repo, say) stays a link; the file it links to gets the config,
+// 0600.
+func TestSaveThroughSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "vartop.json")
+	if err := os.WriteFile(target, []byte(`{"servers":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+
+	saveProd(t)
+
+	if mode := modeOf(t, path, os.Lstat); mode&os.ModeSymlink == 0 {
+		t.Errorf("config.json is %v after Save, want the symlink kept", mode)
+	}
+	if mode := modeOf(t, target, os.Stat); mode.Perm() != 0600 {
+		t.Errorf("link target is %v after Save, want mode 0600", mode)
+	}
+	if data, _ := os.ReadFile(target); !strings.Contains(string(data), `"default_server": "prod"`) {
+		t.Errorf("link target holds %s, want the saved config", data)
+	}
+	for _, d := range []string{dir, filepath.Dir(target)} {
+		if leftovers, _ := filepath.Glob(filepath.Join(d, "*.tmp")); len(leftovers) != 0 {
+			t.Errorf("Save left %v behind", leftovers)
+		}
+	}
+}
+
+// TestSaveIgnoresStaleTemp: a config.json.tmp left by an older vartop, of
+// another mode, neither lends config.json its mode nor stays behind.
+func TestSaveIgnoresStaleTemp(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".tmp", []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	saveProd(t)
+
+	if mode := modeOf(t, path, os.Stat); mode.Perm() != 0600 {
+		t.Errorf("config.json is %v, want mode 0600", mode)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(leftovers) != 0 {
+		t.Errorf("Save left %v behind", leftovers)
+	}
+}
+
+// modeOf is the mode stat (os.Stat or os.Lstat) gives path.
+func modeOf(t *testing.T, path string, stat func(string) (os.FileInfo, error)) os.FileMode {
+	t.Helper()
+	fi, err := stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode()
+}
+
+// TestSaveFailureLeavesNoTemp: a write that fails leaves no temporary
+// file (it holds the tokens) behind.
+func TestSaveFailureLeavesNoTemp(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	path := filepath.Join(dir, configFileName)
+	// A directory in config.json's place: the rename onto it fails.
+	if err := os.MkdirAll(filepath.Join(path, "x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{DefaultServer: "prod", Servers: map[string]*Server{"prod": {Name: "prod", Endpoints: []string{"http://localhost:8080/varmq"}}}}
+	if err := Save(cfg); err == nil {
+		t.Fatal("Save() = nil, want an error")
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(leftovers) != 0 {
+		t.Errorf("Save left %v behind", leftovers)
+	}
+}
+
 func TestLoadValidates(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
@@ -223,9 +374,9 @@ func TestLoadNullServer(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
-		t.Fatalf("configPath() error: %v", err)
+		t.Fatalf("Path() error: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
@@ -266,5 +417,41 @@ func TestPollInterval(t *testing.T) {
 		if got := (&Server{Interval: tc.in}).PollInterval(); got != tc.want {
 			t.Errorf("Interval %d: got %v want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestParseHistory(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{{"1d", 24 * time.Hour}, {"7d", 7 * 24 * time.Hour}, {"30d", MaxHistory}} {
+		if got, err := ParseHistory(tc.in); err != nil || got != tc.want {
+			t.Errorf("ParseHistory(%q) = %v, %v; want %v", tc.in, got, err, tc.want)
+		}
+	}
+	for _, in := range []string{"", "0d", "31d", "-1d", "7", "24h", "d", "1.5d", "7 d",
+		"+7d", "07d", "281474976710663d", "-281474976710649d"} { // signed, padded, or 2^48 + 7 days: 7d once wrapped
+		if got, err := ParseHistory(in); err == nil {
+			t.Errorf("ParseHistory(%q) = %v, want an error", in, got)
+		}
+	}
+}
+
+func TestHistorySpan(t *testing.T) {
+	for in, want := range map[string]time.Duration{"": DefaultHistory, "7d": 7 * 24 * time.Hour, "31d": DefaultHistory} {
+		if got := (&Server{History: in}).HistorySpan(); got != want {
+			t.Errorf("History %q: got %v want %v", in, got, want)
+		}
+	}
+}
+
+func TestValidateHistory(t *testing.T) {
+	ok := &Server{Name: "local", Endpoints: []string{"http://localhost:8080/varmq"}, History: "30d"}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("history 30d: %v", err)
+	}
+	bad := &Server{Name: "local", Endpoints: []string{"http://localhost:8080/varmq"}, History: "90d"}
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), `server "local": history`) {
+		t.Errorf("history 90d: err %v, want one naming the server and history", err)
 	}
 }

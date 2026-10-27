@@ -20,7 +20,7 @@ const (
 
 // dnsSource resolves a hostname to every address it publishes and exposes one
 // endpoint URL per address. Lookups run in the background so Endpoints never
-// blocks (it is called during TUI render).
+// blocks (it is called while a page renders).
 type dnsSource struct {
 	host   string
 	port   string

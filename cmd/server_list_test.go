@@ -68,7 +68,7 @@ func healthyAndDeadServers(t *testing.T) (healthy, dead string) {
 func TestServerListShowsAllKindsAndStatus(t *testing.T) {
 	healthy, dead := healthyAndDeadServers(t)
 	saveServersConfig(t, "live",
-		&config.Server{Name: "live", Endpoints: []string{healthy}, Token: "super-secret", Interval: 5},
+		&config.Server{Name: "live", Endpoints: []string{healthy}, Token: "super-secret", Interval: 5, History: "7d"},
 		&config.Server{Name: "down", Endpoints: []string{dead}, Interval: 3},
 		&config.Server{Name: "kube", Kubernetes: &config.KubernetesRef{Context: "ctx", Namespace: "ns", Service: "varmq"}},
 		&config.Server{Name: "dnsy", DNS: &config.DNSRef{Host: "varmq.local", Port: 8080}},
@@ -90,6 +90,8 @@ func TestServerListShowsAllKindsAndStatus(t *testing.T) {
 		"Token:    ***",
 		"Interval: 5s",
 		"Interval: 3s",
+		"History:  7d",
+		"History:  1d", // unset: the default
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
@@ -172,6 +174,19 @@ func TestServerRemoveByName(t *testing.T) {
 	}
 	if cfg.DefaultServer != "b" {
 		t.Fatalf("DefaultServer = %q, want reassigned to b", cfg.DefaultServer)
+	}
+}
+
+// TestServerRemoveLastSaysWhatPrompts: removing the last server says
+// which command asks for a new one: vartop web (bare vartop prints help).
+func TestServerRemoveLastSaysWhatPrompts(t *testing.T) {
+	saveServersConfig(t, "only", &config.Server{Name: "only", Endpoints: []string{"http://pod:8080/varmq"}})
+	out, err := captureStdout(t, func() error { return serverRemoveCmd.RunE(serverRemoveCmd, []string{"only"}) })
+	if err != nil {
+		t.Fatalf("server remove error: %v", err)
+	}
+	if want := "Removed the last server. vartop web will prompt for a new one, or add one with vartop server add."; !strings.Contains(out, want) {
+		t.Errorf("printed %q, want %q", out, want)
 	}
 }
 

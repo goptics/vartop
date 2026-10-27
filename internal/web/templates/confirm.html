@@ -11,7 +11,7 @@
   </div>
   <form hx-post="/bulk/{{pathEscape .Action}}" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" .}}
-    <input type="hidden" name="pod" value="{{.Pod}}">
+    {{template "label_field" .}}
     <input type="hidden" name="confirm" value="1">
     {{range .Rows}}<input type="hidden" name="names" value="{{.Name}}">
     {{end}}<button type="submit" class="danger">Confirm {{.Action}}</button>

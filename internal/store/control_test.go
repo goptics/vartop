@@ -1,0 +1,500 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/goptics/vartop/internal/fleet"
+)
+
+func openControl(t *testing.T, dataDir string) *Control {
+	t.Helper()
+	ctl, err := OpenControl(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctl.Close() })
+	return ctl
+}
+
+func TestLeaseClaimBeatRelease(t *testing.T) {
+	dir := t.TempDir()
+	a, b := openControl(t, dir), openControl(t, dir) // two collectors
+	now := time.Now().Round(0)
+
+	if _, fresh, err := a.Lease(); fresh || err != nil {
+		t.Fatalf("Lease before any claim: fresh %v, %v; want none", fresh, err)
+	}
+	want := Lease{PID: 41, ConfigPath: "/c.json", Kubeconfig: "/k"}
+	old, ok, err := a.Claim(want, now)
+	if err != nil || !ok || old == "" {
+		t.Fatalf("first Claim = %q, %v, %v; want a token", old, ok, err)
+	}
+	got, fresh, err := b.Lease()
+	if err != nil || !fresh || got.Token != old || got.PID != 41 || got.ConfigPath != "/c.json" ||
+		got.Kubeconfig != "/k" || !got.Started.Equal(now.Truncate(time.Millisecond)) {
+		t.Errorf("Lease = %+v, fresh %v, %v; want %+v claimed at %v", got, fresh, err, want, now)
+	}
+
+	if tok, ok, err := b.Claim(Lease{PID: 42}, now.Add(LeaseTTL-time.Second)); ok || tok != "" || err != nil {
+		t.Errorf("second Claim while fresh = %q, %v, %v; want refused", tok, ok, err)
+	}
+	if err := a.Beat(old, now.Add(BeatEvery)); err != nil {
+		t.Errorf("Beat = %v", err)
+	}
+
+	// The holder stops beating; once the lease is LeaseTTL old another
+	// collector takes over, and the old token is worthless.
+	late := now.Add(BeatEvery + LeaseTTL + time.Millisecond)
+	next, ok, err := b.Claim(Lease{PID: 42}, late)
+	if err != nil || !ok || next == "" || next == old {
+		t.Fatalf("Claim after LeaseTTL = %q, %v, %v; want a new token", next, ok, err)
+	}
+	if err := a.Beat(old, late); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("old token's Beat = %v, want ErrLeaseLost", err)
+	}
+	db := newWriter(t, dir, "prod")
+	if _, err := db.Append(old, tick(late, 1)); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("old token's Append = %v, want ErrLeaseLost", err)
+	}
+	if s, _ := db.Latest(); s != nil {
+		t.Errorf("old token's Append wrote %v", s.At)
+	}
+	if _, err := db.Append(next, tick(late, 1)); err != nil {
+		t.Errorf("new token's Append = %v", err)
+	}
+
+	if err := b.Release(old); err != nil {
+		t.Fatal(err)
+	}
+	// (Not Lease's fresh: the test's clock runs ahead of the real one.)
+	if l, _, _ := a.Lease(); l.Token != next {
+		t.Error("Release with an old token released the current lease")
+	}
+	if err := b.Release(next); err != nil {
+		t.Fatal(err)
+	}
+	if l, fresh, err := a.Lease(); fresh || err != nil || l.PID != 42 {
+		t.Errorf("Lease after Release = %+v, fresh %v, %v; want the last collector's, not fresh", l, fresh, err)
+	}
+	if err := b.Beat(next, late.Add(2*BeatEvery)); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Beat after Release = %v, want ErrLeaseLost", err)
+	}
+	// Released: the next collector claims at once.
+	tok, ok, err := a.Claim(Lease{PID: 43}, late.Add(2*BeatEvery))
+	if err != nil || !ok {
+		t.Fatalf("Claim after Release = %q, %v, %v", tok, ok, err)
+	}
+	if err := a.Beat(tok, late.Add(3*BeatEvery)); err != nil {
+		t.Errorf("Beat of a new lease = %v", err)
+	}
+}
+
+func TestPokes(t *testing.T) {
+	ctl := openControl(t, t.TempDir())
+	before := time.Now()
+	at, err := ctl.Poke("prod")
+	if err != nil || at.Before(before.Round(0).Truncate(time.Millisecond)) || at.After(time.Now()) {
+		t.Fatalf("Poke = %v, %v; want the time of the poke", at, err)
+	}
+	if _, err := ctl.Poke("prod"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctl.Poke("staging"); err != nil {
+		t.Fatal(err)
+	}
+	pokes, err := ctl.Pokes()
+	if err != nil || pokes["prod"] != 2 || pokes["staging"] != 1 {
+		t.Errorf("Pokes = %v, %v; want prod 2, staging 1", pokes, err)
+	}
+}
+
+func TestServerErrs(t *testing.T) {
+	ctl := openControl(t, t.TempDir())
+	if _, err := ctl.Poke("ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctl.SetServerErr("prod", "discovery failed: boom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctl.SetServerErr("staging", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctl.SetServerErr("staging", ""); err != nil {
+		t.Fatal(err)
+	}
+	errs, err := ctl.ServerErrs()
+	if err != nil || len(errs) != 1 || errs["prod"] != "discovery failed: boom" {
+		t.Errorf("ServerErrs = %v, %v; want only prod's", errs, err)
+	}
+	if pokes, _ := ctl.Pokes(); pokes["prod"] != 0 || pokes["ok"] != 1 {
+		t.Errorf("SetServerErr touched pokes: %v", pokes)
+	}
+}
+
+// TestFreshBounds: a lease is fresh from a beat up to 2·BeatEvery in the
+// future (clocks a little apart) to one under LeaseTTL old; a beat further
+// ahead, as a dead collector's reads after the clock stepped back, is not.
+func TestFreshBounds(t *testing.T) {
+	now := time.UnixMilli(time.Now().UnixMilli())
+	for _, c := range []struct {
+		name string
+		beat time.Time
+		want bool
+	}{
+		{"now", now, true},
+		{"just under LeaseTTL old", now.Add(-LeaseTTL + time.Millisecond), true},
+		{"LeaseTTL old", now.Add(-LeaseTTL), false},
+		{"2·BeatEvery ahead", now.Add(2 * BeatEvery), true},
+		{"past 2·BeatEvery ahead", now.Add(2*BeatEvery + time.Millisecond), false},
+		{"an hour ahead", now.Add(time.Hour), false},
+	} {
+		if got := fresh("t", c.beat.UnixMilli(), now); got != c.want {
+			t.Errorf("%s: fresh = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if fresh("", now.UnixMilli(), now) {
+		t.Error("a released lease is fresh")
+	}
+
+	// Through the API: a lease beaten an hour ahead of the clock is no
+	// lease Claim must respect, nor one Lease calls fresh.
+	dir := t.TempDir()
+	a, b := openControl(t, dir), openControl(t, dir)
+	if _, ok, err := a.Claim(Lease{PID: 1}, time.Now().Add(time.Hour)); !ok || err != nil {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	if _, fresh, err := b.Lease(); fresh || err != nil {
+		t.Errorf("Lease of a beat an hour ahead: fresh %v, %v; want not fresh", fresh, err)
+	}
+	if _, ok, err := b.Claim(Lease{PID: 2}, time.Now()); !ok || err != nil {
+		t.Errorf("Claim over a beat an hour ahead = %v, %v; want it taken", ok, err)
+	}
+}
+
+// beatClock is a clock whose sleeps pass at once, for BeatAdvances: each
+// sleep runs onSleep, if set, after moving the clock on.
+type beatClock struct {
+	t       time.Time
+	slept   time.Duration
+	onSleep func()
+}
+
+func (c *beatClock) now() time.Time { return c.t }
+
+func (c *beatClock) sleep(d time.Duration) {
+	c.t = c.t.Add(d)
+	c.slept += d
+	if c.onSleep != nil {
+		c.onSleep()
+	}
+}
+
+func TestBeatAdvances(t *testing.T) {
+	if DeadAfter != 3*BeatEvery {
+		t.Errorf("DeadAfter = %v, want 3·BeatEvery", DeadAfter)
+	}
+	setup := func(t *testing.T) (holder, watcher *Control, token string, clock *beatClock) {
+		dir := t.TempDir()
+		holder, watcher = openControl(t, dir), openControl(t, dir)
+		clock = &beatClock{t: time.Now().Round(0)}
+		token, ok, err := holder.Claim(Lease{PID: 1}, clock.t)
+		if !ok || err != nil {
+			t.Fatalf("Claim = %v, %v", ok, err)
+		}
+		return holder, watcher, token, clock
+	}
+
+	t.Run("dead holder", func(t *testing.T) {
+		_, w, token, clock := setup(t)
+		advanced, err := w.BeatAdvances(context.Background(), token, DeadAfter, clock.now, clock.sleep)
+		if advanced || err != nil {
+			t.Errorf("BeatAdvances = %v, %v; want false", advanced, err)
+		}
+		if clock.slept < DeadAfter || clock.slept > DeadAfter+time.Second {
+			t.Errorf("watched %v, want DeadAfter (%v)", clock.slept, DeadAfter)
+		}
+	})
+	t.Run("live holder", func(t *testing.T) {
+		h, w, token, clock := setup(t)
+		beaten := false
+		clock.onSleep = func() {
+			if !beaten && clock.slept >= BeatEvery { // one beat, BeatEvery in
+				beaten = true
+				if err := h.Beat(token, clock.t); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		advanced, err := w.BeatAdvances(context.Background(), token, DeadAfter, clock.now, clock.sleep)
+		if !advanced || err != nil {
+			t.Errorf("BeatAdvances = %v, %v; want true", advanced, err)
+		}
+		if clock.slept > BeatEvery+time.Second {
+			t.Errorf("watched %v after the beat, want it to answer at once", clock.slept)
+		}
+	})
+	t.Run("live holder, clock stepped back", func(t *testing.T) {
+		h, w, token, clock := setup(t)
+		clock.onSleep = func() {
+			if err := h.Beat(token, clock.t.Add(-time.Minute)); err != nil {
+				t.Error(err)
+			}
+		}
+		if advanced, err := w.BeatAdvances(context.Background(), token, DeadAfter, clock.now, clock.sleep); !advanced || err != nil {
+			t.Errorf("BeatAdvances = %v, %v; want true: a beat renewed is a live holder", advanced, err)
+		}
+	})
+	t.Run("token gone", func(t *testing.T) {
+		h, w, token, clock := setup(t)
+		if err := h.Release(token); err != nil {
+			t.Fatal(err)
+		}
+		if advanced, err := w.BeatAdvances(context.Background(), token, DeadAfter, clock.now, clock.sleep); advanced || err != nil {
+			t.Errorf("BeatAdvances of a released lease = %v, %v; want false", advanced, err)
+		}
+		if clock.slept != 0 {
+			t.Errorf("watched a released lease for %v, want no wait", clock.slept)
+		}
+	})
+	t.Run("taken over meanwhile", func(t *testing.T) {
+		_, w, token, clock := setup(t)
+		clock.onSleep = func() {
+			if _, ok, err := w.TakeOver(token, Lease{PID: 3}, clock.t); !ok || err != nil {
+				t.Errorf("TakeOver = %v, %v", ok, err)
+			}
+			clock.onSleep = nil
+		}
+		if advanced, err := w.BeatAdvances(context.Background(), token, DeadAfter, clock.now, clock.sleep); advanced || err != nil {
+			t.Errorf("BeatAdvances after a takeover = %v, %v; want false", advanced, err)
+		}
+	})
+	t.Run("cancelled", func(t *testing.T) {
+		_, w, token, clock := setup(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		clock.onSleep = cancel
+		advanced, err := w.BeatAdvances(ctx, token, DeadAfter, clock.now, clock.sleep)
+		if advanced || !errors.Is(err, context.Canceled) {
+			t.Errorf("BeatAdvances cancelled = %v, %v; want false, context.Canceled", advanced, err)
+		}
+		if clock.slept > time.Second {
+			t.Errorf("watched %v after the cancel", clock.slept)
+		}
+	})
+}
+
+// TestTakeOver: a lease whose holder is dead (fresh as it looks) goes to
+// the first collector to take it over; one more watcher of the same dead
+// holder finds it taken and gets nothing.
+func TestTakeOver(t *testing.T) {
+	dir := t.TempDir()
+	dead := openControl(t, dir)
+	now := time.Now().Add(-DeadAfter).Round(0) // so that the takeover is now, by Lease's clock
+	token, _, err := dead.Claim(Lease{PID: 1}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := dead.Claim(Lease{PID: 2}, now.Add(DeadAfter)); ok || err != nil {
+		t.Fatalf("Claim over a fresh lease = %v, %v; want refused", ok, err)
+	}
+
+	const watchers = 4
+	var wg sync.WaitGroup
+	won := make(chan Lease, watchers)
+	for i := range watchers {
+		ctl := openControl(t, dir)
+		wg.Go(func() {
+			tok, ok, err := ctl.TakeOver(token, Lease{PID: 10 + i}, now.Add(DeadAfter))
+			if err != nil {
+				t.Error(err)
+			}
+			if ok {
+				won <- Lease{Token: tok, PID: 10 + i}
+			}
+		})
+	}
+	wg.Wait()
+	close(won)
+	var winners []Lease
+	for l := range won {
+		winners = append(winners, l)
+	}
+	if len(winners) != 1 {
+		t.Fatalf("%d watchers took the lease over, want exactly one", len(winners))
+	}
+	l, fresh, err := dead.Lease()
+	if err != nil || !fresh || l.Token != winners[0].Token || l.PID != winners[0].PID {
+		t.Errorf("Lease = %+v, fresh %v, %v; want the winner's %+v", l, fresh, err, winners[0])
+	}
+	if err := dead.Beat(token, now.Add(DeadAfter)); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("the dead holder's Beat = %v, want ErrLeaseLost", err)
+	}
+
+	// A takeover of a lease no longer held (released, or stale) is a Claim.
+	if err := dead.Release(l.Token); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := dead.TakeOver("someone", Lease{PID: 20}, now.Add(DeadAfter)); !ok || err != nil {
+		t.Errorf("TakeOver of a released lease = %v, %v; want it taken", ok, err)
+	}
+}
+
+// TestControlReplaced: control.db removed, or another file put in its
+// place (the data dir deleted and made anew), is noticed.
+func TestControlReplaced(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	ctl := openControl(t, dir)
+	if gone, err := ctl.Replaced(); gone || err != nil {
+		t.Fatalf("Replaced = %v, %v; want false", gone, err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := ctl.Replaced(); !gone || err != nil {
+		t.Errorf("Replaced after the data dir was removed = %v, %v; want true", gone, err)
+	}
+	openControl(t, dir) // a UI makes it anew
+	if gone, err := ctl.Replaced(); !gone || err != nil {
+		t.Errorf("Replaced once made anew = %v, %v; want true", gone, err)
+	}
+}
+
+// TestReadCollector (R31, R44): what a UI reads of the collector. The lease's
+// environment is checked whether it is fresh, released or stale: whatever
+// the store holds came from that collector. A lease no collector ever claimed is
+// of no environment; one that cannot be read says nothing, but that it
+// cannot.
+func TestReadCollector(t *testing.T) {
+	dir := t.TempDir()
+	ctl := openControl(t, dir)
+	checked := 0
+	ownEnv := func(l Lease) bool { checked++; return l.ConfigPath == "/a/config.json" }
+
+	if d := ReadCollector(ctl, ownEnv); d.Fresh || d.Other || d.Err != nil || checked != 0 || d.Running() {
+		t.Errorf("no collector ever: %+v, %d checks; want not fresh, not other, unchecked, not running", d, checked)
+	}
+	now := time.Now()
+	token, ok, err := ctl.Claim(Lease{PID: 1, ConfigPath: "/b/config.json"}, now)
+	if !ok || err != nil {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	d := ReadCollector(ctl, ownEnv)
+	if !d.Fresh || !d.Other || d.Err != nil || !d.Running() || d.Lease.ConfigPath != "/b/config.json" ||
+		!d.Lease.Started.Equal(time.UnixMilli(now.UnixMilli())) {
+		t.Errorf("another environment's collector: %+v; want fresh, other, running, its lease", d)
+	}
+	if err := ctl.Release(token); err != nil {
+		t.Fatal(err)
+	}
+	if d := ReadCollector(ctl, ownEnv); d.Fresh || !d.Other || d.Running() {
+		t.Errorf("its lease released: %+v; want not fresh, still other, not running", d)
+	}
+	if d := ReadCollector(ctl, nil); d.Other {
+		t.Errorf("no environment check: %+v; want every lease this environment's", d)
+	}
+	if _, ok, err := ctl.Claim(Lease{PID: 2, ConfigPath: "/a/config.json"}, now.Add(-LeaseTTL)); !ok || err != nil {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	if d := ReadCollector(ctl, ownEnv); d.Fresh || d.Other || d.Running() {
+		t.Errorf("own environment's lease, stale: %+v; want not fresh, not other", d)
+	}
+
+	gone := openControl(t, dir)
+	_ = gone.Close()
+	if d := ReadCollector(gone, ownEnv); d.Err == nil || !d.Running() || d.Other || d.Fresh {
+		t.Errorf("lease unreadable: %+v; want its error, counted running (nothing says it is down)", d)
+	}
+}
+
+// TestCollectorCurrent (R44): a server's newest snapshot is current only
+// when it is not stale, the lease is of the reader's environment (fresh,
+// released or stale), and the snapshot was taken under it: not before its
+// collector claimed it, which makes an older one a previous collector's. An
+// action needs, besides, a fresh lease that can be read: one that cannot
+// refuses it (fail closed), while pages keep the stale rule alone.
+func TestCollectorCurrent(t *testing.T) {
+	now := time.UnixMilli(time.Now().UnixMilli())
+	started := now.Add(-2 * time.Second) // the snapshots at and before it are fresh
+	own := Lease{Token: "t", ConfigPath: "/a", Started: started, Beat: now}
+	ownReleased := own
+	ownReleased.Token = ""
+	other := own
+	other.ConfigPath = "/b"
+	at := func(at time.Time) *fleet.Snapshot { return &fleet.Snapshot{At: at} }
+	const interval = time.Second // stale past 5s
+	for _, c := range []struct {
+		name          string
+		d             Collector
+		latest        *fleet.Snapshot
+		current, acts bool
+	}{
+		{"own collector's, fresh", Collector{Lease: own, Fresh: true}, at(now.Add(-time.Second)), true, true},
+		{"taken as it claimed", Collector{Lease: own, Fresh: true}, at(started), true, true},
+		{"taken before it claimed: a previous collector's", Collector{Lease: own, Fresh: true}, at(started.Add(-time.Millisecond)), false, false},
+		{"stale", Collector{Lease: own, Fresh: true}, at(now.Add(-5*time.Second - time.Millisecond)), false, false},
+		{"none", Collector{Lease: own, Fresh: true}, nil, false, false},
+		{"own collector stopped: no action", Collector{Lease: ownReleased}, at(now.Add(-time.Second)), true, false},
+		{"another environment's collector", Collector{Lease: other, Fresh: true, Other: true}, at(now), false, false},
+		{"another environment's, released", Collector{Lease: other, Other: true}, at(now), false, false},
+		{"no collector ever", Collector{}, at(now), true, false},
+		{"lease unreadable", Collector{Err: errors.New("database is locked")}, at(now), true, false},
+		{"lease unreadable, stale", Collector{Err: errors.New("database is locked")}, at(now.Add(-time.Minute)), false, false},
+	} {
+		if got := c.d.Current(c.latest, interval, now); got != c.current {
+			t.Errorf("%s: Current = %v, want %v", c.name, got, c.current)
+		}
+		if got := c.d.Acts(c.latest, interval, now); got != c.acts {
+			t.Errorf("%s: Acts = %v, want %v", c.name, got, c.acts)
+		}
+	}
+}
+
+// TestAppendWaitsOutAClaim (R44): Append checks the lease and inserts in
+// one transaction holding control.db's write lock, so a Claim cannot
+// commit between the two. With a claim's transaction open, Append waits,
+// then finds the lease lost and writes nothing: no row of the previous
+// holder lands under the new lease, where it would pass for current.
+func TestAppendWaitsOutAClaim(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().Round(0)
+	old, ok, err := openControl(t, dir).Claim(Lease{PID: 1}, now)
+	if err != nil || !ok {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	w := newWriter(t, dir, "prod")
+
+	claimant := openDB(controlPath(dir), true, "")
+	defer claimant.Close()
+	tx, err := claimant.Begin() // IMMEDIATE, as claim's
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE daemon SET token = 'next', started = ? WHERE id = 1`, now.Add(time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	appended := make(chan error, 1)
+	go func() {
+		_, err := w.Append(old, tick(now.Add(2*time.Second), 1))
+		appended <- err
+	}()
+	select {
+	case err := <-appended:
+		_ = tx.Rollback()
+		t.Fatalf("Append returned %v while a claim's transaction was open, want it to wait", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-appended; !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Append after the claim = %v, want ErrLeaseLost", err)
+	}
+	if s, _ := w.Latest(); s != nil {
+		t.Errorf("the previous holder's row was written under the new lease (At %v)", s.At)
+	}
+}

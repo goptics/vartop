@@ -47,7 +47,7 @@ func PromptOnboarding() (*Config, error) {
 		return nil, fmt.Errorf("failed to save initial config: %w", err)
 	}
 
-	path, _ := configPath()
+	path, _ := Path()
 	fmt.Printf("\n✓ Configuration saved to %s\n\n", path)
 	return cfg, nil
 }

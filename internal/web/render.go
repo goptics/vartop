@@ -6,10 +6,12 @@ import (
 	"html/template"
 	"math"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 // assets holds the HTML templates and the static files (vendored htmx, CSS).
@@ -18,45 +20,23 @@ import (
 //go:embed templates static
 var assets embed.FS
 
-// Noun is what the pages call one unit of a server: "pod" on Kubernetes,
-// "instance" on every other server. Article goes before One ("a pod", "an
-// instance").
-type Noun struct{ One, Many, Article string }
-
-// Cap is One with a capital first letter.
-func (n Noun) Cap() string { return capitalize(n.One) }
-
-// CapMany is Many with a capital first letter.
-func (n Noun) CapMany() string { return capitalize(n.Many) }
-
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-// NounFor is the noun of srv's units: a Kubernetes server's are pods, any
-// other server's (static endpoints, DNS) are instances, and so are nil's.
-func NounFor(srv *config.Server) Noun {
-	if srv != nil && srv.Kubernetes != nil {
-		return Noun{One: "pod", Many: "pods", Article: "a"}
-	}
-	return Noun{One: "instance", Many: "instances", Article: "an"}
-}
-
-// PodOption is one entry of the pod select. Tip is the hover text of Label.
-type PodOption struct{ Key, Label, Tip string }
+// PodOption is one entry of the unit select. Tip is the hover text of
+// Label.
+type PodOption struct{ Label, Tip string }
 
 // Page is everything a full page needs. Handlers fill it; templates never
 // compute anything the view models do not already carry.
 type Page struct {
-	Title, Server, Pod, SelfURL string // SelfURL = current path + query, used by the poller
-	Noun                        Noun   // what the server's units are called
-	Servers                     []string
+	// Server is the key of the server the page shows, Pod the label of
+	// the unit it is filtered to ("" for every unit), named in the URL by
+	// Noun.Param. SelfURL is the page's path with its server and unit, as
+	// the poller asks for it.
+	Title, Server, Pod, SelfURL string
+	Noun                        fleet.Noun // what the server's units are called
+	Servers                     []string   // every configured server, sorted
 	Pods                        []PodOption
-	IntervalSec                 int
-	Health                      HealthView
+	IntervalSec                 int // the server's poll interval; 0: no poller
+	Health                      fleet.HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
 	// ScopeBalanced: what the page's actions reach holds a unit behind a
@@ -65,57 +45,71 @@ type Page struct {
 	ScopeBalanced, OneBalanced bool
 
 	// Note is the quiet line about the balancers behind the server (see
-	// BalancerNote). Banner is a notice about what this tab shows: its server
-	// changed, its pod is gone or down, or its worker is not found.
-	// Connecting is the whole "Connecting to {label}…" message. Err is a
-	// failure to show; with no view model set it also offers a Retry form
-	// that posts Server to /server.
-	Note, Banner, Connecting, Err string
+	// BalancerNote). Banner is a notice about what this tab shows: its
+	// server is not configured or failing, its unit is gone, unknown or
+	// down, or its worker is not found. Waiting is the whole "Waiting for
+	// the first snapshot of {server}…" message of a full page (htmx
+	// reloads instead, see reload). Stale says how old the newest
+	// snapshot is, and why: the page then shows no current value — health,
+	// the balancers' note, the units' errors and the units reporting a
+	// worker included — only history.
+	Note, Banner, Waiting, Stale string
 
-	// Gone is the label of the pod Pod names when the newest snapshot no
-	// longer has it (see podGone): the pod select shows it chosen, and the
-	// banner links to the merged view.
+	// Unconfigured: Server is not in the config; the server select shows
+	// it chosen.
+	Unconfigured bool
+
+	// Gone is Pod when the newest snapshot has no unit so labelled (see
+	// podGone): the unit select shows it chosen, and the banner links to
+	// the merged view.
 	Gone string
 
-	// At most one is set; none while connecting, stale or failed.
-	Dashboard *DashboardView
-	Grid      *GridView
-	Detail    *DetailView
+	// reload: an htmx request got a waiting page, which htmx would swap
+	// in only part of; the response has the browser load it whole instead
+	// (HX-Redirect to SelfURL).
+	reload bool
+
+	// At most one is set; none while waiting or when the server or unit
+	// cannot be shown.
+	Dashboard *fleet.DashboardView
+	Grid      *fleet.GridView
+	Detail    *fleet.DetailView
+
+	// Spans are the spans besides the hour the server's charts may show
+	// (spansOf its history); Ranges says which each of Detail's charts
+	// shows, and CompletedDay and FailedDay are those charts (nil: the
+	// chart shows the hour).
+	Spans                   []time.Duration
+	Ranges                  ChartRanges
+	CompletedDay, FailedDay *DayChart
 }
 
-// Scope names what an action on this page touches: the selected unit's label,
-// or "all pods" ("all instances" off Kubernetes).
+// Interval is the server's poll interval; 0 with no server.
+func (p Page) Interval() time.Duration { return time.Duration(p.IntervalSec) * time.Second }
+
+// Scope names what an action on this page touches: the selected unit's
+// label, or "all pods" ("all instances" off Kubernetes).
 func (p Page) Scope() string {
 	if p.Pod == "" {
 		return "all " + p.Noun.Many
 	}
-	for _, o := range p.Pods {
-		if o.Key == p.Pod {
-			return o.Label
-		}
-	}
 	return p.Pod
 }
-
-// ActionResult is one pod's outcome of an action. Key is the unit's key and
-// Tip the hover text of its label (Pod). Outcome is "ok", "no change" or
-// "failed"; Msg, when set, is shown in parentheses after it. Worker names the
-// worker when one response covers several (bulk).
-type ActionResult struct{ Worker, Pod, Key, Tip, Outcome, Msg string }
 
 // ResultsView is what the "results" template renders: the outcome of every
 // unit an action reached. Noun words the notice for an action that reached none.
 type ResultsView struct {
-	Results []ActionResult
-	Noun    Noun
+	Results []fleet.ActionResult
+	Noun    fleet.Noun
 }
 
 // ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
-// on Server. A down pod's column carries its Err.
+// on Server, scoped to the unit labelled Pod ("" for every unit). A down
+// unit's column carries its Err.
 type ConfirmView struct {
 	Action, Server, Pod string
-	Noun                Noun
-	Pods                []PodColumn
+	Noun                fleet.Noun
+	Pods                []fleet.PodColumn
 	Rows                []ConfirmRow
 }
 
@@ -136,10 +130,15 @@ var funcs = template.FuncMap{
 	"workerURL":     workerURL,
 	"pathOf":        pathOf,
 	"sparkline":     sparkline,
+	"history":       history,
+	"tickLabel":     tickLabel,
 	"noData":        noData,
-	"peak":          peak,
+	"trendWindow":   func() time.Duration { return fleet.TrendWindow },
+	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
+	"spanParam":     spanParam,
+	"rangeSwitch":   rangeSwitch,
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
-	"oneBalanced":   func() string { return oneBalancedMsg },
+	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",
@@ -162,15 +161,16 @@ func parseTemplates() (map[string]*template.Template, error) {
 	return sets, nil
 }
 
-// pageURL is path plus the server and pod the page is bound to; empty ones
-// are left out.
-func pageURL(path, server, pod string) string {
+// pageURL is path plus the server the page is bound to and the label of
+// its unit, under param (the server's Noun.Param); empty ones are left
+// out.
+func pageURL(path, server, param, label string) string {
 	q := url.Values{}
 	if server != "" {
 		q.Set("server", server)
 	}
-	if pod != "" {
-		q.Set("pod", pod)
+	if label != "" {
+		q.Set(param, label)
 	}
 	if len(q) == 0 {
 		return path
@@ -179,8 +179,8 @@ func pageURL(path, server, pod string) string {
 }
 
 // workerURL is the detail page of a worker; the name is path-escaped.
-func workerURL(name, server, pod string) string {
-	return pageURL("/workers/"+url.PathEscape(name), server, pod)
+func workerURL(name, server, param, label string) string {
+	return pageURL("/workers/"+url.PathEscape(name), server, param, label)
 }
 
 // pathOf drops the query from a request URI ("" is the root).
@@ -194,12 +194,12 @@ func pathOf(uri string) string {
 
 // noData reports whether a series has nothing to show as its current value:
 // it is empty, or its newest point is a gap.
-func noData(pts []Point) bool {
+func noData(pts []fleet.Point) bool {
 	return len(pts) == 0 || pts[len(pts)-1].Gap
 }
 
 // peak is the largest value of the non-gap points (0 if none).
-func peak(pts []Point) float64 {
+func peak(pts []fleet.Point) float64 {
 	var top float64
 	for _, p := range pts {
 		if !p.Gap && p.V > top {
@@ -221,16 +221,49 @@ const sparkPad = 3
 // placed is a point positioned inside a w×h plot.
 type placed struct {
 	x, y float64
-	p    Point
+	p    fleet.Point
 }
 
-// xAt is the x of the i-th of n points: evenly spread over w, newest on the
-// right. A lone point sits in the middle.
-func xAt(i, n int, w float64) float64 {
-	if n < 2 {
-		return w / 2
+// chartArea is a w×h plot of the window up to the newest of a series'
+// points, which it places by time (fleet.Point.At): a
+// stretch with no snapshot is blank space of its width, not squeezed away
+// by the points around it. interval is the series' poll interval: points
+// more than two apart are not joined. 0 joins every pair, gaps aside.
+type chartArea struct {
+	start         time.Time
+	window        time.Duration
+	interval      time.Duration
+	width, height float64
+}
+
+// newChartArea is the area pts are drawn in, and the points of pts it
+// shows: those taken within window of the newest, oldest first.
+func newChartArea(pts []fleet.Point, window, interval time.Duration, w, h float64) (chartArea, []fleet.Point) {
+	a := chartArea{window: window, interval: interval, width: w, height: h}
+	if len(pts) == 0 {
+		return a, nil
 	}
-	return float64(i) * w / float64(n-1)
+	a.start = pts[len(pts)-1].At.Add(-window)
+	i := slices.IndexFunc(pts, func(p fleet.Point) bool { return !p.At.Before(a.start) })
+	if i < 0 { // a window below zero: nothing in it
+		return a, nil
+	}
+	return a, pts[i:]
+}
+
+// xAt is the x of a point taken at at: its time into the window, scaled to
+// the width, the newest on the right edge.
+func (a chartArea) xAt(at time.Time) float64 {
+	if a.window <= 0 {
+		return a.width
+	}
+	return float64(at.Sub(a.start)) / float64(a.window) * a.width
+}
+
+// apart reports whether two points taken at prev and at are too far apart
+// to be joined: more than two intervals, so polls missed, not one late.
+func (a chartArea) apart(prev, at time.Time) bool {
+	return a.interval > 0 && at.Sub(prev) > 2*a.interval
 }
 
 // yAt scales v into [0, h] against top, 0 at the bottom (y == h). A series
@@ -242,25 +275,39 @@ func yAt(v, top, h float64) float64 {
 	return h - min(v, top)/top*h
 }
 
-// runsOf positions the points of pts in a w×h plot and splits them at gaps.
-func runsOf(pts []Point, w, h float64) [][]placed {
-	top := peak(pts)
+// runsOf positions pts, the points a shows, scaled to top, and splits
+// them where a point is a gap or the points are apart.
+func (a chartArea) runsOf(pts []fleet.Point, top float64) [][]placed {
 	var runs [][]placed
 	var cur []placed
-	for i, p := range pts {
-		if p.Gap {
+	for _, p := range pts {
+		if p.Gap || cur != nil && a.apart(cur[len(cur)-1].p.At, p.At) {
 			if cur != nil {
 				runs = append(runs, cur)
 				cur = nil
 			}
-			continue
+			if p.Gap {
+				continue
+			}
 		}
-		cur = append(cur, placed{xAt(i, len(pts), w), yAt(p.V, top, h), p})
+		cur = append(cur, placed{a.xAt(p.At), yAt(p.V, top, a.height), p})
 	}
 	if cur != nil {
 		runs = append(runs, cur)
 	}
 	return runs
+}
+
+// hitWidth is the width of a hover target: a poll's width, where the
+// interval is known, but never under minHit.
+func (a chartArea) hitWidth(n int) float64 {
+	switch {
+	case a.interval > 0 && a.window > 0:
+		return max(minHit, a.width*float64(a.interval)/float64(a.window))
+	case n > 1:
+		return max(minHit, a.width/float64(n-1))
+	}
+	return max(minHit, a.width)
 }
 
 func num(f float64) string { return strconv.FormatFloat(f, 'f', 1, 64) }
@@ -273,17 +320,14 @@ func joinRun(run []placed) string {
 	return strings.Join(coords, " ")
 }
 
-// polylines returns one "x,y x,y" string per gap-free run of pts in a w×h
-// plot, y scaled to the series maximum.
-func polylines(pts []Point, w, h float64) []string {
-	var out []string
-	for _, run := range runsOf(pts, w, h) {
-		out = append(out, joinRun(run))
-	}
-	return out
+// polylines returns one "x,y x,y" string per run of pts (see runsOf) in a
+// w×h plot of window, y scaled to the maximum of the points shown.
+func polylines(pts []fleet.Point, window, interval time.Duration, w, h float64) []string {
+	return sparkline(pts, window, interval, w, h).Lines
 }
 
-// sparkView is what the "spark" template draws.
+// sparkView is what the "spark" template draws. Peak is the largest value
+// it draws, for the caption.
 type sparkView struct {
 	ViewBox       string
 	Width, Height string
@@ -291,6 +335,7 @@ type sparkView struct {
 	Lines         []string
 	Dots          []sparkDot
 	Hits          []sparkHit
+	Peak          float64
 }
 
 // sparkDot is a circle: a partial point (hollow) or a solid point that has no
@@ -301,17 +346,22 @@ type sparkDot struct{ X, Y, Class string }
 // <title> is the hover text. Gaps get one too, so "no data" can be hovered.
 type sparkHit struct{ X, W, Title string }
 
-// sparkline lays pts out in a w×h plot: a polyline per run, hollow circles
-// for partial points, dots for isolated ones, and hover targets on top.
-func sparkline(pts []Point, w, h float64) sparkView {
+// sparkline lays pts, a series polled every interval, out in a w×h plot of
+// the window up to its newest point, each at its time (see chartArea): a
+// polyline per run, hollow circles for partial points, dots for isolated
+// ones, and hover targets on top. Points older than the window are not
+// drawn, nor counted in its peak.
+func sparkline(pts []fleet.Point, window, interval time.Duration, w, h float64) sparkView {
+	a, pts := newChartArea(pts, window, interval, w, h)
 	v := sparkView{
 		ViewBox: fmt.Sprintf("%d %d %s %s", -sparkPad, -sparkPad, num(w+2*sparkPad), num(h+2*sparkPad)),
 		Width:   num(w + 2*sparkPad),
 		Height:  num(h + 2*sparkPad),
 		Top:     strconv.Itoa(-sparkPad),
 		HitH:    num(h + 2*sparkPad),
+		Peak:    peak(pts),
 	}
-	for _, run := range runsOf(pts, w, h) {
+	for _, run := range a.runsOf(pts, v.Peak) {
 		v.Lines = append(v.Lines, joinRun(run))
 		for _, p := range run {
 			switch {
@@ -323,23 +373,123 @@ func sparkline(pts []Point, w, h float64) sparkView {
 		}
 	}
 
-	n := len(pts)
-	step := w
-	if n > 1 {
-		step = w / float64(n-1)
-	}
-	stride := 1
-	if step < minHit {
-		stride = int(math.Ceil(minHit / step))
-	}
-	for lo := 0; lo < n; lo += stride {
-		hi := min(lo+stride, n)
-		mid := lo + (hi-lo-1)/2
-		v.Hits = append(v.Hits, sparkHit{
-			X:     num(xAt(lo, n, w) - step/2),
-			W:     num(step * float64(hi-lo)),
-			Title: pts[mid].Title,
-		})
+	// A target per column of the plot holding points, gaps included,
+	// titled by the middle one of them.
+	col := a.hitWidth(len(pts))
+	for lo := 0; lo < len(pts); {
+		c := math.Round(a.xAt(pts[lo].At) / col)
+		hi := lo + 1
+		for hi < len(pts) && math.Round(a.xAt(pts[hi].At)/col) == c {
+			hi++
+		}
+		v.Hits = append(v.Hits, sparkHit{X: num(c*col - col/2), W: num(col), Title: pts[lo+(hi-lo-1)/2].Title})
+		lo = hi
 	}
 	return v
+}
+
+// historyTick is the step of a 1h chart's time axis, on the clock;
+// dayTick a 24h chart's; a longer chart's ticks are local midnights, at
+// most about a week of them (see history).
+const (
+	historyTick = 10 * time.Minute
+	dayTick     = 6 * time.Hour
+)
+
+// axisTick is a labelled tick of a chart axis. Pct is where it sits along
+// the axis, in percent of the chart's box (sparkPad included), for its HTML
+// label; Grid is its coordinate in the plot, for its SVG gridline.
+type axisTick struct{ Label, Pct, Grid string }
+
+// historyView is what the "history" template draws: the sparkline of a
+// series with a time axis, a value scale and their gridlines. PlotW and
+// PlotH are the plot's size, the gridlines' and the crosshair's extent.
+type historyView struct {
+	sparkView
+	XTicks, YTicks []axisTick
+	PlotW, PlotH   string
+}
+
+// history is sparkline with axes: a tick at every historyTick of the clock
+// in the window up to the newest point, and 0, half the peak and the peak
+// (0 alone for a flat zero series). A series with nothing to draw has no
+// axes.
+func history(pts []fleet.Point, window, interval time.Duration, w, h float64) historyView {
+	v := historyView{sparkView: sparkline(pts, window, interval, w, h), PlotW: num(w), PlotH: num(h)}
+	a, shown := newChartArea(pts, window, interval, w, h)
+	if len(shown) == 0 {
+		return v
+	}
+	inBox := func(c, size float64) string { return num((c + sparkPad) / (size + 2*sparkPad) * 100) }
+
+	// Ticks on the local clock, so a zone off the hour by a part of it
+	// still gets :00, :10, …: the start floored in its own zone offset, not
+	// rebuilt from its wall clock, which a fall-back hour makes ambiguous.
+	// Every offset change is a multiple of historyTick, so later ticks stay
+	// on the clock too.
+	//
+	// A day's ticks, 6 hours apart, are found hour by hour instead, each
+	// kept when its local hour is one of 00, 06, 12, 18: a daylight-saving
+	// change, an hour, is no multiple of 6. A longer chart's are too, each
+	// kept at the first hour of a local date — its midnight, or 01:00 where
+	// the clock springs over midnight — every nth day counted from 1970 for
+	// about a week of them: the same days at every refresh.
+	step, keep, format := historyTick, func(time.Time) bool { return true }, "15:04"
+	switch {
+	case window > fleet.DayWindow:
+		every := int64(math.Ceil(float64(window) / float64(7*fleet.DayWindow))) // 7d 1, 14d 2, 30d 5
+		step, format = time.Hour, "Mon 2"
+		if every > 1 {
+			format = "2 Jan"
+		}
+		keep = func(t time.Time) bool {
+			y, m, d := t.Local().Date()
+			return d != t.Add(-time.Hour).Local().Day() && time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Unix()/86400%every == 0
+		}
+	case window > fleet.HistoryWindow:
+		step = time.Hour
+		keep = func(t time.Time) bool { return t.Local().Hour()%int(dayTick/time.Hour) == 0 }
+	}
+	_, off := a.start.Local().Zone()
+	shift := time.Duration(off) * time.Second
+	t := a.start.Add(shift).Truncate(step).Add(-shift)
+	if t.Before(a.start) {
+		t = t.Add(step)
+	}
+	for end := a.start.Add(window); !t.After(end); t = t.Add(step) {
+		if !keep(t) {
+			continue
+		}
+		x := a.xAt(t)
+		v.XTicks = append(v.XTicks, axisTick{Label: t.Local().Format(format), Pct: inBox(x, w), Grid: num(x)})
+	}
+
+	scale := []float64{0}
+	if v.Peak > 0 {
+		scale = append(scale, v.Peak/2, v.Peak)
+	}
+	for _, val := range scale {
+		y := yAt(val, v.Peak, h)
+		v.YTicks = append(v.YTicks, axisTick{Label: tickLabel(val), Pct: inBox(y, h), Grid: num(y)})
+	}
+	return v
+}
+
+// tickLabel is a scale value as short as reads well: whole from 100, one
+// decimal from 1, and two significant digits below, so that the small
+// rates a Failed chart is mostly made of (a failure now and then) do not
+// all round to 0. Trailing zeros are dropped.
+func tickLabel(v float64) string {
+	decimals := 1
+	switch {
+	case v >= 100:
+		decimals = 0
+	case v > 0 && v < 1:
+		decimals = 1 - int(math.Floor(math.Log10(v)))
+	}
+	s := strconv.FormatFloat(v, 'f', decimals, 64)
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	}
+	return s
 }

@@ -8,14 +8,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
 // postRequest is a POST of form to path on srv as htmx sends it from the
@@ -45,9 +48,9 @@ func post(t *testing.T, srv *httptest.Server, path string, form url.Values, hx b
 
 // patches returns the PATCH requests f has received, leaving out the
 // poller's GETs.
-func patches(f *fakeVarmq) []string {
+func patches(f *fleettest.Varmq) []string {
 	var out []string
-	for _, c := range f.calls() {
+	for _, c := range f.Calls() {
 		if strings.HasPrefix(c, "PATCH ") {
 			out = append(out, c)
 		}
@@ -62,7 +65,7 @@ func resultsOf(body string) string {
 }
 
 // noPatches fails the test if any of fakes received a PATCH.
-func noPatches(t *testing.T, fakes ...*fakeVarmq) {
+func noPatches(t *testing.T, fakes ...*fleettest.Varmq) {
 	t.Helper()
 	for _, f := range fakes {
 		if got := patches(f); len(got) > 0 {
@@ -72,7 +75,7 @@ func noPatches(t *testing.T, fakes ...*fakeVarmq) {
 }
 
 // wantPatches fails the test unless f received exactly want, in any order.
-func wantPatches(t *testing.T, f *fakeVarmq, want ...string) {
+func wantPatches(t *testing.T, f *fleettest.Varmq, want ...string) {
 	t.Helper()
 	got := patches(f)
 	slices.Sort(got)
@@ -83,9 +86,9 @@ func wantPatches(t *testing.T, f *fakeVarmq, want ...string) {
 }
 
 // setActionStatus makes every PATCH on f's worker answer status.
-func setActionStatus(f *fakeVarmq, worker string, status int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+func setActionStatus(f *fleettest.Varmq, worker string, status int) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
 	f.Workers[worker].ActionStatus = status
 }
 
@@ -111,7 +114,7 @@ func TestActionAllPods(t *testing.T) {
 		t.Errorf("%d ok results, want 2:\n%s", n, body)
 	}
 	// One line per pod, labelled as the pages label it.
-	labels := staticLabels(aSrv.URL, bSrv.URL)
+	labels := fleettest.StaticLabels(aSrv.URL, bSrv.URL)
 	for _, want := range []string{
 		`title="a via ` + aSrv.URL + `">` + labels[aSrv.URL] + `</span>`,
 		`title="b via ` + bSrv.URL + `">` + labels[bSrv.URL] + `</span>`,
@@ -126,7 +129,7 @@ func TestActionOnePod(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	srv, _ := newTestServer(t, aSrv, bSrv)
 
-	resp, body := post(t, srv, "/workers/orders/actions/resume", multi("pod", aSrv.URL), true)
+	resp, body := post(t, srv, "/workers/orders/actions/resume", multi("instance", fleettest.StaticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]), true)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -223,19 +226,19 @@ func TestMutationsFinishWhenBrowserAborts(t *testing.T) {
 	for _, c := range []struct {
 		path string
 		form url.Values
-		done func(fakeWorker) bool
+		done func(fleettest.Worker) bool
 	}{
-		{"/workers/orders/actions/stop", multi(), func(w fakeWorker) bool { return w.Status == "Stopped" }},
-		{"/workers/orders/concurrency", multi("n", "9"), func(w fakeWorker) bool { return w.Concurrency == 9 }},
-		{"/bulk/pause", multi("names", "orders", "confirm", "1"), func(w fakeWorker) bool { return w.Status == "Paused" }},
+		{"/workers/orders/actions/stop", multi(), func(w fleettest.Worker) bool { return w.Status == "Stopped" }},
+		{"/workers/orders/concurrency", multi("n", "9"), func(w fleettest.Worker) bool { return w.Concurrency == 9 }},
+		{"/bulk/pause", multi("names", "orders", "confirm", "1"), func(w fleettest.Worker) bool { return w.Status == "Paused" }},
 	} {
 		t.Run(strings.TrimPrefix(c.path, "/"), func(t *testing.T) {
 			t.Parallel()
 			fa, fb, aSrv, bSrv := twoFakes(t)
 			srv, _ := newTestServer(t, aSrv, bSrv)
-			fb.mu.Lock()
+			fb.Mu.Lock()
 			fb.Delay = time.Second // b answers slowly; it drops the request if vartop gives up on it
-			fb.mu.Unlock()
+			fb.Mu.Unlock()
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -248,15 +251,15 @@ func TestMutationsFinishWhenBrowserAborts(t *testing.T) {
 				}
 				sent <- err
 			}()
-			waitUntil(t, 3*time.Second, "b's PATCH under way", func() bool { return len(patches(fb)) == 1 })
+			fleettest.WaitUntil(t, 3*time.Second, "b's PATCH under way", func() bool { return len(patches(fb)) == 1 })
 			cancel() // the browser aborts
 			if err := <-sent; err == nil {
 				t.Fatal("the request completed before it was aborted; the test proves nothing")
 			}
 
-			for _, f := range []*fakeVarmq{fa, fb} {
-				waitUntil(t, 3*time.Second, "orders changed on "+f.Instance, func() bool {
-					w, _ := f.worker("orders")
+			for _, f := range []*fleettest.Varmq{fa, fb} {
+				fleettest.WaitUntil(t, 3*time.Second, "orders changed on "+f.Instance, func() bool {
+					w, _ := f.Worker("orders")
 					return c.done(w)
 				})
 			}
@@ -274,12 +277,9 @@ func TestActionRejectsUnknown(t *testing.T) {
 	}{
 		{"/workers/orders/actions/start", multi()},
 		{"/workers/orders/actions/%3Cb%3Ex", multi()},
-		{"/workers/orders/actions/pause", multi("pod", "http://gone.invalid")},
-		{"/workers/orders/concurrency", multi("n", "4", "pod", "http://gone.invalid")},
+		{"/workers/orders/concurrency", multi("n", "0", "instance", "<b>x")},
 		{"/bulk/restart", multi("names", "orders", "confirm", "1")},
 		{"/bulk/stop", multi("names", "orders", "confirm", "1")},
-		{"/bulk/pause", multi("names", "orders", "pod", "http://gone.invalid")},
-		{"/bulk/pause", multi("names", "orders", "pod", "http://gone.invalid", "confirm", "1")},
 		{"/bulk/pause", multi("confirm", "1")},
 		{"/bulk/pause", multi("names", "", "confirm", "1")},
 	} {
@@ -288,7 +288,7 @@ func TestActionRejectsUnknown(t *testing.T) {
 			t.Errorf("POST %s %v = %d, want 400", c.path, c.form, resp.StatusCode)
 		}
 		// htmx swaps the body into #errors as HTML: nothing posted is echoed.
-		if strings.Contains(body, "<b>") || strings.Contains(body, "gone.invalid") {
+		if strings.Contains(body, "<b>") {
 			t.Errorf("POST %s: 400 body echoes the request: %q", c.path, body)
 		}
 	}
@@ -297,7 +297,7 @@ func TestActionRejectsUnknown(t *testing.T) {
 
 func TestPOSTWithoutHXRequest(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
-	srv, m := newTestServer(t, aSrv, bSrv)
+	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, c := range []struct {
 		path string
@@ -306,21 +306,17 @@ func TestPOSTWithoutHXRequest(t *testing.T) {
 		{"/workers/orders/actions/pause", multi()},
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
-		{"/server", multi("name", "b")},
 	} {
 		if resp, _ := post(t, srv, c.path, c.form, false); resp.StatusCode != http.StatusForbidden {
 			t.Errorf("POST %s without HX-Request = %d, want 403", c.path, resp.StatusCode)
 		}
 	}
 	noPatches(t, fa, fb)
-	if p := m.Pending(); p != "" {
-		t.Errorf("a refused POST /server started switching to %q", p)
-	}
 }
 
 func TestCrossOriginPOST(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
-	srv, m := newTestServer(t, aSrv, bSrv)
+	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, headers := range []map[string]string{
 		{"Sec-Fetch-Site": "cross-site"},
@@ -334,7 +330,6 @@ func TestCrossOriginPOST(t *testing.T) {
 			{"/workers/orders/actions/pause", multi()},
 			{"/workers/orders/concurrency", multi("n", "9")},
 			{"/bulk/pause", multi("names", "orders", "confirm", "1")},
-			{"/server", multi("name", "b")},
 		} {
 			req := postRequest(t, srv, c.path, c.form)
 			for k, v := range headers {
@@ -350,9 +345,6 @@ func TestCrossOriginPOST(t *testing.T) {
 		}
 	}
 	noPatches(t, fa, fb)
-	if p := m.Pending(); p != "" {
-		t.Errorf("a cross-origin POST /server started switching to %q", p)
-	}
 }
 
 func TestGETOnMutatingRoute(t *testing.T) {
@@ -363,7 +355,6 @@ func TestGETOnMutatingRoute(t *testing.T) {
 		"/workers/orders/actions/pause?server=multi",
 		"/workers/orders/concurrency?server=multi&n=3",
 		"/bulk/pause?server=multi&names=orders&confirm=1",
-		"/server?name=b",
 	} {
 		for _, hx := range []bool{false, true} {
 			if status, _ := fetch(t, srv, path, hx); status != http.StatusMethodNotAllowed {
@@ -398,65 +389,20 @@ func TestNonPOSTMethodsNeedHTMX(t *testing.T) {
 	}
 }
 
-func TestStaleServerPOST(t *testing.T) {
-	fa, fb, aSrv, bSrv := twoFakes(t)
-	srv, m := newTestServer(t, aSrv, bSrv)
-
-	stale := func(server, banner string) {
-		t.Helper()
-		for _, c := range []struct {
-			path string
-			form url.Values
-		}{
-			{"/workers/orders/actions/pause", url.Values{}},
-			{"/workers/orders/concurrency", url.Values{"n": {"9"}}},
-			{"/bulk/pause", url.Values{"names": {"orders"}}},
-			{"/bulk/pause", url.Values{"names": {"orders"}, "confirm": {"1"}}},
-		} {
-			if server != "" {
-				c.form.Set("server", server)
-			}
-			resp, body := post(t, srv, c.path, c.form, true)
-			if resp.StatusCode != http.StatusConflict {
-				t.Errorf("POST %s server=%q = %d, want 409", c.path, server, resp.StatusCode)
-			}
-			// htmx would swap a 409 into #errors; the headers send it to
-			// #banner instead, which the body must not duplicate.
-			if resp.Header.Get("HX-Retarget") != "#banner" || resp.Header.Get("HX-Reswap") != "innerHTML" {
-				t.Errorf("POST %s: HX-Retarget %q HX-Reswap %q, want #banner innerHTML", c.path, resp.Header.Get("HX-Retarget"), resp.Header.Get("HX-Reswap"))
-			}
-			if body != `<p class="banner">`+banner+`</p>` {
-				t.Errorf("POST %s server=%q body = %q, want the %q banner alone", c.path, server, body, banner)
-			}
-		}
-	}
-
-	stale("other", "Server changed to multi — reload")
-	stale("", "Server changed to multi — reload")
-	stale("b", "Server changed to multi — reload")
-	noPatches(t, fa, fb)
-
-	// The real case: another tab switched to b while this one still shows
-	// multi. Nothing may reach multi's pods, which are still reachable.
-	if err := m.Switch("b"); err != nil {
-		t.Fatal(err)
-	}
-	waitUntil(t, 3*time.Second, "b active", func() bool { key, _ := m.Active(); return key == "b" })
-	stale("multi", "Server changed to b — reload")
-	noPatches(t, fa, fb)
-}
-
 // TestPOSTBindsConfigKey: a POST names its server by configuration key,
 // which config.Server.Name need not equal.
 func TestPOSTBindsConfigKey(t *testing.T) {
-	f, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 1}})
-	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
-		"prod-eu": {Name: "Production EU", Interval: 1, Endpoints: []string{fSrv.URL}},
-	}}, "prod-eu")
-	srv := serve(t, m)
+	f, fSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 1}})
+	fx := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"prod-eu": {Interval: 1, Endpoints: []string{fSrv.URL}},
+	}})
+	fx.cfg.Servers["prod-eu"].Name = "Production EU"
+	fx.startCollector()
+	fx.waitFirst("prod-eu")
+	srv := fx.srv
 
-	if resp, _ := post(t, srv, "/workers/orders/actions/pause", url.Values{"server": {"Production EU"}}, true); resp.StatusCode != http.StatusConflict {
-		t.Errorf("server=<config.Server.Name> = %d, want 409: names are keys", resp.StatusCode)
+	if resp, body := post(t, srv, "/workers/orders/actions/pause", url.Values{"server": {"Production EU"}}, true); resp.StatusCode != http.StatusConflict || body != `<p class="banner">Server Production EU is not configured</p>` {
+		t.Errorf("server=<config.Server.Name> = %d %q, want 409, not configured: names are keys", resp.StatusCode, body)
 	}
 	noPatches(t, f)
 	if resp, _ := post(t, srv, "/workers/orders/actions/pause", url.Values{"server": {"prod-eu"}}, true); resp.StatusCode != http.StatusOK {
@@ -465,39 +411,15 @@ func TestPOSTBindsConfigKey(t *testing.T) {
 	wantPatches(t, f, "PATCH /workers/orders/actions/pause")
 }
 
-func TestStaleServerPOSTWithoutSession(t *testing.T) {
-	m, _ := newGatedManager(t, "dev")
-	srv := serve(t, m)
-	if err := m.Switch("dev"); err != nil { // its build stays blocked
-		t.Fatal(err)
-	}
-
-	resp, body := post(t, srv, "/workers/orders/actions/pause", url.Values{"server": {"dev"}}, true)
-	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">Not connected — reload</p>` {
-		t.Errorf("POST while nothing is active = %d %q, want 409 and the not-connected banner", resp.StatusCode, body)
-	}
-}
-
-// TestPOSTBeforeFirstRefresh: before a session's first snapshot nothing is
+// TestPOSTBeforeFirstRefresh: before a server's first snapshot nothing is
 // known, not even which endpoints are balancers, so every POST that would
 // reach varmq is refused in the banner and sends nothing.
 func TestPOSTBeforeFirstRefresh(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b")
-	for _, f := range fakes {
-		f.mu.Lock()
-		f.Delay = 1500 * time.Millisecond // the first poll takes at least this long
-		f.mu.Unlock()
-	}
-	lb := newRoundRobinLB(t, srvs...)
-	m := NewManager(&config.Config{Servers: map[string]*config.Server{
-		"multi": {Name: "multi", Interval: 10, Endpoints: []string{lb.URL, srvs[0].URL}},
-	}}, api.PoolFor)
-	t.Cleanup(func() { _ = m.Close() })
-	if err := m.Switch("multi"); err != nil {
-		t.Fatal(err)
-	}
-	waitUntil(t, 3*time.Second, "the session", func() bool { return m.Current() != nil })
-	srv := serve(t, m)
+	fakes, srvs := fleettest.NewInstances(t, "a", "b")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{lb.URL, srvs[0].URL}},
+	}})
 
 	for _, c := range []struct {
 		path string
@@ -505,64 +427,23 @@ func TestPOSTBeforeFirstRefresh(t *testing.T) {
 	}{
 		{"/workers/w/actions/pause", multi()},
 		{"/workers/w/actions/restart", multi()},
-		{"/workers/w/actions/pause", multi("pod", srvs[0].URL)},
+		{"/workers/w/actions/pause", multi("instance", "instance-1")},
 		{"/workers/w/concurrency", multi("n", "3")},
 		{"/bulk/pause", multi("names", "w")},
 		{"/bulk/pause", multi("names", "w", "confirm", "1")},
 	} {
-		resp, body := post(t, srv, c.path, c.form, true)
+		resp, body := post(t, f.srv, c.path, c.form, true)
 		if resp.StatusCode != http.StatusConflict || resp.Header.Get("HX-Retarget") != "#banner" ||
-			body != `<p class="banner">Waiting for the first refresh — try again</p>` {
+			body != `<p class="banner">Waiting for the first snapshot of multi…</p>` {
 			t.Errorf("POST %s %v = %d (HX-Retarget %q) %q, want 409 with the waiting banner",
 				c.path, c.form, resp.StatusCode, resp.Header.Get("HX-Retarget"), body)
 		}
 	}
-	if m.Current().History.Latest() != nil {
-		t.Fatal("the first snapshot came in before the POSTs were done")
-	}
 	noPatches(t, fakes...)
 }
 
-// TestActionSkipsEndpointNotRefreshedYet: an endpoint found after the latest
-// snapshot may be a balancer; nothing is sent to it until a refresh shows
-// what it is.
-func TestActionSkipsEndpointNotRefreshedYet(t *testing.T) {
-	for _, pod := range []string{"", "new"} {
-		t.Run("pod="+pod, func(t *testing.T) {
-			fa, fb, aSrv, bSrv := twoFakes(t)
-			src := &mutableSource{eps: []string{aSrv.URL}}
-			m := startManagerBuilding(t, &config.Config{Servers: map[string]*config.Server{
-				"multi": {Name: "multi", Interval: 3600, Endpoints: []string{aSrv.URL}},
-			}}, "multi", func(*config.Server) (*api.Pool, error) { return api.NewPool(src, ""), nil })
-			srv := serve(t, m)
-			units := unitsOf(m.Current().History.Latest())
-			// The first poll ran and the next is an hour away: b, found
-			// since, is in no snapshot.
-			src.set(aSrv.URL, bSrv.URL)
-			units[bSrv.URL] = PodSnapshot{Key: bSrv.URL, Label: config.ShortOrigin(bSrv.URL)}
-
-			form := multi()
-			if pod != "" {
-				form.Set("pod", bSrv.URL)
-			}
-			resp, body := post(t, srv, "/workers/orders/actions/restart", form, true)
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("status = %d, want 200:\n%s", resp.StatusCode, body)
-			}
-			if pod == "" {
-				wantResults(t, body, units, [2]string{aSrv.URL, "ok"}, [2]string{bSrv.URL, "failed (not refreshed yet — try again)"})
-				wantPatches(t, fa, "PATCH /workers/orders/actions/restart")
-			} else {
-				wantResults(t, body, units, [2]string{bSrv.URL, "failed (not refreshed yet — try again)"})
-				noPatches(t, fa)
-			}
-			noPatches(t, fb)
-		})
-	}
-}
-
 func TestActionEscapesName(t *testing.T) {
-	f, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"a/b c": {Status: "Running", Concurrency: 1}})
+	f, fSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"a/b c": {Status: "Running", Concurrency: 1}})
 	srv, _ := newTestServer(t, fSrv)
 
 	for _, c := range []struct {
@@ -585,8 +466,8 @@ func TestActionEscapesName(t *testing.T) {
 }
 
 func TestConcurrencyValidatesAndSkips(t *testing.T) {
-	fa, aSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 8}})
-	fb, bSrv := newFakeVarmq(t, "b", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 4}})
+	fa, aSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 8}})
+	fb, bSrv := fleettest.NewVarmq(t, "b", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 4}})
 	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, n := range []string{"0", "-1", "", "x", "2.5", "8 "} {
@@ -621,17 +502,16 @@ func TestConcurrencyValidatesAndSkips(t *testing.T) {
 // otherwise.
 func TestBulkConfirmUnreachedIsNotAbsent(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
-	cfg := &config.Config{Servers: map[string]*config.Server{
-		"multi": {Name: "multi", Interval: 3600, Endpoints: []string{aSrv.URL, bSrv.URL}},
-	}}
-	m := startManager(t, cfg, "multi")
-	srv := serve(t, m)
+	f := startLive(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 3600, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	}}, "multi")
+	srv := f.srv
 	// The first poll ran and the next is an hour away: this snapshot is the latest.
-	unit := func(endpoint string, workers map[string]*Sample, unreached ...string) PodSnapshot {
-		return PodSnapshot{Key: endpoint, Via: endpoint, Label: endpoint, Workers: workers, Unreached: unreached}
+	unit := func(endpoint string, workers map[string]*fleet.Sample, unreached ...string) fleet.PodSnapshot {
+		return fleet.PodSnapshot{Key: endpoint, Via: endpoint, Label: endpoint, Workers: workers, Unreached: unreached}
 	}
-	m.Current().History.Append(snap(time.Now(),
-		unit(aSrv.URL, map[string]*Sample{"orders": smp("Running", 4, 0, 4, 0)}),
+	f.write("multi", snap(time.Now(),
+		unit(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 0, 4, 0)}),
 		unit(bSrv.URL, nil, "orders"),
 	))
 
@@ -656,7 +536,7 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("confirm step = %d, want 200", resp.StatusCode)
 	}
-	labels := staticLabels(aSrv.URL, bSrv.URL)
+	labels := fleettest.StaticLabels(aSrv.URL, bSrv.URL)
 	for _, want := range []string{
 		"Confirm pause on multi",
 		`<th scope="row" class="name">emails</th>`,
@@ -705,13 +585,14 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 		}
 	}
 
-	t.Run("one pod", func(t *testing.T) {
+	t.Run("one instance", func(t *testing.T) {
 		before := len(patches(fb))
-		_, body := post(t, srv, "/bulk/resume", multi("names", "orders", "pod", aSrv.URL), true)
-		if strings.Count(body, "<td>resume</td>") != 1 || !strings.Contains(body, `<input type="hidden" name="pod" value="`+aSrv.URL+`">`) {
-			t.Errorf("pod-scoped confirm should list one pod and carry it:\n%s", body)
+		a := labels[aSrv.URL]
+		_, body := post(t, srv, "/bulk/resume", multi("names", "orders", "instance", a), true)
+		if strings.Count(body, "<td>resume</td>") != 1 || !strings.Contains(body, `<input type="hidden" name="instance" value="`+a+`">`) {
+			t.Errorf("instance-scoped confirm should list one instance and carry it:\n%s", body)
 		}
-		post(t, srv, "/bulk/resume", multi("names", "orders", "pod", aSrv.URL, "confirm", "1"), true)
+		post(t, srv, "/bulk/resume", multi("names", "orders", "instance", a, "confirm", "1"), true)
 		if got := patches(fb)[before:]; len(got) != 0 {
 			t.Errorf("pod-scoped bulk reached b: %q", got)
 		}
@@ -823,7 +704,7 @@ func TestFailedRefreshKeepsResults(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.fragments(rec,
-		fragment{"results", "results", ResultsView{Results: []ActionResult{{Pod: "a", Key: "http://a:3000", Outcome: "ok"}}, Noun: podNoun}},
+		fragment{"results", "results", ResultsView{Results: []fleet.ActionResult{{Pod: "a", Key: "http://a:3000", Outcome: "ok"}}, Noun: podNoun}},
 		fragment{"dashboard", "live_oob", Page{}})
 	body := rec.Body.String()
 	if rec.Code != http.StatusOK || !strings.Contains(body, `<li class="ok">`) {
@@ -845,84 +726,53 @@ func TestFailedRefreshKeepsResults(t *testing.T) {
 }
 
 // TestNoRefreshForGonePod: an action response never fills #live with other
-// pods' data under a pod the newest snapshot lacks.
+// units' data under a label the newest snapshot lacks.
 func TestNoRefreshForGonePod(t *testing.T) {
-	h := NewHistory(time.Second)
-	h.Append(snap(atTick(0), okPod("http://b", map[string]*Sample{"orders": smp("Running", 1, 0, 0, 0)})))
-	s := &Session{History: h}
+	snaps := []*fleet.Snapshot{snap(atTick(0), okPod("http://b", map[string]*fleet.Sample{"orders": smp("Running", 1, 0, 0, 0)}))}
 	for _, from := range []string{"/", "/workers/orders"} {
 		req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
 		req.Header.Set("HX-Current-URL", "http://127.0.0.1"+from)
-		if set, _, ok := livePage(req, "multi", s, "http://a", "orders"); ok {
-			t.Errorf("from %s: livePage refreshes %s for a gone pod", from, set)
+		if set, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, nil, snaps, "http://a", "orders", ""); ok {
+			t.Errorf("from %s: livePage refreshes %s for a gone unit", from, set)
 		}
-		if _, _, ok := livePage(req, "multi", s, "http://b", "orders"); !ok {
-			t.Errorf("from %s: livePage refuses a reported pod", from)
-		}
-	}
-}
-
-func TestServerSwitchRedirects(t *testing.T) {
-	_, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 1}})
-	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
-		"multi":   {Name: "multi", Interval: 1, Endpoints: []string{fSrv.URL}},
-		"a b&c":   {Name: "a b&c", Interval: 1, Endpoints: []string{"http://b.invalid"}},
-		"staging": {Name: "staging", Interval: 1, Endpoints: []string{"http://s.invalid"}},
-	}}, "multi")
-	srv := serve(t, m)
-
-	for _, name := range []string{"", "nope", "Multi"} {
-		resp, body := post(t, srv, "/server", multi("name", name), true)
-		if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("HX-Redirect") != "" {
-			t.Errorf("POST /server name=%q = %d (HX-Redirect %q), want 400 without redirect", name, resp.StatusCode, resp.Header.Get("HX-Redirect"))
-		}
-		if name != "" && strings.Contains(body, name) {
-			t.Errorf("POST /server name=%q: 400 body echoes the name", name)
-		}
-	}
-	if p := m.Pending(); p != "" {
-		t.Fatalf("a rejected POST /server started switching to %q", p)
-	}
-
-	resp, _ := post(t, srv, "/server", multi("name", "a b&c"), true)
-	if got := resp.Header.Get("HX-Redirect"); resp.StatusCode/100 != 2 || got != "/?server=a+b%26c" {
-		t.Errorf("POST /server name=%q = %d, HX-Redirect %q, want 2xx and /?server=a+b%%26c", "a b&c", resp.StatusCode, got)
-	}
-	waitUntil(t, 3*time.Second, "a b&c active", func() bool { key, _ := m.Active(); return key == "a b&c" })
-
-	// R22: switching never checks the tab's server; this tab still says
-	// multi, and a Retry for a failed server posts that server.
-	for _, server := range []string{"multi", "staging", ""} {
-		resp, _ := post(t, srv, "/server", url.Values{"server": {server}, "name": {"staging"}}, true)
-		if got := resp.Header.Get("HX-Redirect"); got != "/?server=staging" {
-			t.Errorf("POST /server name=staging server=%q: HX-Redirect %q, want /?server=staging", server, got)
+		if _, _, ok := livePage(req, "multi", instanceNoun, 5*time.Second, nil, snaps, "http://b", "orders", ""); !ok {
+			t.Errorf("from %s: livePage refuses a reported unit", from)
 		}
 	}
 }
 
-// serveBalanced serves the web UI over a Manager whose only server, "multi",
-// polls endpoints every second, once its latest snapshot has exactly the
-// unit keys want, in any order.
-func serveBalanced(t *testing.T, endpoints []string, want ...string) (*httptest.Server, *Manager) {
-	t.Helper()
-	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
-		"multi": {Name: "multi", Interval: 1, Endpoints: endpoints},
-	}}, "multi")
-	want = slices.Sorted(slices.Values(want))
-	waitUntil(t, 5*time.Second, "units "+strings.Join(want, " "), func() bool {
-		return slices.Equal(slices.Sorted(slices.Values(unitKeys(m.Current().History.Latest()))), want)
-	})
-	return serve(t, m), m
+// TestLiveRefreshBreaksAtGaps (R39): the #live an action response
+// refreshes draws its charts as the page's poll does, by time and broken
+// where polls are missing: it knows the server's interval.
+func TestLiveRefreshBreaksAtGaps(t *testing.T) {
+	var snaps []*fleet.Snapshot
+	for _, n := range []int{0, 1, 2, 480, 481, 482} { // 40 minutes with none between
+		s := smp("Running", 1, 0, 0, 0)
+		s.CompletedRate, s.RateOK = 1, true
+		snaps = append(snaps, snap(atTick(n), okPod("http://a", map[string]*fleet.Sample{"orders": s})))
+	}
+	req := httptest.NewRequest(http.MethodPost, "/workers/orders/actions/pause", nil)
+	req.Header.Set("HX-Current-URL", "http://127.0.0.1/workers/orders?server=multi")
+	set, p, ok := livePage(req, "multi", instanceNoun, 5*time.Second, nil, snaps, "", "orders", "")
+	if !ok || set != "detail" {
+		t.Fatalf("livePage = %q, %v; want the detail", set, ok)
+	}
+	body := run(t, set, "live_oob", p)
+	_, chart, _ := strings.Cut(body, `<figure class="chart">`)
+	chart, _, _ = strings.Cut(chart, "</figure>")
+	if n := strings.Count(chart, "<polyline"); n != 2 {
+		t.Errorf("the refreshed chart has %d lines, want 2, broken at the 40 minutes with no poll:\n%s", n, chart)
+	}
 }
 
 // resultLine is the results line of unit u reading outcome.
-func resultLine(u PodSnapshot, outcome string) string {
+func resultLine(u fleet.PodSnapshot, outcome string) string {
 	return `<span class="pod" title="` + u.Tip() + `">` + u.Label + `</span> <span class="outcome">` + outcome + `</span>`
 }
 
 // wantResults fails the test unless the results of body have exactly one
 // line per key of want, in want's order, reading its outcome.
-func wantResults(t *testing.T, body string, units map[string]PodSnapshot, want ...[2]string) {
+func wantResults(t *testing.T, body string, units map[string]fleet.PodSnapshot, want ...[2]string) {
 	t.Helper()
 	results := html.UnescapeString(resultsOf(body))
 	if n := strings.Count(results, "<li "); n != len(want) {
@@ -943,7 +793,7 @@ func wantResults(t *testing.T, body string, units map[string]PodSnapshot, want .
 }
 
 // totalPatches is how many PATCHes fakes received between them.
-func totalPatches(fakes ...*fakeVarmq) int {
+func totalPatches(fakes ...*fleettest.Varmq) int {
 	n := 0
 	for _, f := range fakes {
 		n += len(patches(f))
@@ -952,24 +802,24 @@ func totalPatches(fakes ...*fakeVarmq) int {
 }
 
 // wantWorker fails the test unless cond holds for worker w on each of fakes.
-func wantWorker(t *testing.T, what string, cond func(fakeWorker) bool, fakes ...*fakeVarmq) {
+func wantWorker(t *testing.T, what string, cond func(fleettest.Worker) bool, fakes ...*fleettest.Varmq) {
 	t.Helper()
 	for _, f := range fakes {
-		if w, _ := f.worker("w"); !cond(w) {
+		if w, _ := f.Worker("w"); !cond(w) {
 			t.Errorf("w on %s: %+v, want %s", f.Instance, w, what)
 		}
 	}
 }
 
-func paused(w fakeWorker) bool { return w.Status == "Paused" }
+func paused(w fleettest.Worker) bool { return w.Status == "Paused" }
 
 // TestActionMergedReachesEveryInstance: a merged action through a balancer
 // reaches every instance behind it, one result each, within the budget.
 func TestActionMergedReachesEveryInstance(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
-	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
-	units := unitsOf(m.Current().History.Latest())
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := fleet.UnitsOf(f.latest("multi"))
 
 	resp, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusOK {
@@ -982,8 +832,8 @@ func TestActionMergedReachesEveryInstance(t *testing.T) {
 		}
 	}
 	wantWorker(t, "paused", paused, fakes...)
-	if n := totalPatches(fakes...); n > attemptCap(3) {
-		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
+	if n := totalPatches(fakes...); n > budget3 {
+		t.Errorf("%d PATCHes, want at most %d", n, budget3)
 	}
 }
 
@@ -991,41 +841,41 @@ func TestActionMergedReachesEveryInstance(t *testing.T) {
 // from the latest sample; varmq's 409 there, for a concurrency it already
 // has, is no change.
 func TestActionBalancedRepeatIsNoChange409(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	fakes[1].mu.Lock()
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	fakes[1].Mu.Lock()
 	fakes[1].Workers["w"].Concurrency = 4
-	fakes[1].mu.Unlock()
-	lb := newRoundRobinLB(t, srvs...)
-	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
-	units := unitsOf(m.Current().History.Latest())
+	fakes[1].Mu.Unlock()
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := fleet.UnitsOf(f.latest("multi"))
 
 	_, body := post(t, srv, "/workers/w/concurrency", multi("n", "4"), true)
 	wantResults(t, body, units,
-		[2]string{"#a", "ok"}, [2]string{"#b", "no change (" + sameConcurrency + ")"}, [2]string{"#c", "ok"})
-	wantWorker(t, "concurrency 4", func(w fakeWorker) bool { return w.Concurrency == 4 }, fakes[0], fakes[2])
+		[2]string{"#a", "ok"}, [2]string{"#b", "no change (" + fleettest.SameConcurrency + ")"}, [2]string{"#c", "ok"})
+	wantWorker(t, "concurrency 4", func(w fleettest.Worker) bool { return w.Concurrency == 4 }, fakes[0], fakes[2])
 	if len(patches(fakes[1])) == 0 {
 		t.Error("b was skipped: a balanced unit's PATCH is always sent")
 	}
-	if n := totalPatches(fakes...); n > attemptCap(3) {
-		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
+	if n := totalPatches(fakes...); n > budget3 {
+		t.Errorf("%d PATCHes, want at most %d", n, budget3)
 	}
 }
 
 // TestActionBalancedUnreachableInstance: an instance that left the balancer
 // gets a failure naming the attempts, the others their outcome.
 func TestActionBalancedUnreachableInstance(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
-	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
-	units := unitsOf(m.Current().History.Latest())
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := fleet.UnitsOf(f.latest("multi"))
 	srvs[2].Close() // c leaves: the balancer answers its turns with a bare 502
 
 	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
 	wantResults(t, body, units, [2]string{"#a", "ok"}, [2]string{"#b", "ok"},
 		[2]string{"#c", "failed (not reached through the load balancer after 18 tries)"})
 	wantWorker(t, "paused", paused, fakes[0], fakes[1])
-	if n := totalPatches(fakes...); n > attemptCap(3) {
-		t.Errorf("%d PATCHes, want at most %d", n, attemptCap(3))
+	if n := totalPatches(fakes...); n > budget3 {
+		t.Errorf("%d PATCHes, want at most %d", n, budget3)
 	}
 }
 
@@ -1033,10 +883,10 @@ func TestActionBalancedUnreachableInstance(t *testing.T) {
 // balancer is tried again within the budget; with no other answer from it,
 // it fails with varmq's error.
 func TestActionBalancedErrorIsRetried(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
-	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
-	units := unitsOf(m.Current().History.Latest())
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := fleet.UnitsOf(f.latest("multi"))
 	setActionStatus(fakes[1], "w", http.StatusInternalServerError)
 
 	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
@@ -1058,25 +908,25 @@ func TestActionBalancedErrorIsRetried(t *testing.T) {
 // no head start the balancer can reach a first; a's own PATCH is then the
 // duplicate and reads no change.)
 func TestConcurrencyMixedScope(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b")
+	fakes, srvs := fleettest.NewInstances(t, "a", "b")
 	var gets, sets atomic.Uint64
-	lb := newFakeLB(t, srvs, func(r *http.Request) uint64 {
+	lb := fleettest.NewLB(t, srvs, func(r *http.Request) uint64 {
 		if r.Method != http.MethodPatch {
 			return gets.Add(1) - 1
 		}
 		time.Sleep(100 * time.Millisecond)
 		return sets.Add(1) - 1
 	})
-	srv, m := serveBalanced(t, []string{lb.URL, srvs[0].URL}, srvs[0].URL, "#b")
-	latest := m.Current().History.Latest()
+	srv, f := serveBalanced(t, []string{lb.URL, srvs[0].URL}, srvs[0].URL, "#b")
+	latest := f.latest("multi")
 	var want [][2]string
 	for _, u := range latest.Pods {
 		want = append(want, [2]string{u.Key, "ok"})
 	}
 
 	_, body := post(t, srv, "/workers/w/concurrency", multi("n", "4"), true)
-	wantResults(t, body, unitsOf(latest), want...)
-	wantWorker(t, "concurrency 4", func(w fakeWorker) bool { return w.Concurrency == 4 }, fakes...)
+	wantResults(t, body, fleet.UnitsOf(latest), want...)
+	wantWorker(t, "concurrency 4", func(w fleettest.Worker) bool { return w.Concurrency == 4 }, fakes...)
 	set := "PATCH /workers/w/config/concurrency/4"
 	wantPatches(t, fakes[0], set, set) // its own, then the balancer's duplicate
 	wantPatches(t, fakes[1], set)
@@ -1087,13 +937,11 @@ func TestConcurrencyMixedScope(t *testing.T) {
 // action gets through it are sized by all of them, not by the units it
 // wants there.
 func TestActionBudgetCountsEveryInstanceBehind(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
-	srv, m := serveBalanced(t, []string{lb.URL, srvs[1].URL, srvs[2].URL}, "#a", srvs[1].URL, srvs[2].URL)
-	waitUntil(t, 5*time.Second, "3 instances behind the balancer", func() bool {
-		return m.Current().History.Latest().Behind[lb.URL] == 3
-	})
-	units := unitsOf(m.Current().History.Latest())
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL, srvs[1].URL, srvs[2].URL}, "#a", srvs[1].URL, srvs[2].URL)
+	f.waitFor("multi", "3 instances behind the balancer", func(s *fleet.Snapshot) bool { return s.Behind[lb.URL] == 3 })
+	units := fleet.UnitsOf(f.latest("multi"))
 	srvs[0].Close() // a leaves: the balancer answers its turns with a bare 502
 
 	_, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
@@ -1104,50 +952,21 @@ func TestActionBudgetCountsEveryInstanceBehind(t *testing.T) {
 	wantWorker(t, "paused", paused, fakes[1], fakes[2])
 }
 
-// TestActionThroughRandomBalancerReachesItsInstance: behind a balancer that
-// picks at random among a, b and c, where b and c are also listed by their
-// own addresses, a merged action reaches a. Its budget counts all three
-// instances, which makes a miss about 1 in 1500 (it was 1 in 11 when only
-// the wanted unit counted), so 100 actions allow 2.
-func TestActionThroughRandomBalancerReachesItsInstance(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRandomLB(t, srvs...)
-	pool, tr := lbPoll(t, lb.URL, srvs[1].URL, srvs[2].URL)
-	latest := pollUntil(t, pool, tr, 30, "#a and 3 instances behind the balancer", func(s *Snapshot) bool {
-		return slices.Contains(unitKeys(s), "#a") && s.Behind[lb.URL] == 3
-	})
-	sc, err := scopeOf(pool.Clients(), latest, "", instanceNoun)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	misses := 0
-	for range 100 {
-		for _, res := range act(context.Background(), sc, unitsOf(latest), instanceNoun, []string{"w"}, actionSender("pause"))[0] {
-			if res.Key == "#a" && res.Outcome != "ok" {
-				misses++
-			}
-		}
-	}
-	if misses > 2 {
-		t.Errorf("a was not reached by %d of 100 actions, want at most 2", misses)
-	}
-}
-
 // TestActionThroughHangingBalancerHasADeadline: a balancer that holds every
-// request costs an action at most balancerActionDeadline, not the attempt
-// budget times the client timeout, and the instances read not reached.
+// request costs an action at most fleet.BalancerActionDeadline, not the
+// attempt budget times the client timeout, and the instances read not
+// reached.
 func TestActionThroughHangingBalancerHasADeadline(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb, hang := newHangingLB(t, newRoundRobinLB(t, srvs...))
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb, hang := fleettest.NewHangingLB(t, fleettest.NewRoundRobinLB(t, srvs...))
 	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
 	hang.Store(true)
 
 	start := time.Now()
 	resp, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
-	// The deadline, then at most settleWait for the refresh.
-	if elapsed := time.Since(start); elapsed > balancerActionDeadline+settleWait+time.Second {
-		t.Errorf("the action took %v, want it cut at %v", elapsed, balancerActionDeadline)
+	// The deadline, then at most fleet.SettleWait for the refresh.
+	if elapsed := time.Since(start); elapsed > fleet.BalancerActionDeadline+fleet.SettleWait+time.Second {
+		t.Errorf("the action took %v, want it cut at %v", elapsed, fleet.BalancerActionDeadline)
 	}
 	results := resultsOf(body)
 	if resp.StatusCode != http.StatusOK || strings.Count(results, "failed (not reached through the load balancer after ") != 3 {
@@ -1158,8 +977,8 @@ func TestActionThroughHangingBalancerHasADeadline(t *testing.T) {
 
 // TestRestartRefusedWithBalancedScope: restart never goes through a balancer.
 func TestRestartRefusedWithBalancedScope(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs[0], srvs[1])
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs[0], srvs[1])
 	srv, _ := serveBalanced(t, []string{lb.URL, srvs[2].URL}, "#a", "#b", srvs[2].URL)
 
 	resp, body := post(t, srv, "/workers/w/actions/restart", multi(), true)
@@ -1173,28 +992,27 @@ func TestRestartRefusedWithBalancedScope(t *testing.T) {
 // shown instead of its controls.
 const oneUnitCopy = "A load balancer picks which instance answers, so actions here would reach a random one. Use All instances (merged), or list the instances' own addresses in the server config."
 
-// TestOneBalancedUnitRefused: nothing is sent to one balanced unit, nor to a
-// balancer's own address: the balancer would pick the instance.
+// TestOneBalancedUnitRefused: nothing is sent to one balanced unit: the
+// balancer would pick the instance.
 func TestOneBalancedUnitRefused(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
-	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	one := fleet.UnitsOf(f.latest("multi"))["#a"].Label
 
-	for _, pod := range []string{"#a", lb.URL} {
-		for _, c := range []struct {
-			path string
-			form url.Values
-		}{
-			{"/workers/w/actions/pause", multi("pod", pod)},
-			{"/workers/w/actions/restart", multi("pod", pod)},
-			{"/workers/w/concurrency", multi("pod", pod, "n", "3")},
-			{"/bulk/pause", multi("pod", pod, "names", "w")},
-			{"/bulk/pause", multi("pod", pod, "names", "w", "confirm", "1")},
-		} {
-			resp, body := post(t, srv, c.path, c.form, true)
-			if resp.StatusCode != http.StatusBadRequest || html.UnescapeString(body) != oneUnitCopy+"\n" {
-				t.Errorf("POST %s pod=%s = %d %q, want 400 with the one-unit refusal", c.path, pod, resp.StatusCode, body)
-			}
+	for _, c := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/workers/w/actions/pause", multi("instance", one)},
+		{"/workers/w/actions/restart", multi("instance", one)},
+		{"/workers/w/concurrency", multi("instance", one, "n", "3")},
+		{"/bulk/pause", multi("instance", one, "names", "w")},
+		{"/bulk/pause", multi("instance", one, "names", "w", "confirm", "1")},
+	} {
+		resp, body := post(t, srv, c.path, c.form, true)
+		if resp.StatusCode != http.StatusBadRequest || html.UnescapeString(body) != oneUnitCopy+"\n" {
+			t.Errorf("POST %s instance=%s = %d %q, want 400 with the one-unit refusal", c.path, one, resp.StatusCode, body)
 		}
 	}
 	noPatches(t, fakes...)
@@ -1204,11 +1022,11 @@ func TestOneBalancedUnitRefused(t *testing.T) {
 // there, once; the instances behind the balancer through it. The confirm
 // panel and the results list the units by number, as the pages do.
 func TestMixedScope(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs[0], srvs[1])
-	srv, m := serveBalanced(t, []string{lb.URL, srvs[2].URL}, "#a", "#b", srvs[2].URL)
-	latest := m.Current().History.Latest()
-	units := unitsOf(latest)
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs[0], srvs[1])
+	srv, f := serveBalanced(t, []string{lb.URL, srvs[2].URL}, "#a", "#b", srvs[2].URL)
+	latest := f.latest("multi")
+	units := fleet.UnitsOf(latest)
 	var head strings.Builder
 	var want [][2]string
 	for i, u := range latest.Pods {
@@ -1231,16 +1049,16 @@ func TestMixedScope(t *testing.T) {
 // TestDeadBalancerUnit: a balancer endpoint no instance answered is a unit
 // that fails with its error; nothing is sent to it, not even directly.
 func TestDeadBalancerUnit(t *testing.T) {
-	fakes, srvs := newFakes(t, "a")
-	lb := newRoundRobinLB(t, srvs...)
-	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
-		"multi": {Name: "multi", Interval: 3600, Endpoints: []string{lb.URL}},
+	fakes, srvs := fleettest.NewInstances(t, "a")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	f := startLive(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 3600, Endpoints: []string{lb.URL}},
 	}}, "multi")
-	srv := serve(t, m)
+	srv := f.srv
 	// The first poll ran and the next is an hour away: this snapshot is the latest.
-	dead := PodSnapshot{Key: lb.URL, Via: lb.URL, Label: "instance-1", Balanced: true, Err: "x"}
-	m.Current().History.Append(snap(time.Now(), dead))
-	units := unitsOf(m.Current().History.Latest())
+	dead := fleet.PodSnapshot{Key: lb.URL, Via: lb.URL, Label: "instance-1", Balanced: true, Err: "x"}
+	f.write("multi", snap(time.Now(), dead))
+	units := fleet.UnitsOf(f.latest("multi"))
 
 	if resp, _ := post(t, srv, "/workers/w/actions/restart", multi(), true); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("restart with a dead balancer unit in scope = %d, want 400", resp.StatusCode)
@@ -1249,7 +1067,7 @@ func TestDeadBalancerUnit(t *testing.T) {
 	if want := `<th title="` + lb.URL + `">instance-1<small class="err">x</small></th>`; !strings.Contains(body, want) {
 		t.Errorf("confirm panel lacks the dead unit's column %q:\n%s", want, body)
 	}
-	// Last: its response polls, and the next snapshot finds the endpoint direct.
+	// Last: its response pokes, and the next snapshot finds the endpoint direct.
 	_, body = post(t, srv, "/workers/w/actions/pause", multi(), true)
 	wantResults(t, body, units, [2]string{lb.URL, "failed (x)"})
 	noPatches(t, fakes...)
@@ -1258,13 +1076,13 @@ func TestDeadBalancerUnit(t *testing.T) {
 // TestBulkConfirmColumnsAreUnits: behind a balancer, the confirm panel's
 // columns are the instances, and the bulk action reaches each one per worker.
 func TestBulkConfirmColumnsAreUnits(t *testing.T) {
-	fakes, srvs := newFakes(t, "a", "b", "c")
-	fakes[0].mu.Lock()
-	fakes[0].Workers["v"] = &fakeWorker{Status: "Running", Concurrency: 1}
-	fakes[0].mu.Unlock()
-	lb := newRoundRobinLB(t, srvs...)
-	srv, m := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
-	units := unitsOf(m.Current().History.Latest())
+	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	fakes[0].Mu.Lock()
+	fakes[0].Workers["v"] = &fleettest.Worker{Status: "Running", Concurrency: 1}
+	fakes[0].Mu.Unlock()
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	units := fleet.UnitsOf(f.latest("multi"))
 
 	_, body := post(t, srv, "/bulk/pause", multi("names", "w", "names", "v"), true)
 	var head strings.Builder
@@ -1295,7 +1113,7 @@ func TestBulkConfirmColumnsAreUnits(t *testing.T) {
 		}
 	}
 	wantWorker(t, "paused", paused, fakes...)
-	if w, _ := fakes[0].worker("v"); w.Status != "Paused" {
+	if w, _ := fakes[0].Worker("v"); w.Status != "Paused" {
 		t.Errorf("v on a: %+v, want paused", w)
 	}
 }
@@ -1330,5 +1148,278 @@ func TestActionResponsesUseNoun(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestActionRefusedAfterEndpointEdit: a snapshot polled under the
+// server's previous endpoints names units the config no longer lists; an
+// action on it is refused, nothing sent, until a snapshot under the
+// edited config comes — the token read now must not go to the old ones.
+func TestActionRefusedAfterEndpointEdit(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}, Token: testToken},
+	}})
+	f.claim()
+	f.write("multi", snap(time.Now(),
+		labelled(okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1")))
+	f.setConfig(&config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{bSrv.URL}, Token: testToken},
+	}})
+
+	before := f.pokes("multi")
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if want := `<p class="banner">` + html.EscapeString(fleet.ConfigChangedMsg("multi")) + `</p>`; resp.StatusCode != http.StatusConflict || body != want {
+		t.Errorf("POST after the edit = %d %q, want 409 with %q", resp.StatusCode, body, want)
+	}
+	if f.pokes("multi") != before+1 {
+		t.Errorf("pokes %d, want the server poked once for a snapshot under the edit", f.pokes("multi")-before)
+	}
+	noPatches(t, fa, fb)
+
+	// The edited config's first snapshot: acted on, at the new endpoint.
+	f.write("multi", snap(time.Now(),
+		labelled(okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1")))
+	if resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true); resp.StatusCode != http.StatusOK {
+		t.Errorf("POST under the edited config = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	noPatches(t, fa)
+	wantPatches(t, fb, "PATCH /workers/orders/actions/pause")
+}
+
+// TestActionRefusedWhenStale: with a stale newest snapshot nothing is sent:
+// what the pages show may no longer be the server. With no collector running
+// the refusal is at once; with one, the server is poked and given
+// fleet.SettleWait to answer first.
+func TestActionRefusedWhenStale(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	}})
+	f.claim()
+	f.write("multi", snap(time.Now().Add(-60*time.Second),
+		labelled(okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1"),
+		labelled(okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2")))
+	f.release()
+
+	// About a minute old: the age is rounded to the second when refused.
+	down := regexp.MustCompile(`^<p class="banner">No new data for 1m\ds — vartop web is not collecting\.</p>$`)
+	for _, c := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/workers/orders/actions/pause", multi()},
+		{"/workers/orders/actions/stop", multi("instance", "instance-1")},
+		{"/workers/orders/concurrency", multi("n", "9")},
+		{"/bulk/pause", multi("names", "orders")},
+		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+	} {
+		start := time.Now()
+		resp, body := post(t, f.srv, c.path, c.form, true)
+		if resp.StatusCode != http.StatusConflict || !down.MatchString(body) {
+			t.Errorf("POST %s %v = %d %q, want 409 with %q", c.path, c.form, resp.StatusCode, body, down)
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("POST %s took %v: no collector answers a poke, so nothing is waited for", c.path, took)
+		}
+	}
+
+	// A collector holds the lease but does not answer: poked, then refused.
+	f.claim()
+	before := f.pokes("multi")
+	start := time.Now()
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">No new data for 1m`) {
+		t.Errorf("POST with a collector that does not answer = %d %q, want 409 with the stale copy", resp.StatusCode, body)
+	}
+	if took := time.Since(start); took < fleet.SettleWait/2 || f.pokes("multi") != before+1 {
+		t.Errorf("POST took %v with %d pokes, want the server poked once and waited for", took, f.pokes("multi")-before)
+	}
+	noPatches(t, fa, fb)
+}
+
+// TestActionPokesAndShowsResult: after an action the server is poked, and
+// the response shows the snapshot taken after the poke: here the only one,
+// with the next regular poll an hour away.
+func TestActionPokesAndShowsResult(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	f := startLive(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 3600, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	}}, "multi")
+	first := f.latest("multi")
+	before := f.pokes("multi")
+
+	req := postRequest(t, f.srv, "/workers/orders/actions/pause", multi())
+	req.Header.Set("HX-Current-URL", f.srv.URL+"/workers/orders?server=multi")
+	resp, body := send(t, f.srv, req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pause = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	if n := f.pokes("multi") - before; n != 1 {
+		t.Errorf("the action poked %d times, want once", n)
+	}
+	if live := liveOOB(body); !strings.Contains(live, ">Paused</span>") {
+		t.Errorf("response's #live should show orders paused, from the poked snapshot:\n%s", live)
+	}
+	if latest := f.latest("multi"); !latest.At.After(first.At) {
+		t.Error("no snapshot was taken after the poke")
+	}
+}
+
+// patchBreaker makes every PATCH a fresh connection sends to its hosts
+// panic, on the goroutine that sends it: a stand-in for a reply that
+// breaks whatever reads it, on a goroutine an action fans out to. It works
+// through http.DefaultTransport's Proxy func, which the api package's fresh
+// connections copy when their client is made.
+type patchBreaker struct {
+	mu    sync.Mutex
+	hosts map[string]bool
+}
+
+// newPatchBreaker installs a breaker until the test ends. Make it before
+// the servers it breaks, so that it is removed after they have stopped.
+func newPatchBreaker(t *testing.T) *patchBreaker {
+	t.Helper()
+	b := &patchBreaker{hosts: make(map[string]bool)}
+	tr := http.DefaultTransport.(*http.Transport)
+	orig := tr.Proxy
+	tr.Proxy = func(req *http.Request) (*url.URL, error) {
+		b.mu.Lock()
+		broken := b.hosts[req.URL.Host]
+		b.mu.Unlock()
+		if broken && req.Method == http.MethodPatch {
+			panic("reply broke")
+		}
+		return orig(req)
+	}
+	t.Cleanup(func() { tr.Proxy = orig })
+	return b
+}
+
+// add breaks the host of the URL u.
+func (b *patchBreaker) add(t *testing.T, u string) {
+	t.Helper()
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.hosts[parsed.Host] = true
+}
+
+// TestActionPanicIs500 (carried from task 4): a send that panics on a
+// goroutine the action fans out to — here an attempt through a balancer —
+// fails that request with a 500, and vartop web serves on.
+func TestActionPanicIs500(t *testing.T) {
+	b := newPatchBreaker(t)
+	fakes, srvs := fleettest.NewInstances(t, "a", "b")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	b.add(t, lb.URL)
+	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b")
+
+	resp, body := post(t, srv, "/workers/w/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(body, "internal error: reply broke") {
+		t.Errorf("an action whose send panics = %d %q, want 500 naming the panic", resp.StatusCode, body)
+	}
+	if status, body := fetch(t, srv, "/?server=multi", false); status != http.StatusOK || !strings.Contains(body, ">w<") {
+		t.Errorf("GET / after the panic = %d, want the dashboard: the server serves on", status)
+	}
+	noPatches(t, fakes...)
+}
+
+// labelled is u labelled label.
+func labelled(u fleet.PodSnapshot, label string) fleet.PodSnapshot {
+	u.Label = label
+	return u
+}
+
+// TestOldFormPOSTSendsNothing (R22): a form from before labels — a tab
+// left open across the upgrade — names its unit by key, under pod= on
+// every server. A POST takes the unit parameter as it is: a key is no
+// label, and the other noun's parameter is no unit of this server; either
+// is refused and nothing is sent, where reading it as absent would act on
+// every unit. An empty one is the old merged form: it acts on every unit.
+func TestOldFormPOSTSendsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server config.Server
+		param  string // this server's
+		other  string // the other noun's
+		names  string // a unit by the label the server gives it
+	}{
+		{"static", config.Server{}, "instance", "pod", "instance-1"},
+		{"kubernetes", kubernetesServer, "pod", "instance", "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			varmqs, fakes := threeVarmqs(t)
+			srv := serveUnits(t, tc.server, fakes...)
+			for _, unit := range []url.Values{
+				{tc.param: {fakes[0].URL}},
+				{tc.param: {"#a"}},
+				{tc.other: {fakes[0].URL}},
+				{tc.other: {"#a"}},
+				{tc.other: {tc.names}},
+			} {
+				for _, c := range []struct {
+					path string
+					form url.Values
+				}{
+					{"/workers/orders/actions/pause", multi()},
+					{"/workers/orders/concurrency", multi("n", "9")},
+					{"/bulk/pause", multi("names", "orders")},
+					{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+				} {
+					for k, v := range unit {
+						c.form[k] = v
+					}
+					resp, body := post(t, srv, c.path, c.form, true)
+					if resp.StatusCode != http.StatusConflict || resp.Header.Get("HX-Retarget") != "#banner" {
+						t.Errorf("POST %s %v = %d %q, want 409 in the banner", c.path, c.form, resp.StatusCode, body)
+					}
+				}
+			}
+			noPatches(t, varmqs...)
+
+			// The old merged form, with the other noun's parameter empty.
+			resp, body := post(t, srv, "/workers/orders/actions/pause", multi(tc.other, ""), true)
+			if resp.StatusCode != http.StatusOK || strings.Count(resultsOf(body), `<li class="ok">`) != 3 {
+				t.Errorf("POST with an empty %s= = %d, want every unit paused:\n%s", tc.other, resp.StatusCode, resultsOf(body))
+			}
+		})
+	}
+}
+
+// TestActionResponseShowsStale: an action's refreshed #live, like a page,
+// shows no current value once the newest snapshot is stale — here because
+// no collector answers the poke after the action, and the snapshot ages past
+// the threshold while the response waits for one.
+func TestActionResponseShowsStale(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}}, // stale after 3·2s + 2s = 8s
+	}})
+	// A collector runs, as far as the lease says, but answers no poke. It
+	// claimed before the snapshot was taken, which is its own (R44); its
+	// lease, 7s old, holds for 8s more.
+	now := time.Now()
+	f.claimAt(now.Add(-7 * time.Second))
+	// 6.2s old: fresh to bind the action with 1.8s to spare (for the write
+	// and the POST); stale once the response has waited out the whole
+	// SettleWait (2s) for a snapshot no collector takes, 8.2s or more old.
+	// The two margins can only sum to SettleWait; the response's is sure,
+	// time moving only forward.
+	f.write("multi", snap(now.Add(-6200*time.Millisecond),
+		labelled(okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1"),
+		labelled(okPod(bSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2")))
+
+	req := postRequest(t, f.srv, "/workers/orders/actions/pause", multi())
+	req.Header.Set("HX-Current-URL", f.srv.URL+"/?server=multi")
+	resp, body := send(t, f.srv, req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pause = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	if live := liveOOB(body); !strings.Contains(live, `<td class="num">—</td>`) || strings.Contains(live, `<td class="num">3</td>`) {
+		t.Errorf("the refreshed #live of a stale server shows current values:\n%s", live)
 	}
 }

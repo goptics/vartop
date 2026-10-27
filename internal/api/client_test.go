@@ -107,6 +107,49 @@ func TestGetWorker(t *testing.T) {
 	}
 }
 
+// TestPooledTransportReusesMoreConns: http.DefaultTransport keeps 2 idle
+// connections per host, so a poll that fetches 8 workers at once reconnects 6
+// times on the next one. The client's transport keeps them all: two rounds of
+// 8 concurrent requests open 8 connections, not 14.
+func TestPooledTransportReusesMoreConns(t *testing.T) {
+	const workers = 8
+	var conns atomic.Int32
+	var round sync.WaitGroup // every request of a round is in flight together
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		round.Done()
+		round.Wait()
+		_, _ = w.Write([]byte(`{"name":"w"}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "")
+
+	for range 2 {
+		round.Add(workers)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Go(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if _, err := c.GetWorkerCtx(ctx, "w"); err != nil {
+					t.Errorf("GetWorkerCtx: %v", err)
+				}
+			})
+		}
+		wg.Wait()
+		time.Sleep(50 * time.Millisecond) // let the finished connections return to the idle pool
+	}
+
+	if got := conns.Load(); got > workers {
+		t.Errorf("%d connections opened for 2 rounds of %d concurrent requests, want at most %d (idle ones reused)", got, workers, workers)
+	}
+}
+
 func TestGetWorkerInvalidJSON(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusOK, nil, "not json")
 	if _, err := NewClient(srv.URL, "").GetWorker("w"); err == nil {

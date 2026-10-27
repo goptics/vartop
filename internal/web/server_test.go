@@ -2,141 +2,25 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"html"
 	"html/template"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/store"
 )
-
-// testToken is the token of every newTestServer server; no response may carry it.
-const testToken = "s3cr3t-tok"
-
-// newTestServer serves the web UI over a Manager whose active server, "multi",
-// polls the given fake varmqs every second with testToken. A second
-// configured server, "b", points at an unreachable endpoint, for switch
-// tests. It returns once the first snapshot is in. The web server and the
-// Manager are closed when the test ends, before fakes created earlier.
-func newTestServer(t *testing.T, fakes ...*httptest.Server) (*httptest.Server, *Manager) {
-	t.Helper()
-	endpoints := make([]string, len(fakes))
-	for i, f := range fakes {
-		endpoints[i] = f.URL
-	}
-	cfg := &config.Config{Servers: map[string]*config.Server{
-		"multi": {Name: "multi", Interval: 1, Endpoints: endpoints, Token: testToken},
-		"b":     {Name: "b", Interval: 1, Endpoints: []string{"http://b.invalid"}, Token: testToken},
-	}}
-	m := startManager(t, cfg, "multi")
-	return serve(t, m), m
-}
-
-// startManager returns a Manager over cfg (pools from api.PoolFor) with the
-// server keyed name active and its first snapshot in. It is closed when the
-// test ends.
-func startManager(t *testing.T, cfg *config.Config, name string) *Manager {
-	t.Helper()
-	return startManagerBuilding(t, cfg, name, api.PoolFor)
-}
-
-// startManagerBuilding is startManager with the pools made by build.
-func startManagerBuilding(t *testing.T, cfg *config.Config, name string, build func(*config.Server) (*api.Pool, error)) *Manager {
-	t.Helper()
-	m := NewManager(cfg, build)
-	t.Cleanup(func() { _ = m.Close() })
-	if err := m.Switch(name); err != nil {
-		t.Fatalf("Switch(%s): %v", name, err)
-	}
-	waitUntil(t, 3*time.Second, "first snapshot", func() bool {
-		s := m.Current()
-		return s != nil && s.History.Latest() != nil
-	})
-	return m
-}
-
-// serve starts the web UI for m on a listener from Listen, allowing the
-// hosts AllowedHosts gives for it. It is closed when the test ends.
-func serve(t *testing.T, m *Manager) *httptest.Server {
-	t.Helper()
-	ln, err := Listen("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	h, err := NewHandler(m, AllowedHosts(ln))
-	if err != nil {
-		_ = ln.Close()
-		t.Fatalf("NewHandler: %v", err)
-	}
-	srv := httptest.NewUnstartedServer(h)
-	_ = srv.Listener.Close()
-	srv.Listener = ln
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-// twoFakes starts two fake pods: orders runs on both, emails only on a.
-func twoFakes(t *testing.T) (fa, fb *fakeVarmq, aSrv, bSrv *httptest.Server) {
-	t.Helper()
-	fa, aSrv = newFakeVarmq(t, "a", map[string]*fakeWorker{
-		"orders": {Status: "Running", Concurrency: 4, Busy: 1},
-		"emails": {Status: "Paused", Concurrency: 2},
-	})
-	fb, bSrv = newFakeVarmq(t, "b", map[string]*fakeWorker{
-		"orders": {Status: "Running", Concurrency: 4, Busy: 2},
-	})
-	return fa, fb, aSrv, bSrv
-}
-
-// send performs req against srv and returns the response and its body.
-func send(t *testing.T, srv *httptest.Server, req *http.Request) (*http.Response, string) {
-	t.Helper()
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", req.Method, req.URL, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("%s %s: read body: %v", req.Method, req.URL, err)
-	}
-	return resp, string(body)
-}
-
-// fetch GETs path from srv, as htmx does when hx is set, and returns the
-// status and body.
-func fetch(t *testing.T, srv *httptest.Server, path string, hx bool) (int, string) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hx {
-		req.Header.Set("HX-Request", "true")
-	}
-	resp, body := send(t, srv, req)
-	return resp.StatusCode, body
-}
-
-func portOf(t *testing.T, addr string) string {
-	t.Helper()
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return port
-}
 
 func TestListenRejectsNonLoopback(t *testing.T) {
 	for _, addr := range []string{"0.0.0.0:0", ":0", "192.0.2.1:0", "[::]:0"} {
@@ -281,6 +165,7 @@ func TestPOSTGuards(t *testing.T) {
 func TestPagesRender(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
 	srv, _ := newTestServer(t, aSrv, bSrv)
+	labels := fleettest.StaticLabels(aSrv.URL, bSrv.URL)
 
 	for _, c := range []struct {
 		path string
@@ -302,35 +187,35 @@ func TestPagesRender(t *testing.T) {
 		}
 	}
 
-	t.Run("pod filter", func(t *testing.T) {
-		_, body := fetch(t, srv, "/?pod="+url.QueryEscape(bSrv.URL), false)
+	t.Run("instance filter", func(t *testing.T) {
+		_, body := fetch(t, srv, "/?instance="+labels[bSrv.URL], false)
 		if !strings.Contains(body, ">orders<") || strings.Contains(body, ">emails<") {
 			t.Error("dashboard filtered to b should show orders and not emails")
 		}
-		// A pod never seen (a bad bookmark) shows why, not the merged view.
-		_, body = fetch(t, srv, "/?pod="+url.QueryEscape("http://gone.invalid"), false)
-		if !strings.Contains(body, "Instance http://gone.invalid is no longer reported — reload") || strings.Contains(body, `<tr id="w-`) {
-			t.Error("an unknown pod should show the gone-pod banner and no rows")
+		// A label never seen (a bad bookmark) says so, not the merged view.
+		_, body = fetch(t, srv, "/?instance=instance-9", false)
+		if !strings.Contains(body, "instance-9 is not an instance of multi") || strings.Contains(body, `<tr id="w-`) {
+			t.Error("an unknown instance should show the unknown-label banner and no rows")
 		}
 	})
 
-	// The grid shows every pod, so it offers no pod select.
-	t.Run("pod select", func(t *testing.T) {
-		for path, want := range map[string]bool{"/": true, "/workers/orders": true, "/grid": false, "/grid?server=other": false} {
-			if _, body := fetch(t, srv, path, false); strings.Contains(body, `<select name="pod">`) != want {
-				t.Errorf("GET %s: pod select shown = %v, want %v", path, !want, want)
+	// The grid shows every unit, so it offers no unit select.
+	t.Run("instance select", func(t *testing.T) {
+		for path, want := range map[string]bool{"/": true, "/workers/orders": true, "/grid": false, "/grid?server=b": false} {
+			if _, body := fetch(t, srv, path, false); strings.Contains(body, `<select name="instance">`) != want {
+				t.Errorf("GET %s: instance select shown = %v, want %v", path, !want, want)
 			}
 		}
 	})
 
 	t.Run("unknown worker", func(t *testing.T) {
-		for _, path := range []string{"/workers/nope", "/workers/emails?pod=" + url.QueryEscape(bSrv.URL)} {
+		for _, path := range []string{"/workers/nope", "/workers/emails?instance=" + labels[bSrv.URL]} {
 			status, body := fetch(t, srv, path, false)
 			if status != http.StatusNotFound {
 				t.Errorf("GET %s = %d, want 404", path, status)
 			}
-			if !strings.Contains(body, "not found") || strings.Contains(body, "Retry") {
-				t.Errorf("GET %s should say not found, without a Retry form", path)
+			if !strings.Contains(body, "not found") {
+				t.Errorf("GET %s should say not found", path)
 			}
 			// A poll gets a 200 so htmx swaps the banner in instead of
 			// wiping #errors.
@@ -342,68 +227,6 @@ func TestPagesRender(t *testing.T) {
 			t.Errorf("GET /nope = %d, want 404", status)
 		}
 	})
-}
-
-// threeFakes starts three fake varmqs: orders (concurrency 4) on each, emails
-// on the first only.
-func threeFakes(t *testing.T) []*httptest.Server {
-	t.Helper()
-	var fakes []*httptest.Server
-	for i, instance := range []string{"a", "b", "c"} {
-		workers := map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 4, Busy: i}}
-		if i == 0 {
-			workers["emails"] = &fakeWorker{Status: "Paused", Concurrency: 2}
-		}
-		_, f := newFakeVarmq(t, instance, workers)
-		fakes = append(fakes, f)
-	}
-	return fakes
-}
-
-// kubernetesServer is discovered through Kubernetes, the one kind of server
-// whose units are pods. serveUnits builds its pool, so no cluster is reached.
-var kubernetesServer = config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}
-
-// serveUnits serves the web UI over a Manager whose only server, "multi", is
-// a copy of server polling the fakes every second. It returns once the first
-// snapshot is in.
-func serveUnits(t *testing.T, server config.Server, fakes ...*httptest.Server) *httptest.Server {
-	t.Helper()
-	endpoints := make([]string, len(fakes))
-	for i, f := range fakes {
-		endpoints[i] = f.URL
-	}
-	server.Name, server.Interval = "multi", 1
-	cfg := &config.Config{Servers: map[string]*config.Server{"multi": &server}}
-	m := startManagerBuilding(t, cfg, "multi", func(*config.Server) (*api.Pool, error) {
-		return api.NewPool(&mutableSource{eps: endpoints}, ""), nil
-	})
-	return serve(t, m)
-}
-
-// visibleText is body without its tags, so attribute values (the pod form
-// field, class names, URLs) are left out.
-func visibleText(body string) string { return regexp.MustCompile(`<[^>]*>`).ReplaceAllString(body, "") }
-
-// checkPages fetches each path of pages from srv and requires its body to
-// contain its wants and its visible text to lack the other noun.
-func checkPages(t *testing.T, srv *httptest.Server, other string, pages map[string][]string) {
-	t.Helper()
-	for path, wants := range pages {
-		status, body := fetch(t, srv, path, false)
-		if status != http.StatusOK {
-			t.Errorf("GET %s = %d, want 200", path, status)
-			continue
-		}
-		for _, want := range wants {
-			if !strings.Contains(body, want) {
-				t.Errorf("GET %s lacks %q", path, want)
-			}
-		}
-		if text := strings.ToLower(visibleText(body)); strings.Contains(text, other) {
-			t.Errorf("GET %s says %q:\n%s", path, other, text)
-		}
-	}
 }
 
 // TestPagesSayInstanceOnStaticServers: every page of a server whose endpoints
@@ -459,9 +282,9 @@ func TestMessagesUseNoun(t *testing.T) {
 			one := tc.one
 
 			// A form naming a unit the server does not have.
-			resp, body := post(t, srv, "/workers/orders/actions/pause", multi("pod", "http://gone.invalid"), true)
-			if want := "the selected " + one + " is not " + tc.article + " " + one + " of this server; reload"; resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, want) {
-				t.Errorf("unknown unit = %d %q, want 400 with %q", resp.StatusCode, body, want)
+			resp, body := post(t, srv, "/workers/orders/actions/pause", multi(tc.one, "nine"), true)
+			if want := "nine is not " + tc.article + " " + one + " of multi"; resp.StatusCode != http.StatusConflict || !strings.Contains(body, want) {
+				t.Errorf("unknown unit = %d %q, want 409 with %q", resp.StatusCode, body, want)
 			}
 
 			// emails lives on one unit; the others answer 404.
@@ -489,77 +312,53 @@ func TestMessagesUseNoun(t *testing.T) {
 	}
 }
 
-// TestGoneUnitBannerUsesNoun: the stale-bookmark banner names the unit by the
-// label of the last snapshot that had it.
+// TestGoneUnitBannerUsesNoun: a label the newest snapshot lacks is gone
+// when an older one had it, and unknown when none did; the banner words
+// both by the server's noun.
 func TestGoneUnitBannerUsesNoun(t *testing.T) {
-	both := snap(atTick(0), PodSnapshot{Key: "#a", Label: "instance-1"}, PodSnapshot{Key: "#b", Label: "instance-2"})
-	left := snap(atTick(1), PodSnapshot{Key: "#a", Label: "instance-1"})
+	both := snap(atTick(0), fleet.PodSnapshot{Key: "#a", Label: "instance-1"}, fleet.PodSnapshot{Key: "#b", Label: "instance-2"})
+	left := snap(atTick(1), fleet.PodSnapshot{Key: "#a", Label: "instance-1"})
 	for _, tc := range []struct {
-		n    Noun
-		want string
+		n             fleet.Noun
+		label, banner string
 	}{
-		{instanceNoun, "Instance instance-2 is no longer reported — reload"},
-		{podNoun, "Pod instance-2 is no longer reported — reload"},
+		{instanceNoun, "instance-2", "Instance instance-2 is no longer reported — reload"},
+		{podNoun, "instance-2", "Pod instance-2 is no longer reported — reload"},
+		{instanceNoun, "instance-9", "instance-9 is not an instance of multi"},
+		{podNoun, "web-0", "web-0 is not a pod of multi"},
 	} {
-		p := Page{Pod: "#b", Noun: tc.n}
-		if !podGone(&p, []*Snapshot{both, left}) || p.Banner != tc.want {
-			t.Errorf("%s: banner = %q, want %q", tc.n.One, p.Banner, tc.want)
+		p := Page{Server: "multi", Pod: tc.label, Noun: tc.n}
+		if !podGone(&p, []*fleet.Snapshot{both, left}) || p.Banner != tc.banner || p.Gone != tc.label {
+			t.Errorf("%s %s: banner %q, gone %q; want %q", tc.n.One, tc.label, p.Banner, p.Gone, tc.banner)
 		}
+	}
+	p := Page{Server: "multi", Pod: "instance-1", Noun: instanceNoun}
+	if podGone(&p, []*fleet.Snapshot{both, left}) || p.Banner != "" {
+		t.Errorf("a label the newest snapshot has is gone: %q", p.Banner)
 	}
 }
 
-// mutableSource is a discovery.Source whose endpoints a test changes.
-type mutableSource struct {
-	mu  sync.Mutex
-	eps []string
-}
-
-func (s *mutableSource) Endpoints() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return slices.Clone(s.eps)
-}
-
-func (s *mutableSource) set(eps ...string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.eps = eps
-}
-
-func (*mutableSource) Close() error { return nil }
-
-// TestVanishedPodShowsBanner: a page filtered to a pod the newest snapshot
-// lacks says so and shows no data, never another pod's under its name.
+// TestVanishedPodShowsBanner: a page filtered to a unit the newest snapshot
+// lacks says so and shows no data, never another unit's under its label.
 func TestVanishedPodShowsBanner(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
 	src := &mutableSource{eps: []string{aSrv.URL, bSrv.URL}}
-	cfg := &config.Config{Servers: map[string]*config.Server{
-		"multi": {Name: "multi", Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}},
-	}}
-	m := NewManager(cfg, func(*config.Server) (*api.Pool, error) { return api.NewPool(src, ""), nil })
-	t.Cleanup(func() { _ = m.Close() })
-	if err := m.Switch("multi"); err != nil {
-		t.Fatal(err)
-	}
-	waitUntil(t, 3*time.Second, "first snapshot", func() bool {
-		s := m.Current()
-		return s != nil && s.History.Latest() != nil
-	})
-	srv := serve(t, m)
+	f := unitsFixture(t, config.Server{}, src)
+	srv := f.srv
+	label := fleettest.StaticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
 
-	dash := "/?server=multi&pod=" + url.QueryEscape(aSrv.URL)
-	detail := "/workers/orders?server=multi&pod=" + url.QueryEscape(aSrv.URL)
+	dash := "/?instance=" + label + "&server=multi"
+	detail := "/workers/orders?instance=" + label + "&server=multi"
 	if _, body := fetch(t, srv, dash, false); !strings.Contains(body, ">emails<") {
 		t.Fatal("dashboard filtered to a lacks emails before a leaves")
 	}
 
 	src.set(bSrv.URL) // a leaves discovery
-	waitUntil(t, 3*time.Second, "a snapshot without a", func() bool { return len(m.Current().History.Latest().Pods) == 1 })
+	f.waitFor("multi", "a snapshot without a", func(s *fleet.Snapshot) bool { return len(s.Pods) == 1 })
 
-	// Labelled from the last snapshot that had it, with a way out to the
-	// merged view of the same page: the picker shows the gone unit chosen,
-	// so picking All instances (merged) there is a change.
-	label := staticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
+	// Labelled as before, with a way out to the merged view of the same
+	// page: the picker shows the gone unit chosen, so picking All instances
+	// (merged) there is a change.
 	merged := map[string]string{dash: "/?server=multi", detail: "/workers/orders?server=multi"}
 	for _, path := range []string{dash, detail} {
 		banner := `<p class="banner">Instance ` + label + ` is no longer reported — reload · <a href="` + merged[path] + `">All instances (merged)</a></p>`
@@ -568,9 +367,9 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 			if status != http.StatusOK || !strings.Contains(body, banner) {
 				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
 			}
-			_, picker, _ := strings.Cut(body, `<select name="pod">`)
+			_, picker, _ := strings.Cut(body, `<select name="instance">`)
 			picker, _, _ = strings.Cut(picker, `</select>`)
-			if gone := `<option value="` + aSrv.URL + `" selected disabled>` + label + `</option>`; strings.Count(picker, " selected") != 1 || !strings.Contains(picker, gone) {
+			if gone := `<option value="` + label + `" selected disabled>` + label + `</option>`; strings.Count(picker, " selected") != 1 || !strings.Contains(picker, gone) {
 				t.Errorf("GET %s (hx %v): picker %q, want only %q selected", path, hx, picker, gone)
 			}
 			for _, data := range []string{">orders<", `<tr id="w-`, "Instances reporting", `id="bulk"`, `class="controls"`, "No workers"} {
@@ -580,16 +379,16 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 			}
 		}
 	}
-	// The full page keeps polling the pod: each poll still shows the banner
-	// and nothing else, never a merged fallback (and the pod's data again
-	// should it come back).
+	// The full page keeps polling the unit: each poll still shows the
+	// banner and nothing else, never a merged fallback (and the unit's data
+	// again should it come back).
 	_, body := fetch(t, srv, dash, false)
 	_, poller, _ := strings.Cut(body, `<div id="poller"`)
 	_, pollURL, _ := strings.Cut(poller, `hx-get="`)
 	pollURL, _, _ = strings.Cut(pollURL, `"`)
 	pollURL = html.UnescapeString(pollURL)
-	if !strings.Contains(pollURL, "pod="+url.QueryEscape(aSrv.URL)) {
-		t.Fatalf("full load of a gone pod polls %q, want its pod kept", pollURL)
+	if !strings.Contains(pollURL, "instance="+label) {
+		t.Fatalf("full load of a gone unit polls %q, want its label kept", pollURL)
 	}
 	_, body = fetch(t, srv, pollURL, true)
 	if !strings.Contains(body, "Instance "+label+" is no longer reported — reload") || strings.Contains(body, `<tr id="w-`) || strings.Contains(body, ">orders<") {
@@ -602,18 +401,17 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 // found.
 func TestErroredUnitSaysWhy(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
-	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
-		"multi": {Name: "multi", Interval: 3600, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	f := startLive(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 3600, Endpoints: []string{aSrv.URL, bSrv.URL}},
 	}}, "multi")
-	srv := serve(t, m)
 	// The first poll ran and the next is an hour away: this snapshot is the latest.
-	down := PodSnapshot{Key: "#x", Via: aSrv.URL, Instance: "x", Label: "instance-3", Balanced: true, Err: "not reached this refresh · last seen 40s ago"}
-	m.Current().History.Append(snap(time.Now(), okPod(aSrv.URL, map[string]*Sample{"orders": smp("Running", 4, 0, 4, 0)}), down))
+	down := fleet.PodSnapshot{Key: "#x", Via: aSrv.URL, Instance: "x", Label: "instance-3", Balanced: true, Err: "not reached this refresh · last seen 40s ago"}
+	f.write("multi", snap(time.Now(), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 0, 4, 0)}), down))
 
 	banner := `<p class="banner">instance-3: not reached this refresh · last seen 40s ago</p>`
-	for _, path := range []string{"/?pod=%23x", "/workers/orders?pod=%23x"} {
+	for _, path := range []string{"/?instance=instance-3", "/workers/orders?instance=instance-3"} {
 		for _, hx := range []bool{true, false} { // a poll, a full load
-			status, body := fetch(t, srv, path, hx)
+			status, body := fetch(t, f.srv, path, hx)
 			if status != http.StatusOK || !strings.Contains(body, banner) {
 				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
 			}
@@ -630,13 +428,12 @@ func TestErroredUnitSaysWhy(t *testing.T) {
 // newest snapshot's time, so a page whose polls stopped is visibly stale.
 func TestStatusShowsUpdateTime(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
-	srv, m := newTestServer(t, aSrv, bSrv)
-	h := m.Current().History
+	srv, f := newTestServer(t, aSrv, bSrv)
 
 	for _, path := range []string{"/", "/grid", "/workers/orders"} {
-		before := stamp(h.Latest())
+		before := stamp(f.latest("multi"))
 		_, body := fetch(t, srv, path, true)
-		after := stamp(h.Latest()) // a tick may land mid-request
+		after := stamp(f.latest("multi")) // a tick may land mid-request
 		_, status, _ := strings.Cut(body, `<div id="status">`)
 		status, _, _ = strings.Cut(status, "</div>")
 		if !strings.Contains(status, "updated "+before) && !strings.Contains(status, "updated "+after) {
@@ -660,14 +457,14 @@ func TestRenderErrorIsEscaped(t *testing.T) {
 }
 
 func TestDetailOfEscapedName(t *testing.T) {
-	_, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"a/b c": {Status: "Running", Concurrency: 1}})
+	_, fSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"a/b c": {Status: "Running", Concurrency: 1}})
 	srv, _ := newTestServer(t, fSrv)
 
 	status, body := fetch(t, srv, "/workers/a%2Fb%20c", false)
 	if status != http.StatusOK {
 		t.Fatalf("GET /workers/a%%2Fb%%20c = %d, want 200", status)
 	}
-	// The poller and the pod select must reach the same worker again.
+	// The poller and the unit select must reach the same worker again.
 	for _, want := range []string{`<h2>a/b c</h2>`, `hx-get="/workers/a%2Fb%20c?server=multi"`, `hx-get="/workers/a%2Fb%20c"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body lacks %q", want)
@@ -675,61 +472,66 @@ func TestDetailOfEscapedName(t *testing.T) {
 	}
 }
 
-func TestStaleServerParamShowsBanner(t *testing.T) {
-	_, _, aSrv, bSrv := twoFakes(t)
-	srv, _ := newTestServer(t, aSrv, bSrv)
+// TestTwoTabsTwoServers: each tab shows the server its URL names, side by
+// side, with no "server changed" notice, and acts on that server only.
+func TestTwoTabsTwoServers(t *testing.T) {
+	fa, aSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 1}})
+	fb, bSrv := fleettest.NewVarmq(t, "b", map[string]*fleettest.Worker{"emails": {Status: "Running", Concurrency: 1}})
+	f := newFixture(t, &config.Config{DefaultServer: "east", Servers: map[string]*config.Server{
+		"east": {Interval: 1, Endpoints: []string{aSrv.URL}},
+		"west": {Interval: 1, Endpoints: []string{bSrv.URL}},
+	}})
+	f.startCollector()
+	f.waitFirst("east")
+	f.waitFirst("west")
 
-	for _, path := range []string{"/?server=other", "/grid?server=other", "/workers/orders?server=other", "/?server=b"} {
+	for _, c := range []struct{ path, shows, lacks string }{
+		{"/?server=east", ">orders<", ">emails<"},
+		{"/?server=west", ">emails<", ">orders<"},
+		{"/", ">orders<", ">emails<"}, // the default server
+		{"/grid?server=west", ">emails<", ">orders<"},
+		{"/?server=east", ">orders<", ">emails<"},
+	} {
 		for _, hx := range []bool{false, true} {
-			status, body := fetch(t, srv, path, hx)
-			if status != http.StatusOK {
-				t.Errorf("GET %s (hx %v) = %d, want 200", path, hx, status)
-			}
-			if !strings.Contains(body, "Server changed to multi — reload") {
-				t.Errorf("GET %s (hx %v) lacks the banner", path, hx)
-			}
-			// The URL itself may name a worker; rendered data never shows.
-			for _, data := range []string{">orders<", ">emails<", "Instances reporting", `<tr id="w-`} {
-				if strings.Contains(body, data) {
-					t.Errorf("GET %s (hx %v) shows worker data %q", path, hx, data)
-				}
-			}
-			// #status is refreshed by every poll, so it must still be right.
-			if !strings.Contains(body, "● 2/2 instances") {
-				t.Errorf("GET %s (hx %v) lacks the active server's health", path, hx)
+			_, body := fetch(t, f.srv, c.path, hx)
+			if !strings.Contains(body, c.shows) || strings.Contains(body, c.lacks) || strings.Contains(body, "Server changed") {
+				t.Errorf("GET %s (hx %v) should show %s only, with no notice:\n%s", c.path, hx, c.shows, body)
 			}
 		}
 	}
-
-	// The stale page keeps polling its own URL, and its links lead to the
-	// active server.
-	_, body := fetch(t, srv, "/?server=other", false)
-	for _, want := range []string{`hx-get="/?server=other"`, `href="/grid?server=multi"`} {
+	_, body := fetch(t, f.srv, "/?server=west", false)
+	for _, want := range []string{`<option value="west" selected>`, `<select name="server">`, `name="server" value="west"`} {
 		if !strings.Contains(body, want) {
-			t.Errorf("stale page lacks %q", want)
+			t.Errorf("west's page lacks %q", want)
 		}
 	}
 
-	_, body = fetch(t, srv, "/?server=multi", false)
-	if strings.Contains(body, "Server changed") || !strings.Contains(body, "orders") {
-		t.Error("GET /?server=multi should show multi's data without the banner")
+	if resp, _ := post(t, f.srv, "/workers/orders/actions/pause", url.Values{"server": {"east"}}, true); resp.StatusCode != http.StatusOK {
+		t.Errorf("pause on east = %d, want 200", resp.StatusCode)
 	}
+	if resp, _ := post(t, f.srv, "/workers/emails/actions/pause", url.Values{"server": {"west"}}, true); resp.StatusCode != http.StatusOK {
+		t.Errorf("pause on west = %d, want 200", resp.StatusCode)
+	}
+	wantPatches(t, fa, "PATCH /workers/orders/actions/pause")
+	wantPatches(t, fb, "PATCH /workers/emails/actions/pause")
 }
 
 // TestServerIdentityIsConfigKey: pages name servers by configuration key,
 // which config.Server.Name need not equal.
 func TestServerIdentityIsConfigKey(t *testing.T) {
-	_, fSrv := newFakeVarmq(t, "a", map[string]*fakeWorker{"orders": {Status: "Running", Concurrency: 1}})
-	m := startManager(t, &config.Config{Servers: map[string]*config.Server{
-		"prod-eu": {Name: "Production EU", Interval: 1, Endpoints: []string{fSrv.URL}},
-		"dev":     {Name: "dev", Interval: 1, Endpoints: []string{"http://dev.invalid"}},
-	}}, "prod-eu")
-	srv := serve(t, m)
+	_, fSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 1}})
+	f := newFixture(t, &config.Config{DefaultServer: "prod-eu", Servers: map[string]*config.Server{
+		"prod-eu": {Interval: 1, Endpoints: []string{fSrv.URL}},
+		"dev":     {Interval: 1, Endpoints: []string{"http://dev.invalid"}},
+	}})
+	f.cfg.Servers["prod-eu"].Name = "Production EU"
+	f.startCollector()
+	f.waitFirst("prod-eu")
 
 	for _, path := range []string{"/?server=prod-eu", "/"} {
-		_, body := fetch(t, srv, path, false)
-		if strings.Contains(body, "Server changed") || !strings.Contains(body, ">orders<") {
-			t.Errorf("GET %s should show prod-eu's data without the banner", path)
+		_, body := fetch(t, f.srv, path, false)
+		if !strings.Contains(body, ">orders<") {
+			t.Errorf("GET %s should show prod-eu's data", path)
 		}
 		for _, want := range []string{`<option value="prod-eu" selected>`, `hx-get="/?server=prod-eu"`, `name="server" value="prod-eu"`} {
 			if !strings.Contains(body, want) {
@@ -737,48 +539,696 @@ func TestServerIdentityIsConfigKey(t *testing.T) {
 			}
 		}
 	}
-	_, body := fetch(t, srv, "/?server="+url.QueryEscape("Production EU"), false)
-	if !strings.Contains(body, "Server changed to prod-eu — reload") {
-		t.Error("?server=<config.Server.Name> should be stale: names are keys")
+	_, body := fetch(t, f.srv, "/?server="+url.QueryEscape("Production EU"), false)
+	if !strings.Contains(body, "Server Production EU is not configured") || strings.Contains(body, ">orders<") {
+		t.Error("?server=<config.Server.Name> should not be configured: names are keys")
 	}
 }
 
-func TestGETNeverCallsVarmq(t *testing.T) {
-	fa, fb, aSrv, bSrv := twoFakes(t)
-	srv, m := newTestServer(t, aSrv, bSrv)
-	h := m.Current().History
-	calls := func() int { return len(fa.calls()) + len(fb.calls()) }
-	const perTick = (1 + 2) + (1 + 1) // a list and a get per worker, on each fake
+// TestInstanceParamResolves: off Kubernetes, ?instance= names a unit by
+// the label the pages show; every link and form of the page carries it.
+func TestInstanceParamResolves(t *testing.T) {
+	varmqs, fakes := threeVarmqs(t)
+	f := unitsFixture(t, config.Server{}, &mutableSource{eps: urlsOf(fakes...)})
+	labels := fleettest.StaticLabels(urlsOf(fakes...)...)
+	var second int // the fake labelled instance-2
+	for i, fk := range fakes {
+		if labels[fk.URL] == "instance-2" {
+			second = i
+		}
+	}
 
-	ticksBefore, callsBefore := len(h.Snapshots()), calls()
-	for range 20 {
-		for _, path := range []string{"/", "/grid", "/workers/orders"} {
-			if status, _ := fetch(t, srv, path, false); status != http.StatusOK {
-				t.Fatalf("GET %s = %d", path, status)
+	_, body := fetch(t, f.srv, "/?server=multi&instance=instance-2", false)
+	if !strings.Contains(body, "3/3 instances") {
+		t.Errorf("dashboard lacks the server's health:\n%s", body)
+	}
+	if strings.Contains(body, ">emails<") != (second == 0) {
+		t.Errorf("dashboard of instance-2 shows emails = %v, want %v", !(second == 0), second == 0)
+	}
+	for _, want := range []string{
+		`<option value="instance-2" selected`,
+		`<input type="hidden" name="instance" value="instance-2">`,
+		`href="/workers/orders?instance=instance-2&amp;server=multi"`,
+		`href="/grid?instance=instance-2&amp;server=multi"`,
+		`hx-get="/?instance=instance-2&amp;server=multi"`,
+		`Selected workers on instance-2:`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard of instance-2 lacks %q", want)
+		}
+	}
+	if strings.Contains(body, `name="pod"`) || strings.Contains(body, "pod=") {
+		t.Error("an instance page carries a pod parameter")
+	}
+	_, body = fetch(t, f.srv, "/workers/orders?server=multi&instance=instance-2", false)
+	for _, want := range []string{
+		`<input type="hidden" name="instance" value="instance-2">`,
+		`href="/?instance=instance-2&amp;server=multi"`,
+		"Instances reporting: <span",
+		`hx-confirm="Stop orders on instance-2 (multi)?"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail of instance-2 lacks %q", want)
+		}
+	}
+
+	resp, _ := post(t, f.srv, "/workers/orders/actions/pause", multi("instance", "instance-2"), true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pause on instance-2 = %d, want 200", resp.StatusCode)
+	}
+	for i, fk := range varmqs {
+		if want := map[bool]int{true: 1, false: 0}[i == second]; len(patches(fk)) != want {
+			t.Errorf("fake %d (%s) got %q, want %d PATCH", i, labels[fakes[i].URL], patches(fk), want)
+		}
+	}
+}
+
+// TestKubernetesPodParam: on Kubernetes, ?pod= names a pod by its name.
+func TestKubernetesPodParam(t *testing.T) {
+	varmqs, fakes := threeVarmqs(t) // pods a, b and c: labelled by the instance that answered
+	f := unitsFixture(t, kubernetesServer, &mutableSource{eps: urlsOf(fakes...)})
+
+	_, body := fetch(t, f.srv, "/?server=multi&pod=b", false)
+	if !strings.Contains(body, ">orders<") || strings.Contains(body, ">emails<") {
+		t.Errorf("dashboard of pod b should show orders only:\n%s", body)
+	}
+	for _, want := range []string{
+		`<select name="pod">`,
+		`<option value="b" selected`,
+		`<input type="hidden" name="pod" value="b">`,
+		`href="/workers/orders?pod=b&amp;server=multi"`,
+		`Selected workers on b:`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard of pod b lacks %q", want)
+		}
+	}
+	if strings.Contains(body, `name="instance"`) {
+		t.Error("a pod page carries an instance parameter")
+	}
+
+	if resp, _ := post(t, f.srv, "/workers/orders/actions/pause", multi("pod", "b"), true); resp.StatusCode != http.StatusOK {
+		t.Fatalf("pause on pod b = %d, want 200", resp.StatusCode)
+	}
+	for i, fk := range varmqs {
+		if want := map[bool]int{true: 1, false: 0}[i == 1]; len(patches(fk)) != want {
+			t.Errorf("fake %s got %q, want %d PATCH", fk.Instance, patches(fk), want)
+		}
+	}
+}
+
+// TestUnknownAndGoneLabels: a label no snapshot of the hour has is not a
+// unit of the server; one only older snapshots have is gone. Either way the
+// page shows no data, and an action sends nothing.
+func TestUnknownAndGoneLabels(t *testing.T) {
+	t.Run("unknown", func(t *testing.T) {
+		for _, tc := range []struct {
+			server       config.Server
+			param, label string
+			copy         string
+		}{
+			{config.Server{}, "instance", "instance-9", "instance-9 is not an instance of multi"},
+			{kubernetesServer, "pod", "web-0", "web-0 is not a pod of multi"},
+		} {
+			fa, fb, aSrv, bSrv := twoFakes(t)
+			srv := serveUnits(t, tc.server, aSrv, bSrv)
+			for _, hx := range []bool{false, true} {
+				status, body := fetch(t, srv, "/?server=multi&"+tc.param+"="+tc.label, hx)
+				if status != http.StatusOK || !strings.Contains(body, `<p class="banner">`+tc.copy) || strings.Contains(body, `<tr id="w-`) {
+					t.Errorf("GET %s=%s (hx %v) = %d, want 200 with %q and no rows:\n%s", tc.param, tc.label, hx, status, tc.copy, body)
+				}
+			}
+			resp, body := post(t, srv, "/workers/orders/actions/pause", multi(tc.param, tc.label), true)
+			if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+tc.copy+`</p>` {
+				t.Errorf("POST %s=%s = %d %q, want 409 with %q", tc.param, tc.label, resp.StatusCode, body, tc.copy)
+			}
+			noPatches(t, fa, fb)
+		}
+	})
+
+	t.Run("gone", func(t *testing.T) {
+		fa, fb, aSrv, bSrv := twoFakes(t)
+		src := &mutableSource{eps: []string{aSrv.URL, bSrv.URL}}
+		f := unitsFixture(t, config.Server{}, src)
+		label := fleettest.StaticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
+		src.set(bSrv.URL)
+		f.waitFor("multi", "a snapshot without a", func(s *fleet.Snapshot) bool { return len(s.Pods) == 1 })
+
+		gone := "Instance " + label + " is no longer reported — reload"
+		_, body := fetch(t, f.srv, "/?server=multi&instance="+label, false)
+		if !strings.Contains(body, `<p class="banner">`+gone+` · <a href="/?server=multi">All instances (merged)</a>`) {
+			t.Errorf("gone unit's page lacks the banner with the merged view:\n%s", body)
+		}
+		for _, c := range []struct {
+			path string
+			form url.Values
+		}{
+			{"/workers/orders/actions/pause", multi("instance", label)},
+			{"/workers/orders/concurrency", multi("instance", label, "n", "3")},
+			{"/bulk/pause", multi("instance", label, "names", "orders")},
+			{"/bulk/pause", multi("instance", label, "names", "orders", "confirm", "1")},
+		} {
+			resp, body := post(t, f.srv, c.path, c.form, true)
+			if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+gone+`</p>` {
+				t.Errorf("POST %s to a gone unit = %d %q, want 409 with %q", c.path, resp.StatusCode, body, gone)
+			}
+		}
+		noPatches(t, fa, fb)
+	})
+}
+
+// TestOldPodParamFallsBackToMerged: links from before labels — a unit key
+// in pod= — show the merged view: off Kubernetes pod= is no parameter at
+// all, and on it a value shaped like a key (#… or a URL) is no pod name.
+func TestOldPodParamFallsBackToMerged(t *testing.T) {
+	for _, tc := range []struct {
+		server config.Server
+		many   string
+	}{
+		{config.Server{}, "instances"},
+		{kubernetesServer, "pods"},
+	} {
+		fakes := threeFakes(t)
+		srv := serveUnits(t, tc.server, fakes...)
+		for _, old := range []string{"%23a", "%23lb-1", url.QueryEscape(fakes[1].URL)} {
+			path := "/?server=multi&pod=" + old
+			_, body := fetch(t, srv, path, false)
+			if !strings.Contains(body, ">emails<") || !strings.Contains(body, ">orders<") || strings.Contains(body, `<p class="banner">`) {
+				t.Errorf("GET %s (%s) should show the merged view, no banner:\n%s", path, tc.many, body)
+			}
+			if !strings.Contains(body, `<option value="" selected>All `+tc.many+` (merged)</option>`) || !strings.Contains(body, `hx-get="/?server=multi"`) {
+				t.Errorf("GET %s (%s): the merged view should be chosen and polled", path, tc.many)
 			}
 		}
 	}
-	ticks, grew := len(h.Snapshots())-ticksBefore, calls()-callsBefore
+}
 
-	// Polls finished in the window plus one in flight account for every call.
-	if limit := (ticks + 1) * perTick; grew > limit {
-		t.Errorf("varmq got %d calls during 60 page loads and %d ticks, want at most %d", grew, ticks, limit)
+// TestRemovedServerPage (Review Focus 5): a tab on a server just removed
+// from the config says it is not configured — no panic, no data, no
+// request to varmq — and offers the servers that are.
+func TestRemovedServerPage(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := startLive(t, &config.Config{DefaultServer: "multi", Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}},
+		"other": {Interval: 1, Endpoints: []string{"http://other.invalid"}},
+	}}, "multi")
+	f.stopCollector() // so that every call the fakes get from now is the UI's
+	calls := len(fa.Calls()) + len(fb.Calls())
+	f.setConfig(&config.Config{DefaultServer: "multi", Servers: map[string]*config.Server{
+		"other": {Interval: 1, Endpoints: []string{"http://other.invalid"}},
+	}})
+
+	const copy = "Server multi is not configured"
+	for _, path := range []string{"/?server=multi", "/", "/grid?server=multi", "/workers/orders?server=multi", "/?server=multi&instance=instance-1"} {
+		for _, hx := range []bool{false, true} {
+			status, body := fetch(t, f.srv, path, hx)
+			want := http.StatusNotFound
+			if hx {
+				want = http.StatusOK // so that htmx swaps the banner in
+			}
+			if status != want || !strings.Contains(body, copy) {
+				t.Errorf("GET %s (hx %v) = %d, want %d with %q:\n%s", path, hx, status, want, copy, body)
+			}
+			for _, data := range []string{">orders<", `<tr id="w-`, `id="bulk"`, "Instances reporting"} {
+				if strings.Contains(body, data) {
+					t.Errorf("GET %s (hx %v) shows %q", path, hx, data)
+				}
+			}
+		}
+	}
+	_, body := fetch(t, f.srv, "/?server=multi", false)
+	for _, want := range []string{`<option value="multi" selected disabled>multi</option>`, `<option value="other">other</option>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the picker lacks %q:\n%s", want, body)
+		}
+	}
+
+	for _, c := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/workers/orders/actions/pause", multi()},
+		{"/workers/orders/concurrency", multi("n", "3")},
+		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+	} {
+		resp, body := post(t, f.srv, c.path, c.form, true)
+		if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+copy+`</p>` {
+			t.Errorf("POST %s = %d %q, want 409 with %q", c.path, resp.StatusCode, body, copy)
+		}
+	}
+	if now := len(fa.Calls()) + len(fb.Calls()); now != calls {
+		t.Errorf("varmq got %d requests about a server no longer configured", now-calls)
+	}
+}
+
+// TestWaitingForFirstSnapshot: before a server's first snapshot the page
+// says so and reloads itself, and an action sends nothing.
+func TestWaitingForFirstSnapshot(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}},
+	}})
+	const copy = "Waiting for the first snapshot of multi…"
+
+	status, body := fetch(t, f.srv, "/?server=multi", false)
+	if status != http.StatusOK || !strings.Contains(body, copy) || !strings.Contains(body, `<meta http-equiv="refresh" content="2">`) {
+		t.Errorf("GET / = %d, want 200 with %q, reloading itself:\n%s", status, copy, body)
+	}
+	if strings.Contains(body, `id="poller"`) {
+		t.Error("the waiting page polls #live, which would never bring the header")
+	}
+	// htmx (a poll, the server or unit picker) would swap in only part of
+	// the page: the browser loads the page asked for instead, whole. Not a
+	// reload: after a picker change that would be the page picked from.
+	req, err := http.NewRequest(http.MethodGet, f.srv.URL+"/?server=multi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("HX-Request", "true")
+	if resp, _ := send(t, f.srv, req); resp.StatusCode != http.StatusOK || resp.Header.Get("HX-Redirect") != "/?server=multi" || resp.Header.Get("HX-Refresh") != "" {
+		t.Errorf("htmx GET before the first snapshot = %d (HX-Redirect %q, HX-Refresh %q), want 200 sending the browser to /?server=multi",
+			resp.StatusCode, resp.Header.Get("HX-Redirect"), resp.Header.Get("HX-Refresh"))
+	}
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+copy+`</p>` {
+		t.Errorf("POST before the first snapshot = %d %q, want 409 with %q", resp.StatusCode, body, copy)
+	}
+	noPatches(t, fa, fb)
+}
+
+// TestDetailChartIsTheHourByTime (R39): a feed held open across a
+// 40-minute collection gap keeps its older snapshots; the detail chart
+// still shows only the hour up to the newest, each point at its time, the
+// gap as blank space 40 minutes wide between two lines, and a peak of the
+// hour alone. The clock cannot be moved, so the snapshots after the gap
+// run 10 minutes ahead of it: the hour then starts at now−50m, and the
+// first ones taken, from now−58m, have aged out of it in the feed.
+func TestDetailChartIsTheHourByTime(t *testing.T) {
+	_, aSrv := fleettest.NewVarmq(t, "a", nil)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}},
+	}})
+	now := time.UnixMilli(time.Now().UnixMilli())
+	rows := func(from, to time.Duration, v func(at time.Time) float64) {
+		for d := from; d <= to; d += 10 * time.Second {
+			at := now.Add(d)
+			s := smp("Running", 4, 1, 3, 0)
+			s.CompletedRate, s.RateOK = v(at), true
+			f.write("multi", snap(at, okPod(aSrv.URL, map[string]*fleet.Sample{"orders": s})))
+		}
+	}
+	f.claim()
+	rows(-58*time.Minute, -45*time.Minute, func(at time.Time) float64 {
+		if at.Before(now.Add(-50 * time.Minute)) {
+			return 99 // older than the hour once the rows below are in
+		}
+		return 2
+	})
+	if status, _ := fetch(t, f.srv, "/workers/orders?server=multi", false); status != http.StatusOK {
+		t.Fatalf("GET detail = %d before the gap", status)
+	}
+	rows(-5*time.Minute, 10*time.Minute, func(time.Time) float64 { return 3 })
+
+	_, body := fetch(t, f.srv, "/workers/orders?server=multi", false)
+	_, chart, _ := strings.Cut(body, `<figure class="chart">`)
+	chart, _, _ = strings.Cut(chart, "</figure>")
+	lines := regexp.MustCompile(`<polyline points="([^"]*)"/>`).FindAllStringSubmatch(chart, -1)
+	if len(lines) != 2 {
+		t.Fatalf("Completed /s chart has %d lines, want 2, broken at the gap:\n%s", len(lines), chart)
+	}
+	before, after := coords(t, lines[0][1]), coords(t, lines[1][1])
+	// 720 wide for the hour: 12 units a minute. The hour from now−50m holds
+	// 31 snapshots before the gap (to now−45m) and 91 after (from now−5m).
+	if len(before) != 31 || len(after) != 91 {
+		t.Errorf("lines of %d and %d points, want 31 and 91: the hour's alone", len(before), len(after))
+	}
+	if before[0][0] != 0 || before[len(before)-1][0] != 60 || after[0][0] != 540 || after[len(after)-1][0] != 720 {
+		t.Errorf("lines span x %v–%v and %v–%v, want 0–60 and 540–720 (a gap 480 wide: 40 minutes)",
+			before[0][0], before[len(before)-1][0], after[0][0], after[len(after)-1][0])
+	}
+	if !strings.Contains(chart, `<span class="peak">peak 3/s</span>`) {
+		t.Errorf("the chart's peak is not the hour's 3.0/s:\n%s", chart)
+	}
+}
+
+// otherConfig is the notice of another vartop collecting in another
+// environment: the fixture's lease is this process's.
+var otherConfig = fmt.Sprintf("Another vartop (pid %d) is collecting with another configuration; this vartop web collects once it stops.", os.Getpid())
+
+// bannerOf is the #banner of a page.
+func bannerOf(body string) string {
+	_, banner, _ := strings.Cut(body, `<div id="banner"`)
+	banner, _, _ = strings.Cut(banner, "</div>")
+	return banner
+}
+
+// TestOtherConfigCollector (R31): another vartop collecting in another
+// environment than this vartop web's — another config file or KUBECONFIG —
+// stores snapshots of units this web must not send its token to. Every
+// page says so, with no current value; every action is refused with that
+// notice, nothing sent and nothing poked.
+func TestOtherConfigCollector(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{DefaultServer: "multi", Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: urlsOf(aSrv, bSrv), Token: testToken},
+	}})
+	f.leaseConfig = "/b/vartop/config.json"
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	f.startCollector()
+	f.waitFirst("multi")
+	pokes := f.pokes("multi")
+
+	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
+		for _, hx := range []bool{false, true} {
+			status, body := fetch(t, f.srv, path, hx)
+			banner := bannerOf(body)
+			if status != http.StatusOK || !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) {
+				t.Errorf("GET %s (hx %v) = %d, want 200 with %q in #banner:\n%s", path, hx, status, otherConfig, banner)
+			}
+		}
+	}
+	_, body := fetch(t, f.srv, "/?server=multi", false)
+	_, status, _ := strings.Cut(body, `<div id="status">`)
+	status, _, _ = strings.Cut(status, "</div>")
+	if !strings.Contains(status, `<span class="health" title="healthy / total instances">— instances</span>`) ||
+		!strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">3</td>`) {
+		t.Errorf("the page shows current values of the other environment's collector:\n%s", body)
+	}
+
+	for _, a := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/workers/orders/actions/pause", multi()},
+		{"/workers/orders/actions/resume", multi()},
+		{"/workers/orders/actions/restart", multi()},
+		{"/workers/orders/actions/stop", multi("instance", "instance-1")},
+		{"/workers/orders/concurrency", multi("n", "3")},
+		{"/bulk/pause", multi("names", "orders")},
+		{"/bulk/resume", multi("names", "orders", "confirm", "1")},
+	} {
+		resp, body := post(t, f.srv, a.path, a.form, true)
+		if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+			t.Errorf("POST %s %v = %d %q, want 409 with %q", a.path, a.form, resp.StatusCode, body, otherConfig)
+		}
+	}
+	noPatches(t, fa, fb)
+	if got := f.pokes("multi"); got != pokes {
+		t.Errorf("pokes %d, want %d: the other environment's collector was poked", got, pokes)
+	}
+
+	// This environment's collector: the page is as ever.
+	f.setEnvCheck(nil)
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if strings.Contains(body, "another configuration") || !strings.Contains(body, "2/2 instances") {
+		t.Errorf("a collector of this environment: the page still refuses it:\n%s", body)
+	}
+}
+
+// TestOtherConfigWaiting (R31): before the first snapshot, another vartop
+// collecting in another environment is said so too — it may never collect
+// this server. Its lease let go is still that
+// environment's (R44): what the store holds came from its collector.
+func TestOtherConfigWaiting(t *testing.T) {
+	_, aSrv := fleettest.NewVarmq(t, "a", nil)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: []string{aSrv.URL}},
+	}})
+	f.leaseConfig = "/b/vartop/config.json"
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	f.claim()
+
+	status, body := fetch(t, f.srv, "/?server=multi", false)
+	banner := bannerOf(body)
+	if status != http.StatusOK || !strings.Contains(body, "Waiting for the first snapshot of multi…") ||
+		!strings.Contains(banner, otherConfig) {
+		t.Errorf("GET / = %d, want 200 waiting, with %q:\n%s", status, otherConfig, body)
+	}
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+
+	f.release() // the collector stopped
+	checks := f.envChecks()
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if banner := bannerOf(body); strings.Count(banner, otherConfig) != 1 {
+		t.Errorf("its lease let go: want %q once:\n%s", otherConfig, body)
+	}
+	if f.envChecks() == checks {
+		t.Error("a lease let go was not checked for its environment")
+	}
+	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST, its lease let go = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+}
+
+// handOffUnits is a snapshot taken at at of the units fa and fb: orders
+// on each, 5 idle workers in all.
+func handOffUnits(at time.Time, fa, fb *httptest.Server) *fleet.Snapshot {
+	return snap(at,
+		labelled(okPod(fa.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 0)}), "instance-1"),
+		labelled(okPod(fb.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2"))
+}
+
+// TestOtherConfigHandOff (R44): while the collectors change hands — the other
+// environment's stopped, and this one's not claimed yet, or claimed but
+// not written yet —
+// the newest snapshot is still the other one's, and fresh. It is not
+// current: no value shown, every action refused, nothing sent. Once this
+// environment's collector writes, all is as ever.
+func TestOtherConfigHandOff(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		// Stale past 8s: the refusals below are R44's, not staleness's.
+		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
+	}})
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	current := `<td class="num">5</td>` // the idle workers, shown only while current
+
+	f.leaseConfig = "/b/vartop/config.json"
+	f.claim()
+	f.write("multi", handOffUnits(time.Now().Add(-time.Second), aSrv, bSrv))
+	f.release()
+	pokes := f.pokes("multi")
+	_, body := fetch(t, f.srv, "/?server=multi", false)
+	if banner := bannerOf(body); !strings.Contains(banner, `<p class="banner stale">`+otherConfig+`</p>`) || strings.Contains(body, current) {
+		t.Errorf("the other environment's collector stopped, its snapshot fresh: want %q and no current value:\n%s", otherConfig, body)
+	}
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+	noPatches(t, fa, fb)
+	if got := f.pokes("multi"); got != pokes {
+		t.Errorf("pokes %d, want %d: nothing to poke for the other environment's snapshot", got, pokes)
+	}
+
+	// This environment's collector claims: the newest snapshot, older than
+	// the claim, is still the other's.
+	f.leaseConfig = "/a/vartop/config.json"
+	f.claim()
+	notYet := regexp.MustCompile(`<p class="banner stale">No new data for \d+s\.</p>`)
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if strings.Contains(body, "another configuration") || !notYet.MatchString(bannerOf(body)) || strings.Contains(body, current) {
+		t.Errorf("claimed, not written yet: want %q, no current value:\n%s", notYet, body)
+	}
+	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">No new data for `) {
+		t.Errorf("POST before this collector's first snapshot = %d %q, want 409 with the stale copy", resp.StatusCode, body)
+	}
+	noPatches(t, fa, fb)
+	if got := f.pokes("multi"); got != pokes+1 {
+		t.Errorf("pokes %d, want %d: this environment's collector is poked once, and waited for", got, pokes+1)
+	}
+
+	// Its first snapshot: current, and acted on.
+	f.write("multi", handOffUnits(time.Now(), aSrv, bSrv))
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if strings.Contains(bannerOf(body), "No new data") || !strings.Contains(body, current) {
+		t.Errorf("this collector's first snapshot: want it current:\n%s", body)
+	}
+	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST after this collector's first snapshot = %d, want 200:\n%s", resp.StatusCode, body)
+	}
+	wantPatches(t, fa, "PATCH /workers/orders/actions/pause")
+	wantPatches(t, fb, "PATCH /workers/orders/actions/pause")
+}
+
+// TestLeaseReadAgainAfterTheWait (R31): an action that waits for a fresh
+// snapshot reads the lease again once it comes. Here the wait sees the
+// lease pass to another environment's collector, which writes the
+// snapshot: the action is refused with that notice, nothing sent — the
+// lease read before the wait would have taken that snapshot for this
+// environment's.
+func TestLeaseReadAgainAfterTheWait(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
+	}})
+	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
+	f.leaseConfig = "/a/vartop/config.json"
+	f.claim()
+	f.write("multi", handOffUnits(time.Now().Add(-time.Minute), aSrv, bSrv)) // stale: the action waits
+	pokes := f.pokes("multi")
+
+	handedOff := make(chan struct{})
+	go func() { // on the action's poke, another environment's collector takes over and writes
+		defer close(handedOff)
+		for deadline := time.Now().Add(fleet.SettleWait); f.pokes("multi") == pokes; time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				return
+			}
+		}
+		f.release()
+		f.leaseConfig = "/b/vartop/config.json"
+		f.claim()
+		f.write("multi", handOffUnits(time.Now(), aSrv, bSrv))
+	}()
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	<-handedOff
+	if resp.StatusCode != http.StatusConflict || body != `<p class="banner">`+otherConfig+`</p>` {
+		t.Errorf("POST across the hand-off = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
+	}
+	noPatches(t, fa, fb)
+}
+
+// TestActionRefusedWhenLeaseUnreadable (R44): with the collector's lease
+// unreadable, whose units the newest snapshot names is not known: an
+// action is refused, nothing sent. The pages keep showing the snapshot,
+// by the stale rule.
+func TestActionRefusedWhenLeaseUnreadable(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
+	}})
+	f.claim()
+	f.write("multi", handOffUnits(time.Now(), aSrv, bSrv))
+	if err := f.ctl.Close(); err != nil { // control.db, as the web reads it, fails
+		t.Fatal(err)
+	}
+	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">cannot read the collector&#39;s lease: `) {
+		t.Errorf("POST = %d %q, want 409 saying the lease cannot be read", resp.StatusCode, body)
+	}
+	noPatches(t, fa, fb)
+	if _, body := fetch(t, f.srv, "/?server=multi", false); !strings.Contains(body, `<td class="num">5</td>`) {
+		t.Errorf("the page no longer shows the fresh snapshot:\n%s", body)
+	}
+}
+
+// TestOldHistoryShowsStale (R43): a server whose file holds only rows
+// older than the hour — nothing collecting for longer than that — shows
+// its newest snapshot stale, with its age, not "Waiting for the first
+// snapshot".
+func TestOldHistoryShowsStale(t *testing.T) {
+	_, aSrv := fleettest.NewVarmq(t, "a", nil)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}},
+	}})
+	f.claim()
+	f.write("multi", snap(time.Now().Add(-2*time.Hour), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 2)})))
+	f.release() // the collector stopped
+
+	down := regexp.MustCompile(`<p class="banner stale">No new data for 2h0m\ds — vartop web is not collecting\.</p>`)
+	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
+		status, body := fetch(t, f.srv, path, false)
+		if status != http.StatusOK || !down.MatchString(body) || strings.Contains(body, "Waiting for the first snapshot") {
+			t.Errorf("GET %s = %d, want 200 with %q, not waiting:\n%s", path, status, down, body)
+		}
+	}
+}
+
+// TestStaleBanner: a server whose newest snapshot is older than
+// 3·interval + 2s shows how old, and why: nothing collects, or the
+// server's own error. Current values read "—"; the history stays.
+func TestStaleBanner(t *testing.T) {
+	_, aSrv := fleettest.NewVarmq(t, "a", nil)
+	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
+		"multi": {Interval: 10, Endpoints: []string{aSrv.URL}},
+	}})
+	f.claim()
+	f.write("multi", snap(time.Now().Add(-60*time.Second), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 2)})))
+	f.release() // the collector stopped
+
+	// About a minute old: the age is rounded to the second when the page
+	// is rendered.
+	down := regexp.MustCompile(`<p class="banner stale">No new data for 1m\ds — vartop web is not collecting\.</p>`)
+	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
+		for _, hx := range []bool{false, true} {
+			status, body := fetch(t, f.srv, path, hx)
+			if banner := bannerOf(body); status != http.StatusOK || !down.MatchString(banner) {
+				t.Errorf("GET %s (hx %v) = %d, want 200 with %q in #banner:\n%s", path, hx, status, down, banner)
+			}
+		}
+	}
+	_, body := fetch(t, f.srv, "/?server=multi", false)
+	if !strings.Contains(body, ">orders<") || !strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">1</td>`) {
+		t.Errorf("a stale dashboard should list orders with its current values as —:\n%s", body)
+	}
+	// Nor the health of the stale snapshot.
+	_, status, _ := strings.Cut(body, `<div id="status">`)
+	status, _, _ = strings.Cut(status, "</div>")
+	if !strings.Contains(status, `<span class="health" title="healthy / total instances">— instances</span>`) || strings.Contains(status, "1/1") {
+		t.Errorf("a stale page's #status should show its health as —:\n%s", status)
+	}
+
+	// The collector runs, but the server's collection fails.
+	f.claim()
+	if err := f.ctl.SetServerErr("multi", "discovery failed: boom — retrying in 5s"); err != nil {
+		t.Fatal(err)
+	}
+	_, body = fetch(t, f.srv, "/?server=multi", false)
+	if want := regexp.MustCompile(`No new data for 1m\ds — multi: discovery failed: boom — retrying in 5s<`); !want.MatchString(body) {
+		t.Errorf("stale page of a failing server lacks %q:\n%s", want, body)
+	}
+}
+
+// TestNoStartRoute: vartop web collects itself; it has nothing to start.
+func TestNoStartRoute(t *testing.T) {
+	_, _, aSrv, bSrv := twoFakes(t)
+	srv, _ := newTestServer(t, aSrv, bSrv)
+	if resp, _ := post(t, srv, "/daemon/start", multi(), true); resp.StatusCode == http.StatusOK {
+		t.Errorf("POST /daemon/start = %d, want no such route", resp.StatusCode)
+	}
+}
+
+// TestGETNeverCallsVarmq: pages read the store only; with the collector
+// stopped, no page load reaches varmq.
+func TestGETNeverCallsVarmq(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	_, f := newTestServer(t, aSrv, bSrv)
+	f.stopCollector()
+	calls := func() int { return len(fa.Calls()) + len(fb.Calls()) }
+
+	before := calls()
+	for range 20 {
+		for _, path := range []string{"/", "/grid", "/workers/orders", "/?instance=instance-1", "/?server=b", "/?server=nope"} {
+			for _, hx := range []bool{false, true} {
+				fetch(t, f.srv, path, hx)
+			}
+		}
+	}
+	if grew := calls() - before; grew != 0 {
+		t.Errorf("varmq got %d calls from page loads", grew)
 	}
 }
 
 func TestTokenNeverInResponses(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
 	dead := httptest.NewServer(http.NotFoundHandler())
-	dead.Close() // refuses connections: its pod renders an error
+	dead.Close() // refuses connections: its unit renders an error
 	srv, _ := newTestServer(t, aSrv, bSrv, dead)
 
 	_, grid := fetch(t, srv, "/grid", false)
 	if !strings.Contains(grid, `<small class="err">`) {
-		t.Fatal("the dead pod's error is not rendered; the test would miss a token in it")
+		t.Fatal("the dead unit's error is not rendered; the test would miss a token in it")
 	}
 
 	for _, path := range []string{
-		"/", "/grid", "/workers/orders", "/workers/nope", "/?server=other",
+		"/", "/grid", "/workers/orders", "/workers/nope", "/?server=other", "/?server=b",
 		"/static/app.css", "/static/htmx-2.0.4.min.js", "/static/",
 	} {
 		for _, hx := range []bool{false, true} {
@@ -802,116 +1252,52 @@ func TestTokenNeverInResponses(t *testing.T) {
 	}
 }
 
-func TestConnectingAndErrorStates(t *testing.T) {
-	m, g := newGatedManager(t, "dev", "prod")
-	srv := serve(t, m)
-	connecting := func(name string) string {
-		return "Connecting to " + ConnectionLabel(m.cfg.Servers[name]) + "…"
-	}
-	retry := func(name string) string { return `<input type="hidden" name="name" value="` + name + `">` }
-
-	// The first build is in flight.
-	if err := m.Switch("dev"); err != nil {
-		t.Fatal(err)
-	}
-	status, body := fetch(t, srv, "/", false)
-	if status != http.StatusOK || !strings.Contains(body, `<p class="connecting" role="status">`+connecting("dev")+"</p>") {
-		t.Errorf("GET / while connecting = %d, want 200 with %q", status, connecting("dev"))
-	}
-	if strings.Contains(body, `hx-trigger="every`) || strings.Contains(body, "Retry") {
-		t.Error("connecting page polls or offers Retry")
-	}
-	// A poll only swaps #live, #banner and #status: it gets the message as
-	// its banner, with a 200.
-	status, body = fetch(t, srv, "/", true)
-	if status != http.StatusOK || !strings.Contains(body, `<p class="banner">`+connecting("dev")+"</p>") {
-		t.Errorf("htmx GET / while connecting = %d, want 200 with the banner %q", status, connecting("dev"))
-	}
-	if !strings.Contains(body, "○ 0/0 instances") {
-		t.Error("htmx connecting response has no health in #status")
-	}
-
-	// The first build fails: its error, and Retry for dev.
-	g.release("dev", errors.New("dial tcp: connection refused"))
-	waitUntil(t, 3*time.Second, "build error", func() bool { return m.Err() != nil })
-	for _, path := range []string{"/", "/grid", "/workers/orders"} {
-		status, body := fetch(t, srv, path, false)
-		if status != http.StatusOK {
-			t.Errorf("GET %s after a failed build = %d, want 200", path, status)
-		}
-		for _, want := range []string{`<p class="err">dial tcp: connection refused</p>`, "Retry", retry("dev")} {
-			if !strings.Contains(body, want) {
-				t.Errorf("GET %s after a failed build lacks %q", path, want)
+// TestHandlerRecoversPanic: a handler that panics answers 500, its panic
+// logged, and the server serves on.
+func TestHandlerRecoversPanic(t *testing.T) {
+	var logged []string
+	h := recoverPanics(func(format string, args ...any) { logged = append(logged, format) },
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/boom" {
+				panic(&fleet.TickPanic{Value: "<b>reply broke</b>", Stack: []byte("goroutine 9")})
 			}
-		}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/boom", nil))
+	if body := rec.Body.String(); rec.Code != http.StatusInternalServerError || !strings.Contains(body, "internal error: &lt;b&gt;reply broke&lt;/b&gt;") || strings.Contains(body, "goroutine") {
+		t.Errorf("panicking handler = %d %q, want 500 naming the panic, escaped, without its stack", rec.Code, body)
 	}
-	status, body = fetch(t, srv, "/", true)
-	if status != http.StatusOK || !strings.Contains(body, `<p class="banner">dial tcp: connection refused</p>`) {
-		t.Errorf("htmx GET / after a failed build = %d, want 200 with the error as banner", status)
+	if len(logged) != 1 {
+		t.Errorf("logged %d times, want once", len(logged))
 	}
-
-	// Retry succeeds: dev's (empty) dashboard.
-	activate(t, m, g, "dev")
-	waitUntil(t, 3*time.Second, "dev's first snapshot", func() bool { return m.Current().History.Latest() != nil })
-	_, body = fetch(t, srv, "/", false)
-	if strings.Contains(body, "Retry") || strings.Contains(body, "Connecting") || !strings.Contains(body, "No workers") {
-		t.Error("GET / with dev active should show dev's dashboard")
-	}
-
-	// Switching to prod: a tab already on prod waits for it, dev's tabs keep
-	// dev's data.
-	if err := m.Switch("prod"); err != nil {
-		t.Fatal(err)
-	}
-	if _, body := fetch(t, srv, "/?server=prod", false); !strings.Contains(body, connecting("prod")) {
-		t.Errorf("GET /?server=prod while prod builds lacks %q", connecting("prod"))
-	}
-	for _, path := range []string{"/", "/?server=dev"} {
-		if _, body := fetch(t, srv, path, false); strings.Contains(body, "Connecting") || !strings.Contains(body, "No workers") {
-			t.Errorf("GET %s while prod builds should show dev's dashboard", path)
-		}
-	}
-
-	// The switch fails: dev keeps polling; prod's tab shows the error and
-	// retries prod.
-	g.release("prod", errors.New("prod unreachable"))
-	waitUntil(t, 3*time.Second, "prod's build error", func() bool { return m.Err() != nil })
-	_, body = fetch(t, srv, "/?server=prod", false)
-	for _, want := range []string{"prod unreachable", "Retry", retry("prod")} {
-		if !strings.Contains(body, want) {
-			t.Errorf("GET /?server=prod after its build failed lacks %q", want)
-		}
-	}
-	if strings.Contains(body, `hx-trigger="every`) {
-		t.Error("error page polls: every poll would repeat the error as a banner")
-	}
-	if _, body := fetch(t, srv, "/?server=dev", false); strings.Contains(body, "prod unreachable") || !strings.Contains(body, "No workers") {
-		t.Error("GET /?server=dev should still show dev's dashboard")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("next request = %d, want it served", rec.Code)
 	}
 }
 
 // TestFillCarriesNoteAndTips: the header of every page names the balancers
 // behind the server and hovers each picker entry with where it was reached.
 func TestFillCarriesNoteAndTips(t *testing.T) {
-	h := NewHistory(time.Second)
 	s := snap(time.Unix(1000, 0),
-		PodSnapshot{Key: "#a", Via: "http://lb:8090/varmq", Instance: "a", Label: "instance-1", Balanced: true},
-		PodSnapshot{Key: "#b", Via: "http://lb:8090/varmq", Instance: "b", Label: "instance-2", Balanced: true},
-		PodSnapshot{Key: "http://c:8090/varmq", Via: "http://c:8090/varmq", Label: "instance-3"},
+		fleet.PodSnapshot{Key: "#a", Via: "http://lb:8090/varmq", Instance: "a", Label: "instance-1", Balanced: true},
+		fleet.PodSnapshot{Key: "#b", Via: "http://lb:8090/varmq", Instance: "b", Label: "instance-2", Balanced: true},
+		fleet.PodSnapshot{Key: "http://c:8090/varmq", Via: "http://c:8090/varmq", Label: "instance-3"},
 	)
 	s.Behind = map[string]int{"http://lb:8090/varmq": 2}
-	h.Append(s)
 
 	var p Page
-	fill(&p, h)
+	fill(&p, []*fleet.Snapshot{s})
 
 	if want := "2 instances behind lb:8090"; p.Note != want {
 		t.Errorf("Note = %q, want %q", p.Note, want)
 	}
 	want := []PodOption{
-		{Key: "#a", Label: "instance-1", Tip: "a via http://lb:8090/varmq"},
-		{Key: "#b", Label: "instance-2", Tip: "b via http://lb:8090/varmq"},
-		{Key: "http://c:8090/varmq", Label: "instance-3", Tip: "http://c:8090/varmq"},
+		{Label: "instance-1", Tip: "a via http://lb:8090/varmq"},
+		{Label: "instance-2", Tip: "b via http://lb:8090/varmq"},
+		{Label: "instance-3", Tip: "http://c:8090/varmq"},
 	}
 	if !slices.Equal(p.Pods, want) {
 		t.Errorf("Pods = %+v, want %+v", p.Pods, want)
@@ -921,12 +1307,13 @@ func TestFillCarriesNoteAndTips(t *testing.T) {
 // TestControlsBehindBalancer: one balanced unit's pages offer no controls,
 // only the note saying why; a scope holding one offers no restart.
 func TestControlsBehindBalancer(t *testing.T) {
-	_, srvs := newFakes(t, "a", "b", "c")
-	lb := newRoundRobinLB(t, srvs...)
-	srv, _ := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	_, srvs := fleettest.NewInstances(t, "a", "b", "c")
+	lb := fleettest.NewRoundRobinLB(t, srvs...)
+	srv, f := serveBalanced(t, []string{lb.URL}, "#a", "#b", "#c")
+	one := fleet.UnitsOf(f.latest("multi"))["#a"].Label
 	note := `<p class="note">` + oneUnitCopy + `</p>`
 
-	_, body := fetch(t, srv, "/workers/w?server=multi&pod=%23a", false)
+	_, body := fetch(t, srv, "/workers/w?server=multi&instance="+one, false)
 	if body = html.UnescapeString(body); !strings.Contains(body, note) {
 		t.Errorf("detail of one balanced unit lacks the note %q", note)
 	}
@@ -944,7 +1331,7 @@ func TestControlsBehindBalancer(t *testing.T) {
 		t.Error("merged detail carries the one-unit note")
 	}
 
-	_, body = fetch(t, srv, "/?server=multi&pod=%23a", false)
+	_, body = fetch(t, srv, "/?server=multi&instance="+one, false)
 	if body = html.UnescapeString(body); !strings.Contains(body, note) || strings.Contains(body, `id="bulk"`) {
 		t.Errorf("dashboard of one balanced unit should have the note and no bulk form:\n%s", body)
 	}
@@ -955,7 +1342,8 @@ func TestControlsBehindBalancer(t *testing.T) {
 	// Without balancers nothing changes.
 	_, _, aSrv, bSrv := twoFakes(t)
 	plain, _ := newTestServer(t, aSrv, bSrv)
-	for _, path := range []string{"/workers/orders?server=multi", "/workers/orders?server=multi&pod=" + url.QueryEscape(aSrv.URL)} {
+	label := fleettest.StaticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
+	for _, path := range []string{"/workers/orders?server=multi", "/workers/orders?server=multi&instance=" + label} {
 		if _, body := fetch(t, plain, path, false); !strings.Contains(body, ">Restart</button>") {
 			t.Errorf("GET %s on a server without balancers lacks Restart", path)
 		}
@@ -965,26 +1353,24 @@ func TestControlsBehindBalancer(t *testing.T) {
 // TestFillMarksBalancedScope: a page's scope holds a balanced unit when it
 // is merged over one, or is one.
 func TestFillMarksBalancedScope(t *testing.T) {
-	h := NewHistory(time.Second)
-	h.Append(snap(time.Unix(1000, 0),
-		PodSnapshot{Key: "#a", Via: "http://lb:1", Instance: "a", Balanced: true},
-		PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"},
-	))
-	plain := NewHistory(time.Second)
-	plain.Append(snap(time.Unix(1000, 0), PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c"}))
+	mixed := []*fleet.Snapshot{snap(time.Unix(1000, 0),
+		fleet.PodSnapshot{Key: "#a", Via: "http://lb:1", Instance: "a", Label: "instance-1", Balanced: true},
+		fleet.PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c", Label: "instance-2"},
+	)}
+	plain := []*fleet.Snapshot{snap(time.Unix(1000, 0), fleet.PodSnapshot{Key: "http://c:1", Via: "http://c:1", Instance: "c", Label: "instance-1"})}
 
 	for _, tc := range []struct {
-		hist          *History
+		snaps         []*fleet.Snapshot
 		pod           string
 		scope, oneBal bool
 	}{
-		{h, "", true, false},
-		{h, "#a", true, true},
-		{h, "http://c:1", false, false},
+		{mixed, "", true, false},
+		{mixed, "instance-1", true, true},
+		{mixed, "instance-2", false, false},
 		{plain, "", false, false},
 	} {
 		p := Page{Pod: tc.pod}
-		fill(&p, tc.hist)
+		fill(&p, tc.snaps)
 		if p.ScopeBalanced != tc.scope || p.OneBalanced != tc.oneBal {
 			t.Errorf("pod %q: ScopeBalanced %v OneBalanced %v, want %v %v", tc.pod, p.ScopeBalanced, p.OneBalanced, tc.scope, tc.oneBal)
 		}

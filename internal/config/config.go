@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -46,6 +48,9 @@ type Server struct {
 	DNS        *DNSRef        `json:"dns,omitempty"`
 	Token      string         `json:"token,omitempty"`
 	Interval   int            `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+	// History is how far back the server's longer charts reach, in whole
+	// days: "7d". Empty is DefaultHistory.
+	History string `json:"history,omitempty"`
 }
 
 // defaultPollInterval is used when Server.Interval is unset or non-positive.
@@ -58,6 +63,36 @@ func (s *Server) PollInterval() time.Duration {
 		return defaultPollInterval
 	}
 	return time.Duration(s.Interval) * time.Second
+}
+
+const (
+	// DefaultHistory is a server's history when it sets none: the 24h charts.
+	DefaultHistory = 24 * time.Hour
+	// MaxHistory is the longest history a server may set: a 30d chart is
+	// 720 hourly points, a point per pixel of its 720 px.
+	MaxHistory = 30 * 24 * time.Hour
+)
+
+// ParseHistory reads a server's history: whole days, "1d" to "30d", the
+// number as written plainly — no sign, no leading zero.
+func ParseHistory(v string) (time.Duration, error) {
+	maxDays := int(MaxHistory / (24 * time.Hour))
+	days, ok := strings.CutSuffix(v, "d")
+	n, err := strconv.Atoi(days)
+	if !ok || err != nil || days != strconv.Itoa(n) || n < 1 || n > maxDays {
+		return 0, fmt.Errorf("history must be whole days from 1d to %dd, got %q", maxDays, v)
+	}
+	return time.Duration(n) * 24 * time.Hour, nil
+}
+
+// HistorySpan returns History as a duration: DefaultHistory when it is
+// unset, or not one Validate accepts.
+func (s *Server) HistorySpan() time.Duration {
+	d, err := ParseHistory(s.History)
+	if err != nil {
+		return DefaultHistory
+	}
+	return d
 }
 
 // Validate checks that exactly one of Endpoints, Kubernetes or DNS is
@@ -78,6 +113,12 @@ func (s *Server) Validate() error {
 	}
 	if set == 0 {
 		return fmt.Errorf("server %q: exactly one of endpoints, kubernetes or dns must be set, got neither", s.Name)
+	}
+
+	if s.History != "" {
+		if _, err := ParseHistory(s.History); err != nil {
+			return fmt.Errorf("server %q: %w", s.Name, err)
+		}
 	}
 
 	if hasDNS {
@@ -133,8 +174,8 @@ type Config struct {
 	Servers       map[string]*Server `json:"servers"`
 }
 
-// configPath returns the absolute path to the vartop config file.
-func configPath() (string, error) {
+// Path returns the absolute path to the vartop config file.
+func Path() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("could not determine user config directory: %w", err)
@@ -146,7 +187,7 @@ func configPath() (string, error) {
 // Load reads the configuration from os.UserConfigDir()/vartop/config.json.
 // If the file does not exist, it returns ErrConfigNotFound.
 func Load() (*Config, error) {
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
 		return nil, err
 	}
@@ -180,9 +221,13 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes the configuration to os.UserConfigDir()/vartop/config.json.
+// Save writes the configuration to os.UserConfigDir()/vartop/config.json. It
+// writes a new temporary file (0600: it holds the tokens) beside it and
+// renames that over it, so a reader never sees a half-written file; a
+// write that fails leaves no temporary file behind. A config.json that is
+// a symlink stays one: the file it links to is replaced.
 func Save(cfg *Config) error {
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
 		return err
 	}
@@ -196,7 +241,25 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("failed to encode config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	// An older vartop wrote config.json.tmp, keeping the mode of one
+	// there; one it left behind may hold tokens others can read.
+	_ = os.Remove(path + ".tmp")
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		path = target
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
