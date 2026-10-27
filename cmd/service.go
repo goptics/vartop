@@ -3,7 +3,9 @@ package cmd
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -268,6 +270,32 @@ func writeServiceFile(path, content string) error {
 		return err
 	}
 	return os.Chmod(path, 0o600) // WriteFile keeps the mode of a file there
+}
+
+// installServiceFile writes a login service's file at path (see
+// writeServiceFile), then has the service manager take it (register).
+// Should either fail, a file that was not there before is undone —
+// through uninstall once the manager may have taken some of it — so that
+// Installed, which looks for the file, does not report a service the
+// manager never took (R32): vartop then spawns its daemon itself. A file
+// that was there before is kept: the manager knows it from an install
+// that worked.
+func installServiceFile(path, content string, register, uninstall func() error) error {
+	_, err := os.Stat(path)
+	created := errors.Is(err, fs.ErrNotExist)
+	if err := writeServiceFile(path, content); err != nil {
+		if created {
+			_ = os.Remove(path)
+		}
+		return err
+	}
+	if err := register(); err != nil {
+		if created {
+			_ = uninstall() // the manager may be unreachable: its part of the undo fails too
+		}
+		return err
+	}
+	return nil
 }
 
 // xmlText escapes s for XML text or an attribute value.

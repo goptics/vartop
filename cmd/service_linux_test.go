@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -8,11 +9,19 @@ import (
 	"testing"
 )
 
-// recordRunner is a runner that runs nothing and records each command.
-type recordRunner struct{ cmds []string }
+// recordRunner is a runner that runs nothing and records each command;
+// those that hold fail fail.
+type recordRunner struct {
+	cmds []string
+	fail string
+}
 
 func (r *recordRunner) run(name string, args ...string) error {
-	r.cmds = append(r.cmds, strings.Join(append([]string{name}, args...), " "))
+	cmd := strings.Join(append([]string{name}, args...), " ")
+	r.cmds = append(r.cmds, cmd)
+	if r.fail != "" && strings.Contains(cmd, r.fail) {
+		return fmt.Errorf("%s: exit status 1: Failed to connect to bus", cmd)
+	}
 	return nil
 }
 
@@ -71,5 +80,58 @@ func TestSystemdService(t *testing.T) {
 	}
 	if !slices.Equal(r.cmds, want) {
 		t.Errorf("commands run:\n%s\nwant:\n%s", strings.Join(r.cmds, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestSystemdInstallRollsBack (R32): an Install that fails at systemctl
+// removes the unit it wrote — Installed, which looks for it, then says
+// no, and vartop spawns its daemon itself — undoing what systemctl did of
+// it; a unit there before is kept, as systemd knows it from an install
+// that worked.
+func TestSystemdInstallRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name, fail string
+		existed    bool
+		want       []string
+	}{
+		{name: "daemon-reload fails", fail: "daemon-reload", want: []string{
+			"systemctl --user daemon-reload",
+			"systemctl --user disable --now vartop.service",
+			"systemctl --user daemon-reload",
+		}},
+		{name: "restart fails", fail: "restart", want: []string{
+			"systemctl --user daemon-reload",
+			"systemctl --user enable vartop.service",
+			"systemctl --user restart vartop.service",
+			"systemctl --user disable --now vartop.service",
+			"systemctl --user daemon-reload",
+		}},
+		{name: "unit there before", fail: "daemon-reload", existed: true, want: []string{
+			"systemctl --user daemon-reload",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolate(t)
+			r := &recordRunner{fail: tc.fail}
+			sup := newSupervisor(r.run)
+			unit := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "systemd", "user", "vartop.service")
+			if tc.existed {
+				if err := writeServiceFile(unit, "an older unit"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := sup.Install("/opt/vartop/vartop", goldenEnv); err == nil || !strings.Contains(err.Error(), tc.fail) {
+				t.Errorf("Install() = %v, want the failure of systemctl %s", err, tc.fail)
+			}
+			if _, err := os.Stat(unit); tc.existed == os.IsNotExist(err) {
+				t.Errorf("unit after the failed Install: %v; want it there %v", err, tc.existed)
+			}
+			if sup.Installed() != tc.existed {
+				t.Errorf("Installed() = %v, want %v", sup.Installed(), tc.existed)
+			}
+			if !slices.Equal(r.cmds, tc.want) {
+				t.Errorf("commands run:\n%s\nwant:\n%s", strings.Join(r.cmds, "\n"), strings.Join(tc.want, "\n"))
+			}
+		})
 	}
 }

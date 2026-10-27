@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/xml"
+	"errors"
 	"flag"
 	"maps"
 	"os"
@@ -101,6 +102,46 @@ func TestServiceFilesGolden(t *testing.T) {
 		`KUBECONFIG=C:\Users\u\.kube\a "b".yaml`,
 	})
 	golden(t, "vartop-task.xml", windowsTaskXML(`C:\Program Files\vartop\vartop.exe`, winEnv))
+}
+
+// TestInstallServiceFile (R32): the service file Install writes is undone
+// when the service manager does not take it — unless it was there before,
+// from an install that worked.
+func TestInstallServiceFile(t *testing.T) {
+	refused := errors.New("bootstrap: exit status 5")
+	for _, tc := range []struct {
+		name        string
+		existed     bool
+		registerErr error
+		wantFile    bool
+		wantUndone  bool
+	}{
+		{name: "taken", wantFile: true},
+		{name: "refused", registerErr: refused, wantUndone: true},
+		{name: "refused, there before", existed: true, registerErr: refused, wantFile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agents", "vartop.plist")
+			if tc.existed {
+				if err := writeServiceFile(path, "older"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			undone := false
+			err := installServiceFile(path, "new", func() error { return tc.registerErr },
+				func() error { undone = true; return os.Remove(path) })
+			if !errors.Is(err, tc.registerErr) {
+				t.Errorf("installServiceFile() = %v, want %v", err, tc.registerErr)
+			}
+			data, statErr := os.ReadFile(path)
+			if (statErr == nil) != tc.wantFile || tc.wantFile && string(data) != "new" {
+				t.Errorf("file = %q, %v; want it there %v, new", data, statErr, tc.wantFile)
+			}
+			if undone != tc.wantUndone {
+				t.Errorf("undone %v, want %v", undone, tc.wantUndone)
+			}
+		})
+	}
 }
 
 // TestWindowsArgsRoundTrip: the arguments the task passes parse back,

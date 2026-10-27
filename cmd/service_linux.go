@@ -29,18 +29,18 @@ func (s *systemdService) Installed() bool {
 
 // Install writes the unit, enables it and restarts it: restart starts a
 // unit not running and, gracefully, replaces a daemon of the old unit
-// (one systemd restarted after a kill, say).
+// (one systemd restarted after a kill, say). A unit it wrote anew is
+// uninstalled again should systemctl fail (installServiceFile).
 func (s *systemdService) Install(exe string, env map[string]string) error {
-	if err := writeServiceFile(s.path, systemdUnit(exe, env)); err != nil {
-		return err
-	}
-	if err := s.systemctl("daemon-reload"); err != nil {
-		return err
-	}
-	if err := s.systemctl("enable", serviceUnit); err != nil {
-		return err
-	}
-	return s.systemctl("restart", serviceUnit)
+	return installServiceFile(s.path, systemdUnit(exe, env), func() error {
+		if err := s.systemctl("daemon-reload"); err != nil {
+			return err
+		}
+		if err := s.systemctl("enable", serviceUnit); err != nil {
+			return err
+		}
+		return s.systemctl("restart", serviceUnit)
+	}, s.Uninstall)
 }
 
 func (s *systemdService) Uninstall() error {

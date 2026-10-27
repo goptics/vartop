@@ -222,6 +222,7 @@ type ensureOptions struct {
 	kill    func(pid int) error // ends a daemon that does not stop when asked
 	now     func() time.Time    // time.Now when nil
 	sleep   func(time.Duration) // time.Sleep when nil
+	warn    io.Writer           // where launchDaemon's warning goes; nil drops it
 }
 
 func (o ensureOptions) withDefaults() ensureOptions {
@@ -255,13 +256,24 @@ var localDaemon = func() (o ensureOptions, release func(), err error) {
 		want:    ownLease(),
 		sup:     newSupervisor(runCommand),
 		exe:     exe,
-		env:     serviceEnv(os.Environ()),
+		env:     withDataDir(serviceEnv(os.Environ()), dataDir),
 		spawn: func() error {
 			rotateIdleLog(ctl, dataDir)
 			return spawnDetached(exe, []string{"daemon", "run"}, dataDir)
 		},
 		kill: killPID,
 	}, func() { _ = ctl.Close() }, nil
+}
+
+// withDataDir is the login service's environment env with
+// VARTOP_DATA_DIR, when set, made dataDir, the absolute dir it names: the
+// service manager runs the daemon in a working dir of its own, where a
+// relative one names another dir (as with spawnDetached).
+func withDataDir(env map[string]string, dataDir string) map[string]string {
+	if env["VARTOP_DATA_DIR"] != "" {
+		env["VARTOP_DATA_DIR"] = dataDir
+	}
+	return env
 }
 
 // ensureDaemon makes sure a daemon collects for this vartop: one of its
@@ -307,16 +319,38 @@ func ensureDaemon(o ensureOptions) error {
 
 // launchDaemon starts a daemon and returns its lease once it claimed it:
 // the first lease other than that of token old. With the login service
-// installed, Install alone starts it.
+// installed, Install alone starts it — unless Install fails, or no daemon
+// claims the lease after it: then a detached daemon is spawned (R32), so
+// that a broken service manager never means no daemon. The service's
+// failure is a warning (o.warn) once the spawned daemon claimed the lease,
+// part of the error should it not.
 func launchDaemon(o ensureOptions, old string) (store.Lease, error) {
 	o = o.withDefaults()
-	var err error
-	if o.sup.Installed() {
-		err = o.sup.Install(o.exe, o.env)
-	} else {
-		err = o.spawn()
+	if !o.sup.Installed() {
+		return spawnDaemon(o, old)
 	}
+	svcErr := o.sup.Install(o.exe, o.env)
+	if svcErr == nil {
+		l, err := waitStarted(o, old)
+		if err == nil {
+			return l, nil
+		}
+		svcErr = err
+	}
+	l, err := spawnDaemon(o, old)
 	if err != nil {
+		return store.Lease{}, errors.Join(fmt.Errorf("vartop daemon's login service: %w", svcErr), err)
+	}
+	if o.warn != nil {
+		fmt.Fprintf(o.warn, "vartop daemon started detached; its login service failed: %v\n", svcErr)
+	}
+	return l, nil
+}
+
+// spawnDaemon spawns a detached daemon, and returns its lease once it
+// claimed it (see waitStarted).
+func spawnDaemon(o ensureOptions, old string) (store.Lease, error) {
+	if err := o.spawn(); err != nil {
 		return store.Lease{}, fmt.Errorf("start the vartop daemon: %w", err)
 	}
 	return waitStarted(o, old)
@@ -413,36 +447,50 @@ const (
 
 // installService installs the login service, with this vartop's executable
 // and environment, and returns the lease of the daemon it started. A daemon
-// running is stopped first: it would keep the lease, unsupervised.
+// running is stopped first: it would keep the lease, unsupervised. Should
+// Install fail, that daemon is started again, detached: a failed install
+// does not stop collection.
 func installService(o ensureOptions) (store.Lease, error) {
 	o = o.withDefaults()
-	old, _, err := stopDaemon(o)
+	old, how, err := stopDaemon(o)
 	if err != nil {
 		return store.Lease{}, err
 	}
 	if err := o.sup.Install(o.exe, o.env); err != nil {
-		return store.Lease{}, err
+		if how == notRunning {
+			return store.Lease{}, err
+		}
+		if _, spawnErr := spawnDaemon(o, old.Token); spawnErr != nil {
+			return store.Lease{}, errors.Join(err, spawnErr)
+		}
+		return store.Lease{}, fmt.Errorf("%w (the vartop daemon runs detached meanwhile)", err)
 	}
 	return waitStarted(o, old.Token)
 }
 
 // startCollecting makes sure the daemon collects (ensureDaemon) before a UI
 // opens. A UI works without it, so a failure is printed to w, not
-// returned.
+// returned; so is a warning (see launchDaemon).
 func startCollecting(w io.Writer) {
-	if err := ensureLocalDaemon(); err != nil {
+	if err := ensureLocal(w); err != nil {
 		fmt.Fprintln(w, err)
 	}
 }
 
 // ensureLocalDaemon is ensureDaemon over this vartop's daemon (see
-// localDaemon): what a UI starts the daemon with.
-func ensureLocalDaemon() error {
+// localDaemon): what a UI starts the daemon with once it runs (web's Start
+// collector, the TUI's r), dropping a warning: the daemon runs.
+func ensureLocalDaemon() error { return ensureLocal(nil) }
+
+// ensureLocal is ensureDaemon over this vartop's daemon, warning to warn
+// (nil drops a warning).
+func ensureLocal(warn io.Writer) error {
 	o, closeCtl, err := localDaemon()
 	if err != nil {
 		return err
 	}
 	defer closeCtl()
+	o.warn = warn
 	return ensureDaemon(o)
 }
 
@@ -683,6 +731,7 @@ var daemonStartCmd = &cobra.Command{
 	Long: `Start the daemon unless it is running. One of another build, config path or
 KUBECONFIG is restarted with this vartop's, as vartop and vartop web do.`,
 	RunE: withDaemon(func(o ensureOptions, w io.Writer) error {
+		o.warn = w
 		if err := ensureDaemon(o); err != nil {
 			return err
 		}
@@ -723,6 +772,7 @@ var daemonRestartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart the daemon with this vartop's build and environment",
 	RunE: withDaemon(func(o ensureOptions, w io.Writer) error {
+		o.warn = w
 		old, _, err := stopDaemon(o)
 		if err != nil {
 			return err

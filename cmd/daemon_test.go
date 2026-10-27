@@ -52,10 +52,12 @@ func isolate(t *testing.T) string {
 
 // fakeSupervisor is a login service that records what it is asked.
 // Install starts the service's daemon by running onStart, as the real ones
-// do; Uninstall runs onUninstall first.
+// do — unless installErr is set: then it fails, and changes nothing;
+// Uninstall runs onUninstall first.
 type fakeSupervisor struct {
 	mu          sync.Mutex
 	installed   bool
+	installErr  error
 	calls       []string
 	exe         string
 	env         map[string]string
@@ -77,6 +79,9 @@ func (f *fakeSupervisor) Installed() bool {
 
 func (f *fakeSupervisor) Install(exe string, env map[string]string) error {
 	f.record("install")
+	if f.installErr != nil {
+		return f.installErr
+	}
 	f.mu.Lock()
 	f.installed, f.exe, f.env = true, exe, env
 	f.mu.Unlock()
@@ -356,6 +361,170 @@ func TestWaitStartedOutlastsCrashedDaemon(t *testing.T) {
 			t.Errorf("waited %v for the lease, want %v", waited, want)
 		}
 	})
+}
+
+// TestLaunchFallsBackToDetached (R32): with the login service installed,
+// a daemon is spawned detached when Install fails or starts no daemon; the
+// service's failure is then a warning, or, should the spawned daemon not
+// start either, part of the error.
+func TestLaunchFallsBackToDetached(t *testing.T) {
+	installErr := errors.New("systemctl --user daemon-reload: exit status 1: Failed to connect to bus")
+	for _, tc := range []struct {
+		name        string
+		installErr  error
+		serviceRuns bool  // Install starts a daemon
+		spawnErr    error // of the spawn
+		spawnRuns   bool  // the daemon spawned claims the lease
+		wantErr     []string
+		wantWarn    []string
+	}{
+		{name: "install fails", installErr: installErr, spawnRuns: true,
+			wantWarn: []string{"vartop daemon started detached; its login service failed: ", installErr.Error()}},
+		{name: "service starts none", spawnRuns: true,
+			wantWarn: []string{"vartop daemon started detached; its login service failed: ", "vartop daemon did not start; see "}},
+		{name: "install and spawn fail", installErr: installErr, spawnErr: errors.New("fork/exec: no such file"),
+			wantErr: []string{installErr.Error(), "start the vartop daemon: fork/exec: no such file"}},
+		{name: "neither starts one", installErr: installErr,
+			wantErr: []string{installErr.Error(), "vartop daemon did not start; see "}},
+		{name: "service starts one", serviceRuns: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDaemon(t)
+			d.sup.installed, d.sup.installErr = true, tc.installErr
+			d.onFakeClock()
+			var warn bytes.Buffer
+			d.o.warn = &warn
+			d.startsAs(t, d.o.want)
+			if !tc.serviceRuns {
+				d.sup.onStart = nil
+			}
+			spawn := d.o.spawn
+			d.o.spawn = func() error {
+				if tc.spawnErr != nil {
+					return tc.spawnErr
+				}
+				if !tc.spawnRuns {
+					d.mu.Lock()
+					d.spawns++
+					d.mu.Unlock()
+					return nil
+				}
+				return spawn()
+			}
+			err := ensureDaemon(d.o)
+			if len(tc.wantErr) == 0 && err != nil {
+				t.Fatalf("ensureDaemon() = %v, want nil", err)
+			}
+			for _, want := range tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("ensureDaemon() = %v, want %q in it", err, want)
+				}
+			}
+			for _, want := range tc.wantWarn {
+				if !strings.Contains(warn.String(), want) {
+					t.Errorf("warned %q, want %q in it", warn.String(), want)
+				}
+			}
+			if len(tc.wantWarn) == 0 && warn.Len() != 0 {
+				t.Errorf("warned %q, want no warning", warn.String())
+			}
+			if calls := strings.Join(d.sup.called(), ","); calls != "install" {
+				t.Errorf("service calls = %q, want install", calls)
+			}
+			wantSpawns := 1
+			if tc.serviceRuns || tc.spawnErr != nil {
+				wantSpawns = 0
+			}
+			if d.spawned() != wantSpawns {
+				t.Errorf("spawns = %d, want %d", d.spawned(), wantSpawns)
+			}
+			if l, fresh := lease(t, d.o.ctl); (tc.serviceRuns || tc.spawnRuns) != (fresh && l.Build == d.o.want.Build) {
+				t.Errorf("lease = %+v (fresh %v); want a daemon of this build exactly when one started", l, fresh)
+			}
+		})
+	}
+}
+
+// TestServiceWarningShown: the warning of a daemon started detached
+// because the login service failed reaches the user of `daemon start`
+// and of a UI opening (startCollecting).
+func TestServiceWarningShown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T) string
+	}{
+		{"daemon start", func(t *testing.T) string {
+			out, err := runDaemonCmd(t, daemonStartCmd)
+			if err != nil || !strings.Contains(out, "vartop daemon is running (pid ") {
+				t.Errorf("daemon start = %q, %v; want it running", out, err)
+			}
+			return out
+		}},
+		{"a UI opening", func(t *testing.T) string {
+			var w bytes.Buffer
+			startCollecting(&w)
+			return w.String()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDaemon(t)
+			d.sup.installed, d.sup.installErr = true, errors.New("launchctl bootstrap: exit status 5")
+			d.startsAs(t, d.o.want)
+			if out := tc.run(t); !strings.Contains(out, "vartop daemon started detached; its login service failed: launchctl bootstrap: exit status 5") {
+				t.Errorf("printed %q, want the warning", out)
+			}
+		})
+	}
+}
+
+// TestInstallFailureKeepsCollecting: `daemon install` that fails has not
+// stopped collection for good: the daemon it stopped first is started
+// again, detached, and the error says so.
+func TestInstallFailureKeepsCollecting(t *testing.T) {
+	d := newTestDaemon(t)
+	d.sup.installErr = errors.New("launchctl bootstrap: exit status 5")
+	stopped := politeDaemon(t, d.o.ctl, d.o.want)
+	d.startsAs(t, d.o.want)
+	_, err := runDaemonCmd(t, daemonInstallCmd)
+	if err == nil || !strings.Contains(err.Error(), "launchctl bootstrap: exit status 5") || !strings.Contains(err.Error(), "runs detached") {
+		t.Errorf("daemon install = %v, want the install error, and that the daemon runs detached", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("the running daemon was not stopped first")
+	}
+	if l, fresh := lease(t, d.o.ctl); !fresh || l.Build != d.o.want.Build || d.spawned() != 1 {
+		t.Errorf("lease = %+v (fresh %v), spawns = %d; want one detached daemon collecting", l, fresh, d.spawned())
+	}
+}
+
+// TestServiceEnvAbsoluteDataDir: the login service gets the data dir a
+// relative VARTOP_DATA_DIR names from vartop's working dir, absolute: the
+// service manager runs the daemon in a working dir of its own.
+func TestServiceEnvAbsoluteDataDir(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("VARTOP_DATA_DIR", filepath.Join("rel", "data"))
+	o, release, err := localDaemon()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if !filepath.IsAbs(o.dataDir) || !strings.HasSuffix(o.dataDir, filepath.Join("rel", "data")) || o.env["VARTOP_DATA_DIR"] != o.dataDir {
+		t.Errorf("data dir %q, service VARTOP_DATA_DIR %q; want both %s, absolute", o.dataDir, o.env["VARTOP_DATA_DIR"], filepath.Join(dir, "rel", "data"))
+	}
+
+	t.Setenv("VARTOP_DATA_DIR", "")
+	o, release2, err := localDaemon()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release2()
+	if v, ok := o.env["VARTOP_DATA_DIR"]; !ok || v != "" {
+		t.Errorf("service VARTOP_DATA_DIR = %q (set %v), want it written empty: unset in vartop", v, ok)
+	}
 }
 
 func TestEnsureDaemonNoopWhenSameBuildAndEnv(t *testing.T) {
