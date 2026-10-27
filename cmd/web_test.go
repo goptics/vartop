@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -309,15 +310,15 @@ func TestWebLogsStoreNotices(t *testing.T) {
 		log.SetOutput(os.Stderr)
 		store.SetLogger(nil)
 	})
-	origAddr, origNoOpen := webAddr, webNoOpen
-	webAddr, webNoOpen = "127.0.0.1:0", true
+	origHost, origPort, origNoOpen := webHost, webPort, webNoOpen
+	webHost, webPort, webNoOpen = "127.0.0.1", 0, true
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // serve, then shut down at once
 	webCmd.SetContext(ctx)
 	var out bytes.Buffer
 	webCmd.SetOut(&out)
 	t.Cleanup(func() {
-		webAddr, webNoOpen = origAddr, origNoOpen
+		webHost, webPort, webNoOpen = origHost, origPort, origNoOpen
 		webCmd.SetContext(context.Background())
 		webCmd.SetOut(nil)
 	})
@@ -616,4 +617,60 @@ func isolate(t *testing.T) string {
 	t.Setenv("VARTOP_DATA_DIR", dataDir)
 	t.Setenv("KUBECONFIG", "")
 	return dataDir
+}
+
+// TestWebHostPortFlags: vartop web listens on --host and --port, by default
+// 127.0.0.1:7070; --addr is gone.
+func TestWebHostPortFlags(t *testing.T) {
+	for name, want := range map[string]string{"host": "127.0.0.1", "port": "7070"} {
+		if f := webCmd.Flags().Lookup(name); f == nil || f.DefValue != want {
+			t.Errorf("--%s = %+v, want a flag defaulting to %s", name, f, want)
+		}
+	}
+	if webCmd.Flags().Lookup("addr") != nil {
+		t.Error("vartop web still takes --addr")
+	}
+}
+
+// TestListenAddr: --host and --port make the address listened on; a port
+// out of range is refused, naming it.
+func TestListenAddr(t *testing.T) {
+	for _, c := range []struct {
+		host string
+		port int
+		want string
+	}{
+		{"127.0.0.1", 7070, "127.0.0.1:7070"},
+		{"localhost", 0, "localhost:0"},
+		{"::1", 8080, "[::1]:8080"},
+	} {
+		if got, err := listenAddr(c.host, c.port); err != nil || got != c.want {
+			t.Errorf("listenAddr(%q, %d) = %q, %v; want %q", c.host, c.port, got, err, c.want)
+		}
+	}
+	for _, port := range []int{-1, 65536, 70000} {
+		if _, err := listenAddr("127.0.0.1", port); err == nil || !strings.Contains(err.Error(), strconv.Itoa(port)) {
+			t.Errorf("listenAddr(port %d) error = %v, want one naming the port", port, err)
+		}
+	}
+}
+
+// TestWebRefusesNonLoopbackHost: --host must be a loopback address; the
+// dashboard has no login.
+func TestWebRefusesNonLoopbackHost(t *testing.T) {
+	isolate(t)
+	saveServersConfig(t, "prod", &config.Server{Name: "prod", Endpoints: []string{"http://127.0.0.1:1/varmq"}})
+	origHost, origPort, origNoOpen := webHost, webPort, webNoOpen
+	webHost, webPort, webNoOpen = "0.0.0.0", 0, true
+	webCmd.SetOut(io.Discard)
+	t.Cleanup(func() {
+		webHost, webPort, webNoOpen = origHost, origPort, origNoOpen
+		webCmd.SetOut(nil)
+		store.SetLogger(nil)
+	})
+	webCmd.SetContext(context.Background())
+	err := webCmd.RunE(webCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "0.0.0.0") || !strings.Contains(err.Error(), "loopback only") {
+		t.Fatalf("vartop web --host 0.0.0.0 = %v, want a refusal naming 0.0.0.0, loopback only", err)
+	}
 }

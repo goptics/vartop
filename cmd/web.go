@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -23,9 +25,19 @@ import (
 )
 
 var (
-	webAddr   string
+	webHost   string
+	webPort   int
 	webNoOpen bool
 )
+
+// listenAddr is the address vartop web listens on: host, and port from 0
+// (any free port) to 65535.
+func listenAddr(host string, port int) (string, error) {
+	if port < 0 || port > 65535 {
+		return "", fmt.Errorf("--port %d: want 0 (any free port) to 65535", port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
 
 // shutdownTimeout is how long in-flight requests get to finish on shutdown.
 const shutdownTimeout = 5 * time.Second
@@ -232,10 +244,18 @@ func sameEnvAsOwn() func(store.Lease) bool {
 
 var webCmd = &cobra.Command{
 	Use:   "web",
-	Short: "Open the dashboard in your browser",
+	Short: "Open the dashboard in your browser; collects every server while it runs",
+	Long: `vartop web serves the dashboard on --host and --port (loopback only: the
+dashboard has no login) and opens it in your browser. While it runs it
+collects every configured server into the data directory, keeping 24h of
+history; when it stops, collection stops too.`,
 	// A failure here (port in use, shutdown) is not a usage mistake.
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		addr, err := listenAddr(webHost, webPort)
+		if err != nil {
+			return err
+		}
 		if _, err := loadOrOnboard(); err != nil {
 			return err
 		}
@@ -251,12 +271,13 @@ var webCmd = &cobra.Command{
 		if webNoOpen {
 			open = func(string) error { return nil }
 		}
-		return runWeb(ctx, serverFlag, webAddr, cmd.OutOrStdout(), open, slog.Default())
+		return runWeb(ctx, serverFlag, addr, cmd.OutOrStdout(), open, slog.Default())
 	},
 }
 
 func init() {
-	webCmd.Flags().StringVar(&webAddr, "addr", "127.0.0.1:7070", "Loopback address to listen on")
+	webCmd.Flags().StringVar(&webHost, "host", "127.0.0.1", "Loopback host to listen on (the dashboard has no login)")
+	webCmd.Flags().IntVar(&webPort, "port", 7070, "Port to listen on (0: any free port)")
 	webCmd.Flags().BoolVar(&webNoOpen, "no-open", false, "Do not open the browser")
 	rootCmd.AddCommand(webCmd)
 }
