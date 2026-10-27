@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/collect"
 	"github.com/goptics/vartop/internal/config"
-	"github.com/goptics/vartop/internal/daemon"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 	"github.com/goptics/vartop/internal/store"
@@ -206,7 +206,7 @@ func (f *fixture) started() int {
 	return f.starts
 }
 
-// daemonRun is a daemon.Run in progress.
+// daemonRun is a collect.Run in progress.
 type daemonRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -218,7 +218,7 @@ func (f *fixture) startDaemon() {
 	f.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &daemonRun{cancel: cancel, done: make(chan struct{})}
-	o := daemon.Options{
+	o := collect.Options{
 		DataDir:   f.dir,
 		Config:    func() (*config.Config, string, error) { cfg, err := f.config(); return cfg, "", err },
 		BuildPool: f.build,
@@ -227,8 +227,8 @@ func (f *fixture) startDaemon() {
 	}
 	go func() {
 		defer close(r.done)
-		if code, err := daemon.Run(ctx, o); code != 0 || err != nil {
-			f.t.Errorf("daemon.Run = %d, %v", code, err)
+		if code, err := collect.Run(ctx, o); code != 0 || err != nil {
+			f.t.Errorf("collect.Run = %d, %v", code, err)
 		}
 	}()
 	f.mu.Lock()

@@ -1,4 +1,4 @@
-package daemon
+package collect
 
 import (
 	"encoding/json"
@@ -75,7 +75,7 @@ func (w *configWatch) next() (cfg *config.Config, err error) {
 // removed stop, those of servers added start, and those of servers changed
 // in any way (endpoints, interval, token…) restart; the others are left
 // alone. Servers started together are staggered over their interval.
-func (d *daemon) reload() {
+func (d *holder) reload() {
 	cfg, err := d.conf.next()
 	if err != nil {
 		if d.conf.good == nil {

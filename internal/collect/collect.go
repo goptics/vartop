@@ -3,7 +3,7 @@
 // UIs to read. It follows the config as servers are added, removed or
 // changed, polls a server at once when a UI pokes it, and keeps the server
 // files pruned.
-package daemon
+package collect
 
 import (
 	"context"
@@ -100,7 +100,7 @@ func Run(ctx context.Context, o Options) (code int, err error) {
 	}
 	o.Log.Info("collecting", "pid", o.Lease.PID, "build", o.Lease.Build, "data", o.DataDir)
 
-	d := &daemon{
+	d := &holder{
 		o:          o,
 		ctl:        ctl,
 		token:      token,
@@ -147,8 +147,8 @@ func takeOver(ctx context.Context, ctl *store.Control, o Options) (token string,
 	return ctl.TakeOver(l.Token, o.Lease, o.Now())
 }
 
-// daemon is a Run holding the lease.
-type daemon struct {
+// holder is a Run holding the lease.
+type holder struct {
 	o     Options
 	ctl   *store.Control
 	token string
@@ -170,7 +170,7 @@ type exit struct {
 
 // end makes Run return code and err, and reports true, unless it is
 // ending already.
-func (d *daemon) end(code int, err error) bool {
+func (d *holder) end(code int, err error) bool {
 	select {
 	case d.exit <- exit{code, err}:
 		return true
@@ -182,7 +182,7 @@ func (d *daemon) end(code int, err error) bool {
 // run is the daemon's loop: it renews the lease, passes pokes on, follows
 // the config and has the files pruned, until it has to stop. It never
 // waits on a server.
-func (d *daemon) run(ctx context.Context) (int, error) {
+func (d *holder) run(ctx context.Context) (int, error) {
 	pokes, err := d.ctl.Pokes()
 	if err != nil {
 		return 1, fmt.Errorf("read pokes: %w", err)
@@ -245,7 +245,7 @@ func (d *daemon) run(ctx context.Context) (int, error) {
 }
 
 // poke has every server whose poke counter moved polled.
-func (d *daemon) poke() {
+func (d *holder) poke() {
 	pokes, err := d.ctl.Pokes()
 	if d.seen.changed("pokes", errString(err)) && err != nil {
 		d.o.Log.Warn("cannot read pokes", "err", err)
@@ -268,7 +268,7 @@ func (d *daemon) poke() {
 // file pruned and removes the files of servers absent from the config for
 // RemovedGrace. Before a config was read, no file is taken for a removed
 // server's.
-func (d *daemon) maintain() {
+func (d *holder) maintain() {
 	now := d.o.Now()
 	if since := now.Sub(d.pruned); since >= 0 && since < PruneEvery {
 		return

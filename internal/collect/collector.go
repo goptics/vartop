@@ -1,4 +1,4 @@
-package daemon
+package collect
 
 import (
 	"context"
@@ -33,7 +33,7 @@ const internalError = "internal error (see daemon log)"
 // cancelled, but for a pool build, which cannot be: that one closes its
 // pool when it ends.
 type collector struct {
-	d      *daemon
+	d      *holder
 	name   string
 	srv    *config.Server
 	enc    string             // srv as JSON: what tells an edit
@@ -67,7 +67,7 @@ type queued struct {
 
 // start starts collecting srv, named name and encoded as enc, after delay.
 // A collector of the same name stopped before lets go of the file first.
-func (d *daemon) start(name string, srv *config.Server, enc string, delay time.Duration) {
+func (d *holder) start(name string, srv *config.Server, enc string, delay time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &collector{
 		d: d, name: name, srv: srv, enc: enc, cancel: cancel,

@@ -18,8 +18,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/goptics/vartop/internal/collect"
 	"github.com/goptics/vartop/internal/config"
-	"github.com/goptics/vartop/internal/daemon"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 	"github.com/goptics/vartop/internal/store"
@@ -652,7 +652,7 @@ func (d *testDaemon) beats(token string) func() {
 
 // takesOver is a sleep hook of the daemon vartop spawns finding the lease
 // of token dead fresh: once it has watched it for store.DeadAfter on clock
-// without a beat, it takes it over as l, as daemon.Run does (R34).
+// without a beat, it takes it over as l, as collect.Run does (R34).
 func (d *testDaemon) takesOver(t *testing.T, clock *fakeClock, dead string, l store.Lease) func() {
 	var spawnedAt time.Time
 	spawn := d.o.spawn
@@ -879,7 +879,7 @@ func newInProcess(t *testing.T, dataDir string, l store.Lease) *inProcess {
 // start runs one daemon in the background.
 func (p *inProcess) start() {
 	p.wg.Go(func() {
-		code, err := daemon.Run(p.ctx, daemon.Options{
+		code, err := collect.Run(p.ctx, collect.Options{
 			DataDir: p.dataDir,
 			Config:  readConfig,
 			Lease:   p.lease,

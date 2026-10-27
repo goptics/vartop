@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goptics/vartop/internal/collect"
 	"github.com/goptics/vartop/internal/config"
-	"github.com/goptics/vartop/internal/daemon"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/store"
 	"github.com/goptics/vartop/internal/web"
@@ -61,7 +61,7 @@ func collectingSource(t *testing.T, cfg *config.Config) web.Source {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = daemon.Run(ctx, daemon.Options{
+		_, _ = collect.Run(ctx, collect.Options{
 			DataDir: dataDir,
 			Config:  func() (*config.Config, string, error) { return cfg, "", nil },
 			Lease:   store.Lease{PID: os.Getpid(), Build: "test"},

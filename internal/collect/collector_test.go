@@ -1,4 +1,4 @@
-package daemon
+package collect
 
 import (
 	"bytes"
@@ -411,7 +411,7 @@ func newLabelsFixture(t *testing.T) *labelsFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &daemon{o: Options{DataDir: dir, Log: slog.New(slog.DiscardHandler)}, ctl: ctl, token: token, exit: make(chan exit, 1)}
+	d := &holder{o: Options{DataDir: dir, Log: slog.New(slog.DiscardHandler)}, ctl: ctl, token: token, exit: make(chan exit, 1)}
 	f := &labelsFixture{t: t, dir: dir, c: &collector{d: d, name: "a", queue: make(chan queued, queueLen)}}
 	f.w = &writer{c: f.c, db: db}
 	t.Cleanup(func() {

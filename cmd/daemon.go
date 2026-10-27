@@ -23,8 +23,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/collect"
 	"github.com/goptics/vartop/internal/config"
-	"github.com/goptics/vartop/internal/daemon"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/store"
 )
@@ -328,7 +328,7 @@ func withDataDir(env map[string]string, dataDir string) map[string]string {
 // A daemon it would keep whose beat is more than suspectAfter old may have
 // crashed (R42): it starts one anyway, without stopping that one. The new
 // daemon takes a dead one's lease over, or leaves a live one its lease and
-// exits 0 (daemon.Run); a daemon then beating again is no failure.
+// exits 0 (collect.Run); a daemon then beating again is no failure.
 func ensureDaemon(o ensureOptions) error {
 	o = o.withDefaults()
 	l, fresh, err := o.ctl.Lease()
@@ -401,7 +401,7 @@ func spawnDaemon(o ensureOptions, old string) (store.Lease, error) {
 // token old: old's daemon, stale but not stopped, may renew its lease yet on
 // waking from a suspend. With old's lease fresh when it starts waiting, it
 // waits store.DeadAfter longer: the new daemon watches old's beat that long
-// before it takes the lease of a crashed daemon over (daemon.Run).
+// before it takes the lease of a crashed daemon over (collect.Run).
 func waitStarted(o ensureOptions, old string) (store.Lease, error) {
 	deadline := o.now().Add(startWait)
 	for first := true; ; first = false {
@@ -427,7 +427,7 @@ func waitStarted(o ensureOptions, old string) (store.Lease, error) {
 // wait for it to go stale. One whose beat does not move for
 // store.DeadAfter is left alone (notResponding): its lease goes stale
 // within LeaseTTL, and a daemon started meanwhile takes it over
-// (daemon.Run). It returns the lease it found, and how the daemon stopped.
+// (collect.Run). It returns the lease it found, and how the daemon stopped.
 func stopDaemon(o ensureOptions) (store.Lease, stopped, error) {
 	o = o.withDefaults()
 	l, fresh, err := o.ctl.Lease()
@@ -739,7 +739,7 @@ func applyEnv(pairs []string) error {
 }
 
 // runDaemon collects into the data dir of vartop's environment until ctx
-// ends or the daemon has to stop (daemon.Run), logging as daemonLogger
+// ends or the daemon has to stop (collect.Run), logging as daemonLogger
 // says.
 func runDaemon(ctx context.Context) (int, error) {
 	dataDir, err := store.DataDir()
@@ -752,7 +752,7 @@ func runDaemon(ctx context.Context) (int, error) {
 	}
 	log, closeLog := daemonLogger(dataDir)
 	defer closeLog()
-	code, err := daemon.Run(ctx, daemon.Options{
+	code, err := collect.Run(ctx, collect.Options{
 		DataDir:   dataDir,
 		Config:    readConfig,
 		BuildPool: api.PoolFor,
