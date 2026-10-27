@@ -364,6 +364,9 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 	}
 	frags := []fragment{{"results", "results", ResultsView{Results: results, Noun: t.noun}}}
 	if set, p, ok := livePage(r, t.key, t.noun, t.srv.PollInterval(), snaps, t.label, worker, stale); ok {
+		if p.Detail != nil {
+			h.dayCharts(&p, p.Detail.Name, latestOf(snaps).At)
+		}
 		frags = append(frags, fragment{set, "live_oob", p})
 	}
 	h.fragments(w, frags...)
@@ -382,11 +385,13 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 	if worker != "" {
 		set = "detail"
 	}
+	var ranges ChartRanges
 	if from := r.Header.Get("HX-Current-URL"); from != "" {
 		u, err := url.Parse(from)
 		if err != nil {
 			return "", Page{}, false
 		}
+		ranges = rangesOf(u.Query()) // the charts keep showing the span they did
 		set, worker = "", ""
 		path := u.EscapedPath()
 		if path == "/" || path == "" {
@@ -398,7 +403,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 		}
 	}
 
-	p := Page{Server: key, Pod: label, Noun: n, IntervalSec: int(interval / time.Second), Stale: stale}
+	p := Page{Server: key, Pod: label, Noun: n, IntervalSec: int(interval / time.Second), Stale: stale, Ranges: ranges}
 	fill(&p, snaps)
 	if podGone(&p, snaps) {
 		return "", Page{}, false // the next poll shows why
@@ -413,6 +418,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 			return "", Page{}, false
 		}
 		p.Detail = &d
+		p.SelfURL = ranges.addTo(pageURL("/workers/"+url.PathEscape(worker), key, n.Param, label)) // for the charts' switches
 	default:
 		return "", Page{}, false
 	}

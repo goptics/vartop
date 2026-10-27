@@ -484,23 +484,8 @@ func WorkerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 		var sum float64
 		var contributing, expected int
 		for _, p := range PodsOf(s, pod) {
-			if p.Err != "" {
-				expected++
-				continue
-			}
-			sm := p.Workers[name]
-			if sm == nil {
-				if p.IsUnreached(name) {
-					expected++
-				}
-				continue
-			}
-			expected++
-			if !sm.RateOK {
-				continue
-			}
-			contributing++
-			sum += pick(sm)
+			v, c, e := unitRate(p, name, pick)
+			sum, contributing, expected = sum+v, contributing+c, expected+e
 		}
 		if contributing == 0 {
 			out[i] = noDataPoint(s)
@@ -509,6 +494,25 @@ func WorkerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 		}
 	}
 	return out
+}
+
+// unitRate is what unit p adds to a rate point of worker name: its rate
+// (pick), and whether it contributes one and is expected to (each 0 or 1;
+// see the file comment).
+func unitRate(p PodSnapshot, name string, pick func(*Sample) float64) (v float64, contributing, expected int) {
+	if p.Err != "" {
+		return 0, 0, 1
+	}
+	sm := p.Workers[name]
+	switch {
+	case sm == nil && p.IsUnreached(name):
+		return 0, 0, 1
+	case sm == nil:
+		return 0, 0, 0
+	case !sm.RateOK:
+		return 0, 0, 1
+	}
+	return pick(sm), 1, 1
 }
 
 // fleetRates charts a rate summed over every worker per snapshot, scaled by

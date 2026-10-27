@@ -140,7 +140,11 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .detail-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 8px; }
 .detail-head .status { font-weight: 600; }
 .chart { margin: 16px 0; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
-.chart figcaption { color: var(--subtle); font-size: .8rem; }
+.chart figcaption { color: var(--subtle); font-size: .8rem; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; }
+.seg { display: inline-flex; margin-left: auto; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg a { padding: 1px 10px; color: var(--subtle); text-decoration: none; }
+.seg a:hover { color: var(--fg); }
+.seg a[aria-current] { background: var(--accent); color: var(--bg); font-weight: 600; }
 .chart .peak { margin-left: 8px; }
 .chart .spark { width: 100%; }
 .pods { color: var(--subtle); }

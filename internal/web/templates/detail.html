@@ -15,12 +15,12 @@
   <div class="card failed"><h3>Failed</h3><p class="big">{{.Failed}}</p></div>
   <div class="card"><h3>Success rate</h3><p class="big">{{.SuccessRate}}</p></div>{{end}}
 </section>
-<figure class="chart">{{$c := history .Completed1h historyWindow $.Interval 720 120}}
-  <figcaption>Completed /s <span class="peak">peak {{tickLabel $c.Peak}}/s</span></figcaption>
+<figure class="chart">{{$c := history .Completed1h historyWindow $.Interval 720 120}}{{$peak := $c.Peak}}{{with $.CompletedDay}}{{$c = history .Points dayWindow dayBucket 720 120}}{{$peak = .Peak}}{{end}}
+  <figcaption>Completed /s <span class="peak">peak {{tickLabel $peak}}/s</span>{{template "range_switch" (rangeSwitch $ "completed")}}</figcaption>
   {{template "history" $c}}
 </figure>
-<figure class="chart failed">{{$c = history .Failed1h historyWindow $.Interval 720 120}}
-  <figcaption>Failed /s <span class="peak">peak {{tickLabel $c.Peak}}/s</span></figcaption>
+<figure class="chart failed">{{$c = history .Failed1h historyWindow $.Interval 720 120}}{{$peak = $c.Peak}}{{with $.FailedDay}}{{$c = history .Points dayWindow dayBucket 720 120}}{{$peak = .Peak}}{{end}}
+  <figcaption>Failed /s <span class="peak">peak {{tickLabel $peak}}/s</span>{{template "range_switch" (rangeSwitch $ "failed")}}</figcaption>
   {{template "history" $c}}
 </figure>
 <p class="pods">{{$.Noun.CapMany}} reporting: {{if $.Stale}}—{{else}}{{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}{{end}}</p>

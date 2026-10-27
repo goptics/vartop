@@ -207,6 +207,34 @@ func TestHistoryAxes(t *testing.T) {
 			}
 		}
 	})
+	// A day's axis has the clock every 6 hours, on the local clock across
+	// a daylight-saving change too, and in a zone off the hour.
+	t.Run("day", func(t *testing.T) {
+		local := time.Local
+		t.Cleanup(func() { time.Local = local })
+		for _, tc := range []struct {
+			zone   string
+			newest time.Time
+			want   []string
+		}{
+			{"America/New_York", time.Date(2026, 11, 1, 15, 0, 0, 0, time.UTC), []string{"12:00", "18:00", "00:00", "06:00"}},
+			{"Asia/Kathmandu", time.Date(2026, 10, 27, 6, 0, 0, 0, time.UTC), []string{"12:00", "18:00", "00:00", "06:00"}},
+		} {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no zone data: %v", err)
+			}
+			time.Local = loc
+			h := history(series(tc.newest.Add(-24*time.Hour), 5*time.Minute, 289, 1), 24*time.Hour, 5*time.Minute, 720, 120)
+			var xs []string
+			for _, tk := range h.XTicks {
+				xs = append(xs, tk.Label)
+			}
+			if !slices.Equal(xs, tc.want) {
+				t.Errorf("%s: day ticks = %q, want %q", tc.zone, xs, tc.want)
+			}
+		}
+	})
 }
 
 func TestPolylines(t *testing.T) {

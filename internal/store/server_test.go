@@ -811,3 +811,38 @@ func TestUndecodableRecords(t *testing.T) {
 		t.Errorf("logged %d times, want once per file:\n%s", n, log)
 	}
 }
+
+// TestEachStreams: Each hands over the snapshots taken since since, after
+// id afterID, one at a time and oldest first, and the newest id in the
+// file to go on from: a day is read without being held.
+func TestEachStreams(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	for i, age := range []time.Duration{25 * time.Hour, 23 * time.Hour, time.Hour} {
+		if _, err := db.Append(token, tick(base.Add(-age), uint64(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	collect := func(afterID int64) ([]uint64, int64) {
+		t.Helper()
+		var got []uint64
+		newest, err := db.Each(afterID, base.Add(-24*time.Hour), func(s *fleet.Snapshot) {
+			got = append(got, s.Pods[0].Workers["w"].Metrics.Completed)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got, newest
+	}
+	got, newest := collect(0)
+	if !slices.Equal(got, []uint64{2, 3}) || newest != 3 {
+		t.Errorf("Each(0) = %v, newest %d; want the two of the day, oldest first, and 3", got, newest)
+	}
+	if _, err := db.Append(token, tick(base, 4)); err != nil {
+		t.Fatal(err)
+	}
+	if got, newest = collect(newest); !slices.Equal(got, []uint64{4}) || newest != 4 {
+		t.Errorf("Each(3) = %v, newest %d; want only the new one, and 4", got, newest)
+	}
+}

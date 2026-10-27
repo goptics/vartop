@@ -74,6 +74,11 @@ type Page struct {
 	Dashboard *fleet.DashboardView
 	Grid      *fleet.GridView
 	Detail    *fleet.DetailView
+
+	// Ranges says which of Detail's charts show the day; CompletedDay and
+	// FailedDay are those days (nil: the chart shows the hour).
+	Ranges                  ChartRanges
+	CompletedDay, FailedDay *DayChart
 }
 
 // Interval is the server's poll interval; 0 with no server.
@@ -127,6 +132,9 @@ var funcs = template.FuncMap{
 	"noData":        noData,
 	"trendWindow":   func() time.Duration { return fleet.TrendWindow },
 	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
+	"dayWindow":     func() time.Duration { return fleet.DayWindow },
+	"dayBucket":     func() time.Duration { return fleet.DayBucket },
+	"rangeSwitch":   rangeSwitch,
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
 	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
 }
@@ -378,8 +386,12 @@ func sparkline(pts []fleet.Point, window, interval time.Duration, w, h float64) 
 	return v
 }
 
-// historyTick is the step of a 1h chart's time axis, on the clock.
-const historyTick = 10 * time.Minute
+// historyTick is the step of a 1h chart's time axis, on the clock;
+// dayTick a 24h chart's.
+const (
+	historyTick = 10 * time.Minute
+	dayTick     = 6 * time.Hour
+)
 
 // axisTick is a labelled tick of a chart axis. Pct is where it sits along
 // the axis, in percent of the chart's box (sparkPad included), for its HTML
@@ -412,13 +424,24 @@ func history(pts []fleet.Point, window, interval time.Duration, w, h float64) hi
 	// rebuilt from its wall clock, which a fall-back hour makes ambiguous.
 	// Every offset change is a multiple of historyTick, so later ticks stay
 	// on the clock too.
+	//
+	// A day's ticks, 6 hours apart, are found hour by hour instead, each
+	// kept when its local hour is one of 00, 06, 12, 18: a daylight-saving
+	// change, an hour, is no multiple of 6.
+	tick, step := historyTick, historyTick
+	if window > fleet.HistoryWindow {
+		tick, step = dayTick, time.Hour
+	}
 	_, off := a.start.Local().Zone()
 	shift := time.Duration(off) * time.Second
-	t := a.start.Add(shift).Truncate(historyTick).Add(-shift)
+	t := a.start.Add(shift).Truncate(step).Add(-shift)
 	if t.Before(a.start) {
-		t = t.Add(historyTick)
+		t = t.Add(step)
 	}
-	for end := a.start.Add(window); !t.After(end); t = t.Add(historyTick) {
+	for end := a.start.Add(window); !t.After(end); t = t.Add(step) {
+		if step != tick && t.Local().Hour()%int(tick/time.Hour) != 0 {
+			continue
+		}
 		x := a.xAt(t)
 		v.XTicks = append(v.XTicks, axisTick{Label: t.Local().Format("15:04"), Pct: inBox(x, w), Grid: num(x)})
 	}

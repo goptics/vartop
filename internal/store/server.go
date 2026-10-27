@@ -371,31 +371,54 @@ func (s *ServerDB) tailSince(afterID int64, since time.Time) ([]*fleet.Snapshot,
 	return s.scan(`SELECT id, at, data FROM snapshots WHERE id > ?1 AND at >= ?2 ORDER BY id`, afterID, since.UnixMilli())
 }
 
+// Each hands fn the snapshots taken since since with an id above afterID,
+// oldest first, one at a time, and returns the newest id in the file (0
+// when it has none) to go on from — below afterID when the snapshots
+// afterID counted were dropped. It holds no more than one: a day's worth
+// is read without being kept.
+func (s *ServerDB) Each(afterID int64, since time.Time, fn func(*fleet.Snapshot)) (int64, error) {
+	if afterID == 0 { // from the first in the window, as Window finds it
+		return s.scanEach(`SELECT id, at, data FROM snapshots
+			WHERE id >= (SELECT min(id) FROM snapshots INDEXED BY snapshots_at WHERE at >= ?1) AND at >= ?1
+			ORDER BY id`, fn, since.UnixMilli())
+	}
+	return s.scanEach(`SELECT id, at, data FROM snapshots WHERE id > ?1 AND at >= ?2 ORDER BY id`, fn, afterID, since.UnixMilli())
+}
+
 // scan runs a query of id, at and data, and reads the newest id, in one
-// read transaction, so that the two agree. A snapshot that cannot be
-// decoded is skipped (and logged, the first time): one bad row must not
-// cost the whole window.
+// read transaction, so that the two agree (see scanEach).
 func (s *ServerDB) scan(query string, args ...any) ([]*fleet.Snapshot, int64, error) {
-	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	var snaps []*fleet.Snapshot
+	newest, err := s.scanEach(query, func(snap *fleet.Snapshot) { snaps = append(snaps, snap) }, args...)
 	if err != nil {
 		return nil, 0, err
+	}
+	return snaps, newest, nil
+}
+
+// scanEach is scan handing each snapshot to fn as it is decoded. A
+// snapshot that cannot be decoded is skipped (and logged, the first
+// time): one bad row must not cost the whole window.
+func (s *ServerDB) scanEach(query string, fn func(*fleet.Snapshot), args ...any) (int64, error) {
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var newest int64
 	if err := tx.QueryRow(`SELECT coalesce(max(id), 0) FROM snapshots`).Scan(&newest); err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	rows, err := tx.Query(query, args...)
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	defer rows.Close()
-	var snaps []*fleet.Snapshot
 	for rows.Next() {
 		var id, at int64
 		var data []byte
 		if err := rows.Scan(&id, &at, &data); err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 		snap, err := decodeSnapshot(at, data)
 		if err != nil {
@@ -404,9 +427,9 @@ func (s *ServerDB) scan(query string, args ...any) ([]*fleet.Snapshot, int64, er
 			}
 			continue
 		}
-		snaps = append(snaps, snap)
+		fn(snap)
 	}
-	return snaps, newest, rows.Err()
+	return newest, rows.Err()
 }
 
 // Latest returns the newest snapshot, or nil when there is none; an error
