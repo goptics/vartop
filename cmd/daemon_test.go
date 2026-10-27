@@ -197,6 +197,30 @@ func claim(t *testing.T, ctl *store.Control, l store.Lease) string {
 	return token
 }
 
+// beatingDaemon claims the lease as l and renews it, as a running daemon
+// does, until the test ends: a daemon started meanwhile sees its beat move,
+// and leaves it the lease (a lease claimed and never renewed is a crashed
+// daemon's, which it would take over).
+func beatingDaemon(t *testing.T, ctl *store.Control, l store.Lease) {
+	t.Helper()
+	token := claim(t, ctl, l)
+	quit, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(quit); <-done })
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-tick.C:
+				_, _ = ctl.Beat(token, time.Now())
+			}
+		}
+	}()
+}
+
 // startsAs makes the daemon spawned or started by the login service the
 // one claiming the lease as l. Install starts none while one runs: the
 // tests stop the old one first, as vartop does.
@@ -288,6 +312,48 @@ func TestEnsureDaemonStartsWhenAbsent(t *testing.T) {
 		}
 		if waited := clock.now().Sub(began); waited < startWait || waited > startWait+time.Second {
 			t.Errorf("waited %v for the lease, want %v", waited, startWait)
+		}
+	})
+}
+
+// TestWaitStartedOutlastsCrashedDaemon (R34): with a crashed daemon's
+// lease still fresh when the new one starts, the new one watches it for
+// store.DeadAfter before it takes it over: waitStarted waits that much
+// longer, rather than say the daemon did not start.
+func TestWaitStartedOutlastsCrashedDaemon(t *testing.T) {
+	setup := func(t *testing.T) (*testDaemon, string, *fakeClock) {
+		d := newTestDaemon(t)
+		crashed := claim(t, d.o.ctl, store.Lease{PID: 99, Build: "crashed"}) // fresh throughout, by the real clock
+		clock := &fakeClock{t: time.Now()}
+		d.o.now, d.o.sleep = clock.now, clock.sleep
+		return d, crashed, clock
+	}
+	t.Run("taken over", func(t *testing.T) {
+		d, crashed, clock := setup(t)
+		began := clock.now()
+		d.o.sleep = func(dur time.Duration) {
+			clock.sleep(dur)
+			if clock.now().Sub(began) >= startWait+store.DeadAfter/2 {
+				if l, _ := lease(t, d.o.ctl); l.Token == crashed {
+					if _, ok, err := d.o.ctl.TakeOver(crashed, d.o.want, time.Now()); !ok || err != nil {
+						t.Errorf("TakeOver = %v, %v", ok, err)
+					}
+				}
+			}
+		}
+		l, err := waitStarted(d.o, crashed)
+		if err != nil || l.Token == crashed || l.Build != d.o.want.Build {
+			t.Errorf("waitStarted = %+v, %v; want the new daemon's lease", l, err)
+		}
+	})
+	t.Run("never taken over", func(t *testing.T) {
+		d, crashed, clock := setup(t)
+		began := clock.now()
+		if _, err := waitStarted(d.o, crashed); err == nil {
+			t.Fatal("waitStarted = nil, want did not start")
+		}
+		if waited, want := clock.now().Sub(began), startWait+store.DeadAfter; waited < want || waited > want+time.Second {
+			t.Errorf("waited %v for the lease, want %v", waited, want)
 		}
 	})
 }
@@ -736,7 +802,7 @@ func TestDaemonStopKilledStaysStopped(t *testing.T) {
 // collecting never renames the log that daemon writes.
 func TestLosingRunKeepsLog(t *testing.T) {
 	d := newTestDaemon(t)
-	claim(t, d.o.ctl, store.Lease{PID: 4242, Build: "other"})
+	beatingDaemon(t, d.o.ctl, store.Lease{PID: 4242, Build: "other"})
 	path := filepath.Join(d.o.dataDir, "daemon.log")
 	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), logMaxBytes+1), 0o600); err != nil {
 		t.Fatal(err)
@@ -757,7 +823,7 @@ func TestLosingRunKeepsLog(t *testing.T) {
 // run` does (here it loses the claim to the daemon running and returns).
 func TestBareDaemonRuns(t *testing.T) {
 	d := newTestDaemon(t)
-	claim(t, d.o.ctl, store.Lease{PID: 4242, Build: "other"})
+	beatingDaemon(t, d.o.ctl, store.Lease{PID: 4242, Build: "other"})
 	t.Cleanup(func() {
 		signal.Reset(syscall.SIGHUP) // the run ignores it
 		rootCmd.SetArgs(nil)

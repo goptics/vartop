@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -520,6 +521,172 @@ func TestDroppedTickKeepsLabels(t *testing.T) {
 			t.Errorf("state %d saved, want the newest, 4", n)
 		}
 	})
+}
+
+// TestWriterReopensRemovedFile (R36): a writer whose server file was
+// deleted under it (servers/ cleared to drop history) notices at its next
+// prune and writes a new file at the path, which the UIs read, with the
+// label state it saved last.
+func TestWriterReopensRemovedFile(t *testing.T) {
+	f := newLabelsFixture(t)
+	f.sink(1)
+	f.drain(1)
+	path := store.PathFor(f.dir, "a")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Skipf("file held open (Windows): %v", err)
+		}
+	}
+	f.w.prune(time.Now())
+	f.sink(0)
+	f.drain(1)
+	if n := len(f.snaps()); n != 1 {
+		t.Errorf("new file: %d snapshots, want the one written since", n)
+	}
+	if n := f.saved(); n != 1 {
+		t.Errorf("new file: label state %d, want the one saved last, 1", n)
+	}
+}
+
+// snaps returns the snapshots in a's file, read as a UI does.
+func (f *labelsFixture) snaps() []*fleet.Snapshot {
+	f.t.Helper()
+	db, err := store.OpenServer(f.dir, "a", false)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer db.Close()
+	snaps, _, err := db.Tail(0)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return snaps
+}
+
+// TestFreshFileGetsSavedLabels (triage T4): a file the writer starts
+// afresh — opened again after it could not be, or set aside as corrupt —
+// gets the label state saved last with its first snapshot, not only at the
+// next label change: a restart before then would number the units anew.
+func TestFreshFileGetsSavedLabels(t *testing.T) {
+	t.Run("opened again", func(t *testing.T) {
+		f := newLabelsFixture(t)
+		f.sink(1)
+		f.drain(1)
+		if n := f.saved(); n != 1 {
+			t.Fatalf("saved %d, want 1", n)
+		}
+		_ = f.w.db.Close()
+		path := store.PathFor(f.dir, "a")
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if err := os.Remove(path + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
+			}
+		}
+		f.w.db = nil
+		f.sink(0)
+		f.drain(1)
+		if n := f.saved(); n != 1 {
+			t.Errorf("the file opened afresh has label state %d, want 1", n)
+		}
+	})
+	t.Run("set aside as corrupt", func(t *testing.T) {
+		f := newLabelsFixture(t)
+		f.sink(1)
+		f.drain(1)
+		_ = f.w.db.Close() // its page cache could mask the damage
+		path := store.PathFor(f.dir, "a")
+		corruptTable(t, path, "snapshots")
+		db, err := store.OpenServer(f.dir, "a", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.w.db = db
+		f.sink(0)
+		f.drain(1)
+		if aside, _ := filepath.Glob(path + ".corrupt-*"); len(aside) == 0 {
+			t.Fatal("the corrupt file was not set aside")
+		}
+		if n := f.saved(); n != 1 {
+			t.Errorf("the file started afresh has label state %d, want 1", n)
+		}
+	})
+}
+
+// TestStoreErrorRecorded (triage T4): a snapshot the writer cannot store
+// is the server's error for the UIs, "store: …", until one is stored.
+func TestStoreErrorRecorded(t *testing.T) {
+	f := newLabelsFixture(t)
+	_ = f.w.db.Close() // Append: sql: database is closed
+	f.sink(0)
+	f.drain(1)
+	errs, err := f.c.d.ctl.ServerErrs()
+	if err != nil || !strings.HasPrefix(errs["a"], "store:") {
+		t.Errorf("ServerErrs = %v, %v; want a's store: error", errs, err)
+	}
+	f.w.db = nil // opened again for the next tick
+	f.sink(0)
+	f.drain(1)
+	if errs, err := f.c.d.ctl.ServerErrs(); err != nil || errs["a"] != "" {
+		t.Errorf("after a clean write, ServerErrs = %v, %v; want a's cleared", errs, err)
+	}
+}
+
+// TestControlCorruptionKeepsServerFiles: control.db damaged under a
+// running writer (the reviewer's probe: its daemon table's root page
+// overwritten) makes the write fail, but sets no server file aside.
+func TestControlCorruptionKeepsServerFiles(t *testing.T) {
+	f := newLabelsFixture(t)
+	f.sink(0)
+	f.drain(1)
+	corruptTable(t, filepath.Join(f.dir, "control.db"), "daemon")
+	f.sink(0)
+	f.drain(1)
+	path := store.PathFor(f.dir, "a")
+	if aside, _ := filepath.Glob(path + ".corrupt-*"); len(aside) != 0 {
+		t.Errorf("server file set aside for control.db's damage: %v", aside)
+	}
+	if n := len(f.snaps()); n != 1 {
+		t.Errorf("server file: %d snapshots, want its 1 kept", n)
+	}
+}
+
+// TestUndecodableSavedState: a saved label state or latest snapshot that
+// cannot be decoded is logged once and started without — units numbered
+// afresh, rates from the next tick — rather than keep the server from
+// being collected at all.
+func TestUndecodableSavedState(t *testing.T) {
+	f := newLabelsFixture(t)
+	f.sink(1)
+	f.drain(1)
+	_ = f.w.db.Close()
+	f.w.db = nil
+	raw, err := sql.Open("sqlite", store.PathFor(f.dir, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`UPDATE labels SET state = x'00ff'`, `UPDATE snapshots SET data = x'00ff'`} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = raw.Close()
+	var logs bytes.Buffer
+	f.c.d.o.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	for range 2 {
+		db, init, err := f.c.load()
+		if err != nil {
+			t.Fatalf("load = %v, want the file opened", err)
+		}
+		_ = db.Close()
+		if init.Labels != nil || init.Last != nil {
+			t.Errorf("init = labels %v, last %v; want neither", init.Labels, init.Last)
+		}
+	}
+	for _, msg := range []string{`msg="saved label state cannot be decoded`, `msg="latest snapshot cannot be decoded`} {
+		if n := strings.Count(logs.String(), msg); n != 1 {
+			t.Errorf("%s logged %d times, want once:\n%s", msg, n, &logs)
+		}
+	}
 }
 
 // breaker makes the requests a fresh connection sends to its hosts panic,

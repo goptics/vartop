@@ -98,7 +98,7 @@ func (c *collector) run(ctx context.Context, prev <-chan struct{}, delay time.Du
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	w := &writer{c: c, db: db}
+	w := &writer{c: c, db: db, savedState: init.Labels}
 	wg.Go(func() { w.run(ctx) })
 
 	pool := c.connect(ctx)
@@ -137,12 +137,12 @@ func (c *collector) load() (*store.ServerDB, fleet.CollectorInit, error) {
 	if err != nil {
 		return nil, init, err
 	}
-	init, err = readInit(db)
+	init, err = c.readInit(db)
 	if store.IsCorrupt(err) {
 		if db, err = c.reopen(db, err); err != nil {
 			return nil, init, err
 		}
-		init, err = readInit(db)
+		init, err = c.readInit(db)
 	}
 	if err != nil {
 		_ = db.Close()
@@ -163,16 +163,31 @@ func (c *collector) reopen(db *store.ServerDB, err error) (*store.ServerDB, erro
 	return store.OpenServer(c.d.o.DataDir, c.name, true)
 }
 
-func readInit(db *store.ServerDB) (fleet.CollectorInit, error) {
+// readInit reads the state the collector starts from: the label state
+// saved last, and the latest snapshot to rate the first tick against. One
+// that cannot be decoded is logged and done without — units numbered
+// afresh, rates from the second tick — rather than keep the server from
+// being collected at all.
+func (c *collector) readInit(db *store.ServerDB) (fleet.CollectorInit, error) {
 	var init fleet.CollectorInit
 	labels, ok, err := db.Labels()
-	if err != nil {
+	switch {
+	case errors.Is(err, store.ErrUndecodable):
+		if c.seen.changed("labels", err.Error()) {
+			c.d.o.Log.Error("saved label state cannot be decoded; numbering the units afresh", "server", c.name, "err", err)
+		}
+	case err != nil:
 		return init, err
-	}
-	if ok {
+	case ok:
 		init.Labels = &labels
 	}
 	init.Last, err = db.Latest()
+	if errors.Is(err, store.ErrUndecodable) {
+		if c.seen.changed("latest", err.Error()) {
+			c.d.o.Log.Error("latest snapshot cannot be decoded; rating from the next tick", "server", c.name, "err", err)
+		}
+		init.Last, err = nil, nil
+	}
 	return init, err
 }
 
@@ -311,12 +326,14 @@ func (c *collector) setErr(msg string) {
 // writer appends a collector's ticks to the server's file. It belongs to
 // the collector's writer goroutine.
 type writer struct {
-	c       *collector
-	db      *store.ServerDB // nil after it could not be opened again: opened for the next tick
-	saved   uint64          // the number of the label state saved last
-	unsaved labelled        // the newest label state a failed write did not save
-	errSet  bool            // err is recorded in control.db
-	err     string          // the server's error recorded last
+	c          *collector
+	db         *store.ServerDB   // nil after it could not be opened again: opened for the next tick
+	saved      uint64            // the number of the label state saved last
+	savedState *fleet.LabelState // the label state saved last (in this file or one before): nil before any
+	fresh      bool              // db was started afresh, and has no label state yet
+	unsaved    labelled          // the newest label state a failed write did not save
+	errSet     bool              // err is recorded in control.db
+	err        string            // the server's error recorded last
 }
 
 // run writes the queued ticks, and prunes the file when asked, until ctx
@@ -332,21 +349,41 @@ func (w *writer) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-w.c.prune:
-			if w.db == nil {
-				continue
-			}
-			err := w.db.Prune(now)
-			if store.IsCorrupt(err) {
-				w.db, err = w.c.reopen(w.db, err)
-			}
-			if w.c.seen.changed("prune", errString(err)) && err != nil {
-				w.c.d.o.Log.Warn("cannot prune the server file", "server", w.c.name, "err", err)
-			}
+			w.prune(now)
 		case q := <-w.c.queue:
 			if !w.write(q) {
 				return
 			}
 		}
+	}
+}
+
+// prune prunes the file at now. A file found corrupt is set aside, and a
+// fresh one opened; so is one no longer at its path (removed, with
+// servers/ say): what the writer would add to it no UI could read.
+func (w *writer) prune(now time.Time) {
+	if w.db == nil {
+		return
+	}
+	if gone, err := w.db.Replaced(); gone {
+		w.c.d.o.Log.Warn("server file removed; starting a new one", "server", w.c.name)
+		_ = w.db.Close()
+		w.db, err = store.OpenServer(w.c.d.o.DataDir, w.c.name, true)
+		if err != nil {
+			w.db = nil // opened for the next tick
+			w.c.d.o.Log.Error("cannot open the server file", "server", w.c.name, "err", err)
+			return
+		}
+		w.fresh = true
+	}
+	err := w.db.Prune(now)
+	if store.IsCorrupt(err) {
+		if w.db, err = w.c.reopen(w.db, err); err == nil {
+			w.fresh = true
+		}
+	}
+	if w.c.seen.changed("prune", errString(err)) && err != nil {
+		w.c.d.o.Log.Warn("cannot prune the server file", "server", w.c.name, "err", err)
 	}
 }
 
@@ -380,10 +417,15 @@ func (w *writer) write(q queued) bool {
 		if t.Labels != nil {
 			w.unsaved = newest
 		}
+		// The UIs say why no new data comes, as for an open that fails.
+		if msg := "store: " + err.Error(); !w.errSet || w.err != msg {
+			w.c.setErr(msg)
+			w.errSet, w.err = true, msg
+		}
 		return true
 	}
 	if t.Labels != nil {
-		w.saved = newest.seq
+		w.saved, w.savedState = newest.seq, newest.state
 	}
 	w.unsaved = labelled{}
 	if msg := t.Snap.Err; !w.errSet || msg != w.err {
@@ -400,23 +442,39 @@ func (w *writer) write(q queued) bool {
 }
 
 // append appends t to the file, opening it first when it is not open. A
-// file found corrupt is set aside, and t appended to a fresh one.
+// file found corrupt is set aside, and t appended to a fresh one. The
+// first tick a file started afresh gets carries the label state saved last,
+// if it carries none: a restart before the next label change would number
+// the units anew.
 func (w *writer) append(t fleet.Tick) error {
 	if w.db == nil {
 		db, err := store.OpenServer(w.c.d.o.DataDir, w.c.name, true)
 		if err != nil {
 			return err
 		}
-		w.db = db
+		w.db, w.fresh = db, true
 	}
-	_, err := w.db.Append(w.c.d.token, t)
+	err := w.appendTo(t)
 	if !store.IsCorrupt(err) {
 		return err
 	}
 	if w.db, err = w.c.reopen(w.db, err); err != nil {
 		return err
 	}
-	_, err = w.db.Append(w.c.d.token, t)
+	w.fresh = true
+	return w.appendTo(t)
+}
+
+// appendTo appends t to w.db, with the label state saved last if the file
+// is fresh and t has none.
+func (w *writer) appendTo(t fleet.Tick) error {
+	if w.fresh && t.Labels == nil {
+		t.Labels = w.savedState
+	}
+	_, err := w.db.Append(w.c.d.token, t)
+	if err == nil {
+		w.fresh = false
+	}
 	return err
 }
 

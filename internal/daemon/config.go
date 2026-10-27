@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"os"
 	"slices"
@@ -41,7 +42,9 @@ func statFile(path string) fileStat {
 // since the last one, and returns it when it is good. The file is statted
 // before it is read, so that a write between the two is read next time. A
 // read that fails keeps the last good config, and is returned as err only
-// when its error is new.
+// when its error is new. No config file at all is a good config of no
+// servers: deleting it must stop the use of its tokens (the servers'
+// files stay for RemovedGrace).
 func (w *configWatch) next() (cfg *config.Config, err error) {
 	if w.path != "" {
 		st := statFile(w.path)
@@ -51,6 +54,9 @@ func (w *configWatch) next() (cfg *config.Config, err error) {
 		w.stat, w.statted = st, true
 	}
 	cfg, path, err := w.read()
+	if errors.Is(err, config.ErrConfigNotFound) {
+		cfg, err = &config.Config{}, nil
+	}
 	if path != w.path {
 		w.path, w.statted = path, false // stat it next time, and read it again then
 	}

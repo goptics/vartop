@@ -300,13 +300,18 @@ func launchDaemon(o ensureOptions, old string) (store.Lease, error) {
 
 // waitStarted waits up to startWait for a fresh lease other than that of
 // token old: old's daemon, stale but not stopped, may renew its lease yet on
-// waking from a suspend.
+// waking from a suspend. With old's lease fresh when it starts waiting, it
+// waits store.DeadAfter longer: the new daemon watches old's beat that long
+// before it takes the lease of a crashed daemon over (daemon.Run).
 func waitStarted(o ensureOptions, old string) (store.Lease, error) {
 	deadline := o.now().Add(startWait)
-	for {
+	for first := true; ; first = false {
 		l, fresh, err := o.ctl.Lease()
 		if err == nil && fresh && l.Token != old {
 			return l, nil
+		}
+		if first && err == nil && fresh {
+			deadline = deadline.Add(store.DeadAfter)
 		}
 		if !o.now().Before(deadline) {
 			return store.Lease{}, fmt.Errorf("vartop daemon did not start; see %s", daemonLogPath(o.dataDir))

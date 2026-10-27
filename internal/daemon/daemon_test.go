@@ -35,6 +35,8 @@ type harness struct {
 	// build makes a server's pool; api.PoolFor when nil. Set it before
 	// start.
 	build func(*config.Server) (*api.Pool, error)
+	// sleep is the daemons' Options.Sleep; set it before start.
+	sleep func(time.Duration)
 
 	ctlOnce sync.Once
 	ctl     *store.Control
@@ -80,6 +82,9 @@ func (h *harness) writeRaw(data []byte) {
 // harness's file.
 func (h *harness) readConfig() (*config.Config, string, error) {
 	data, err := os.ReadFile(h.cfgPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, h.cfgPath, config.ErrConfigNotFound
+	}
 	if err != nil {
 		return nil, h.cfgPath, err
 	}
@@ -120,6 +125,7 @@ func (h *harness) start(build string) *daemonRun {
 		BuildPool: h.build,
 		Lease:     store.Lease{PID: os.Getpid(), Build: build},
 		Now:       h.now,
+		Sleep:     h.sleep,
 		Log:       slog.New(slog.NewTextHandler(&h.logs, nil)),
 	}
 	go func() {
@@ -257,14 +263,196 @@ func TestSecondDaemonExitsZero(t *testing.T) {
 	h.start("first")
 	n := len(h.waitSnaps("a", 1, 3*time.Second))
 
+	// It watches the first one beat (once, BeatEvery at most), and leaves
+	// it the lease.
 	second := h.start("second")
-	if code, err := second.wait(t, time.Second); code != 0 || err != nil {
+	if code, err := second.wait(t, store.DeadAfter); code != 0 || err != nil {
 		t.Errorf("second daemon: Run = %d, %v; want 0, nil", code, err)
 	}
 	if l, fresh, err := h.control().Lease(); err != nil || !fresh || l.Build != "first" {
 		t.Errorf("Lease = %+v, fresh %v, %v; want the first daemon's, fresh", l, fresh, err)
 	}
 	h.waitSnaps("a", n+1, 3*time.Second) // the first one collects on
+}
+
+// waitBeats waits until the daemon has renewed its lease n more times: a
+// span of time, with no sleep of a guessed length.
+func (h *harness) waitBeats(n int) {
+	h.t.Helper()
+	ctl := h.control()
+	first, _, err := ctl.Lease()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	fleettest.WaitUntil(h.t, time.Duration(n+1)*store.BeatEvery, fmt.Sprintf("%d beats", n), func() bool {
+		l, _, err := ctl.Lease()
+		return err == nil && l.Beat.Sub(first.Beat) >= time.Duration(n)*store.BeatEvery-500*time.Millisecond
+	})
+}
+
+// fakeWatch makes a daemon's watch of a lease holder's beat pass at once:
+// each of its sleeps moves the daemons' clock on instead. The daemons'
+// clock stays ahead of the real one afterwards, so a lease they renew is
+// not fresh by it.
+func (h *harness) fakeWatch() {
+	h.sleep = func(d time.Duration) { h.offset.Add(int64(d)) }
+}
+
+// deadLease leaves the lease as a daemon that died without letting it go
+// (a crash, a SIGKILL) does: fresh, and never to be renewed. It returns
+// its token.
+func (h *harness) deadLease() string {
+	h.t.Helper()
+	token, ok, err := h.control().Claim(store.Lease{PID: 1, Build: "dead"}, h.now())
+	if !ok || err != nil {
+		h.t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	return token
+}
+
+// TestCrashedHolderTakenOver (R34): a daemon started while the lease of a
+// dead one is still fresh — a supervisor restarts a crashed daemon within
+// LeaseTTL — watches its beat for DeadAfter, takes the lease over, and
+// collects.
+func TestCrashedHolderTakenOver(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", nil)
+	h := newHarness(t)
+	h.writeConfig(oneServer(srv.URL))
+	h.fakeWatch()
+	dead := h.deadLease()
+	h.start("new")
+	h.waitSnaps("a", 1, 5*time.Second)
+	if l, _, err := h.control().Lease(); err != nil || l.Build != "new" || l.Token == dead {
+		t.Errorf("Lease = %+v, %v; want the new daemon's", l, err)
+	}
+	if watched := time.Duration(h.offset.Load()); watched < store.DeadAfter || watched > store.DeadAfter+time.Second {
+		t.Errorf("took the lease over after watching %v, want DeadAfter (%v)", watched, store.DeadAfter)
+	}
+}
+
+// TestWatchEndsWithCtx: a daemon watching a lease holder's beat (on the
+// real clock) stops when told to, at once, taking nothing over.
+func TestWatchEndsWithCtx(t *testing.T) {
+	h := newHarness(t)
+	h.writeConfig(map[string]*config.Server{})
+	dead := h.deadLease()
+	r := h.start("new")
+	began := time.Now()
+	if code, err := r.stop(t); code != 0 || err != nil {
+		t.Errorf("Run = %d, %v; want 0, nil", code, err)
+	}
+	if took := time.Since(began); took > store.DeadAfter/2 {
+		t.Errorf("Run took %v to stop while watching, want it at once", took)
+	}
+	if l, _, err := h.control().Lease(); err != nil || l.Token != dead {
+		t.Errorf("Lease = %+v, %v; want the dead daemon's still", l, err)
+	}
+	if n := h.logs.count("another vartop daemon is collecting"); n != 0 {
+		t.Errorf("a stopped watch logged another daemon collecting:\n%s", &h.logs)
+	}
+}
+
+// TestTwoWatchersOneWins (R34): two daemons started together over a dead
+// daemon's fresh lease both watch it; exactly one takes it over and
+// collects, the other exits 0.
+func TestTwoWatchersOneWins(t *testing.T) {
+	_, srv := fleettest.NewVarmq(t, "i", nil)
+	h := newHarness(t)
+	h.writeConfig(oneServer(srv.URL))
+	h.fakeWatch()
+	h.deadLease()
+	runs := map[string]*daemonRun{"x": h.start("x"), "y": h.start("y")}
+	var loser, winner string
+	fleettest.WaitUntil(t, 5*time.Second, "one daemon to exit", func() bool {
+		for build, r := range runs {
+			select {
+			case <-r.done:
+				loser = build
+				return true
+			default:
+			}
+		}
+		return false
+	})
+	if code, err := runs[loser].wait(t, time.Second); code != 0 || err != nil {
+		t.Errorf("daemon %s: Run = %d, %v; want 0, nil", loser, code, err)
+	}
+	winner = map[string]string{"x": "y", "y": "x"}[loser]
+	n := len(h.waitSnaps("a", 1, 5*time.Second))
+	if l, _, err := h.control().Lease(); err != nil || l.Build != winner {
+		t.Errorf("Lease = %+v, %v; want %s's", l, err, winner)
+	}
+	h.waitSnaps("a", n+1, 5*time.Second)
+	select {
+	case <-runs[winner].done:
+		t.Errorf("daemon %s exited too: Run = %d, %v", winner, runs[winner].code, runs[winner].err)
+	default:
+	}
+}
+
+// TestDataDirRemovedExits (R36): a daemon whose data dir is deleted under
+// it — removed, or removed and made anew by a UI — exits 1 at its next
+// beat, rather than collect on into files no UI reads while another
+// daemon claims the new control.db.
+func TestDataDirRemovedExits(t *testing.T) {
+	for _, anew := range []bool{false, true} {
+		t.Run(fmt.Sprintf("made anew %v", anew), func(t *testing.T) {
+			_, srv := fleettest.NewVarmq(t, "i", nil)
+			h := newHarness(t)
+			h.writeConfig(oneServer(srv.URL))
+			r := h.start("d")
+			h.waitSnaps("a", 1, 3*time.Second)
+			if err := os.RemoveAll(h.dir); err != nil {
+				t.Fatal(err)
+			}
+			if anew {
+				ctl, err := store.OpenControl(h.dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ctl.Close() })
+			}
+			code, err := r.wait(t, store.BeatEvery+2*time.Second)
+			if code != 1 || err == nil || !strings.Contains(err.Error(), "data directory removed") {
+				t.Errorf("Run = %d, %v; want 1, data directory removed", code, err)
+			}
+		})
+	}
+}
+
+// TestConfigDeletedStopsCollecting (R37): deleting the config is a config
+// of no servers: every collector stops, using its token no more, and the
+// files stay; put back, it is collected again.
+func TestConfigDeletedStopsCollecting(t *testing.T) {
+	fa, a := fleettest.NewVarmq(t, "a", nil)
+	h := newHarness(t)
+	h.writeConfig(oneServer(a.URL))
+	h.start("d")
+	h.waitSnaps("a", 1, 3*time.Second)
+
+	if err := os.Remove(h.cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	h.waitLog(`msg="server removed" server=a`, 5*time.Second)
+	h.waitBeats(1) // a tick in flight at the removal lands
+	calls := len(fa.Calls())
+	h.waitBeats(2) // past a's next ticks, 1s apart: none polls it
+	if got := len(fa.Calls()); got != calls {
+		t.Errorf("a polled %d more times after the config was deleted", got-calls)
+	}
+	if n := h.logs.count(`msg="config error`); n != 0 {
+		t.Errorf("a deleted config logged as a config error:\n%s", &h.logs)
+	}
+	if !h.exists("a") {
+		t.Error("a's file removed with the config")
+	}
+
+	since := time.Now()
+	h.writeConfig(oneServer(a.URL))
+	fleettest.WaitUntil(t, 5*time.Second, "a collected once the config is back", func() bool {
+		s := h.latest("a")
+		return s != nil && s.At.After(since)
+	})
 }
 
 // TestTakeoverEndsOldDaemon: a daemon whose lease another claimed (its

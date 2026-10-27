@@ -49,13 +49,21 @@ type Options struct {
 	BuildPool func(*config.Server) (*api.Pool, error)
 	Lease     store.Lease      // what the lease is claimed as
 	Now       func() time.Time // the clock of the lease, pruning and file removal; time.Now when nil
-	Log       *slog.Logger     // state changes only; discarded when nil
+	// Sleep is what Run waits with, by the Now clock, while it watches
+	// whether the daemon holding a fresh lease still beats; a sleep cut
+	// short once ctx ends when nil.
+	Sleep func(time.Duration)
+	Log   *slog.Logger // state changes only; discarded when nil
 }
 
 // Run collects every configured server into the store until ctx ends, a
 // stop is requested or another daemon takes the lease, and returns 0 for
-// each. It returns 0 at once when another daemon holds a fresh lease, and
-// a non-zero code with the error when control.db fails.
+// each. Finding another daemon's lease fresh, it watches that daemon's beat
+// for store.DeadAfter: it returns 0 if the beat moves, and takes the lease
+// over if not — the holder died without letting it go (a supervisor
+// restarts a crashed daemon well within LeaseTTL) — unless another daemon
+// takes it first. It returns a non-zero code with the error when
+// control.db fails, or is deleted under it.
 func Run(ctx context.Context, o Options) (code int, err error) {
 	if o.DataDir == "" {
 		if o.DataDir, err = store.DataDir(); err != nil {
@@ -78,11 +86,16 @@ func Run(ctx context.Context, o Options) (code int, err error) {
 	}
 	defer func() { _ = ctl.Close() }()
 	token, ok, err := ctl.Claim(o.Lease, o.Now())
+	if err == nil && !ok {
+		token, ok, err = takeOver(ctx, ctl, o)
+	}
 	if err != nil {
 		return 1, fmt.Errorf("claim the lease: %w", err)
 	}
 	if !ok {
-		o.Log.Info("another vartop daemon is collecting")
+		if ctx.Err() == nil {
+			o.Log.Info("another vartop daemon is collecting")
+		}
 		return 0, nil
 	}
 	o.Log.Info("collecting", "pid", o.Lease.PID, "build", o.Lease.Build, "data", o.DataDir)
@@ -108,6 +121,30 @@ func Run(ctx context.Context, o Options) (code int, err error) {
 	}
 	o.Log.Info("stopped", "code", code)
 	return code, err
+}
+
+// takeOver watches the beat of the daemon whose fresh lease refused Run's
+// claim, for store.DeadAfter, and takes the lease over if it does not
+// move. ok is false when that daemon beats, when another daemon took the
+// lease first, or when ctx ended.
+func takeOver(ctx context.Context, ctl *store.Control, o Options) (token string, ok bool, err error) {
+	l, _, err := ctl.Lease()
+	if err != nil {
+		return "", false, err
+	}
+	wait := o.Sleep
+	if wait == nil {
+		wait = func(d time.Duration) { sleep(ctx, d) }
+	}
+	advanced, err := ctl.BeatAdvances(ctx, l.Token, store.DeadAfter, o.Now, wait)
+	switch {
+	case ctx.Err() != nil:
+		return "", false, nil
+	case err != nil || advanced:
+		return "", false, err
+	}
+	o.Log.Warn("the daemon holding the lease does not beat; taking it over", "pid", l.PID, "beat", l.Beat)
+	return ctl.TakeOver(l.Token, o.Lease, o.Now())
 }
 
 // daemon is a Run holding the lease.
@@ -166,6 +203,16 @@ func (d *daemon) run(ctx context.Context) (int, error) {
 		case e := <-d.exit:
 			return e.code, e.err
 		case <-beat.C:
+			// A control.db deleted under it (with the data dir, by a cache
+			// cleaner say) still takes its beats, while the UIs, and a
+			// daemon one of them starts, use a new one.
+			gone, err := d.ctl.Replaced()
+			if gone {
+				return 1, fmt.Errorf("data directory removed: %s no longer holds the control.db this daemon opened", d.o.DataDir)
+			}
+			if d.seen.changed("replaced", errString(err)) && err != nil {
+				d.o.Log.Warn("cannot check the data directory", "err", err)
+			}
 			stop, err := d.ctl.Beat(d.token, d.o.Now())
 			switch {
 			case errors.Is(err, store.ErrLeaseLost):
