@@ -495,9 +495,9 @@ func (s *ServerDB) Labels() (fleet.LabelState, bool, error) {
 
 // Prune deletes the snapshots older than Retention at now, then the oldest
 // ones, a batch at a time, while they take more than ServerCapBytes; and
-// the buckets older than history, the server's (config.Server.HistorySpan),
-// never less than the snapshots' day. The cap leaves the buckets alone:
-// history bounds them. Pages freed are reused, not returned: the file does
+// the buckets before the start of a chart of history, the server's
+// (config.Server.HistorySpan), never less than the snapshots' day. The cap
+// leaves the buckets alone: history bounds them. Pages freed are reused, not returned: the file does
 // not shrink.
 func (s *ServerDB) Prune(now time.Time, history time.Duration) error {
 	if !s.writer {
@@ -506,8 +506,9 @@ func (s *ServerDB) Prune(now time.Time, history time.Duration) error {
 	if _, err := s.db.Exec(`DELETE FROM snapshots WHERE at < ?`, now.Add(-Retention).UnixMilli()); err != nil {
 		return err
 	}
-	// A bucket that ended before the history began.
-	if _, err := s.db.Exec(`DELETE FROM buckets WHERE start <= ?`, now.Add(-max(history, Retention)-fleet.DayBucket).Unix()); err != nil {
+	// A bucket before the first step of the history's own chart: one read
+	// at now or later starts no earlier, so its first point stays whole.
+	if _, err := s.db.Exec(`DELETE FROM buckets WHERE start < ?`, fleet.ChartStart(max(history, Retention), now).Unix()); err != nil {
 		return err
 	}
 	for {

@@ -424,3 +424,37 @@ func TestDayReadsOneLabel(t *testing.T) {
 
 // last is the newest point of a series.
 func last(pts []fleet.Point) fleet.Point { return pts[len(pts)-1] }
+
+// TestPruneKeepsTheFirstStep: a prune keeps every bucket of the first
+// step of a chart as long as the history, read at the prune's time or
+// later: that point stays whole, not the average of its last buckets.
+func TestPruneKeepsTheFirstStep(t *testing.T) {
+	for _, days := range []int{7, 30} {
+		history := time.Duration(days) * fleet.DayWindow
+		dir := t.TempDir()
+		claimed(t, dir)
+		db := newWriter(t, dir, "prod")
+		now := time.Date(2026, 10, 27, 12, 58, 30, 0, time.UTC)
+		// A bucket every 5 minutes, back past the history; each its minute of the hour.
+		if _, err := db.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+			INSERT INTO buckets SELECT 'w', ? - i * 300, '', 1, ((? - i * 300) % 3600) / 60, 0, 0, 0, 1, 1 FROM n`,
+			(days+1)*288, now.Truncate(fleet.DayBucket).Unix(), now.Truncate(fleet.DayBucket).Unix()); err != nil {
+			t.Fatal(err)
+		}
+		first := func() fleet.Point {
+			d, err := db.Day("w", "", fleet.ChartStart(history, now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pts, _ := d.Rates("", false, history, now, fleet.NounFor(nil))
+			return pts[0]
+		}
+		before := first()
+		if err := db.Prune(now, history); err != nil {
+			t.Fatal(err)
+		}
+		if after := first(); after != before {
+			t.Errorf("%dd: first point after a prune %+v, want it as before, %+v", days, after, before)
+		}
+	}
+}

@@ -250,6 +250,13 @@ func TestHistoryAxes(t *testing.T) {
 				[]string{"Thu 29", "Fri 30", "Sat 31", "Sun 1", "Mon 2", "Tue 3", "Wed 4"}},
 			{"Asia/Kathmandu", time.Date(2026, 10, 27, 6, 0, 0, 0, time.UTC), 30 * 24 * time.Hour,
 				[]string{"29 Sep", "4 Oct", "9 Oct", "14 Oct", "19 Oct", "24 Oct"}},
+			// Clocks that change at midnight: Santiago springs from 00:00 to
+			// 01:00 on Sun 6 Sep, Havana falls back from 01:00 to 00:00 on
+			// Sun 1 Nov. Each day still gets one tick.
+			{"America/Santiago", time.Date(2026, 9, 9, 15, 0, 0, 0, time.UTC), 7 * 24 * time.Hour,
+				[]string{"Thu 3", "Fri 4", "Sat 5", "Sun 6", "Mon 7", "Tue 8", "Wed 9"}},
+			{"America/Havana", time.Date(2026, 11, 4, 15, 0, 0, 0, time.UTC), 7 * 24 * time.Hour,
+				[]string{"Thu 29", "Fri 30", "Sat 31", "Sun 1", "Mon 2", "Tue 3", "Wed 4"}},
 		} {
 			loc, err := time.LoadLocation(tc.zone)
 			if err != nil {

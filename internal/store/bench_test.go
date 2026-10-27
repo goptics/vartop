@@ -206,9 +206,10 @@ func BenchmarkDayRead(b *testing.B) {
 }
 
 // BenchmarkLongRead measures reading one view of a worker's buckets over
-// a longer chart's span, and charting it, on a 10 × 20 server whose
-// buckets are written straight in (a poll per bucket, every bucket full):
-// what a 7d or 30d chart reads.
+// a longer chart's span, and charting it, on a 10 × 20 server whose 30
+// days of buckets are written straight in — in time order, as the
+// collector writes them, every bucket full, rates fractional — and
+// reports the bytes they take: what a 7d or 30d chart reads.
 func BenchmarkLongRead(b *testing.B) {
 	dir := b.TempDir()
 	claimed(b, dir)
@@ -217,8 +218,12 @@ func BenchmarkLongRead(b *testing.B) {
 	if _, err := db.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 30 * 288),
 		w(j) AS (SELECT 0 UNION ALL SELECT j + 1 FROM w WHERE j < 19),
 		l(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM l WHERE k < 10)
-		INSERT INTO buckets SELECT 'worker-' || j, ? - i * 300, CASE k WHEN 0 THEN '' ELSE 'instance-' || k END,
-			60, 100, 1, 3, 1, 10, 10 FROM n, w, l`, end.Unix()); err != nil {
+		INSERT INTO buckets SELECT 'worker-' || j, ? - (30 * 288 - i) * 300, CASE k WHEN 0 THEN '' ELSE 'instance-' || k END,
+			60, 100.37 + (i % 7) * 0.13, 1.07 + k * 0.01, 3.11 + j * 0.01, 1.13, 10, 10 FROM n, w, l`, end.Unix()); err != nil {
+		b.Fatal(err)
+	}
+	var size int64
+	if err := db.db.QueryRow(`SELECT sum(pgsize) FROM dbstat('main', 1) WHERE name = 'buckets'`).Scan(&size); err != nil {
 		b.Fatal(err)
 	}
 	r, err := OpenServer(dir, "prod", false)
@@ -238,6 +243,7 @@ func BenchmarkLongRead(b *testing.B) {
 					b.Fatal("no first point")
 				}
 			}
+			b.ReportMetric(float64(size)/1e6, "MB-buckets")
 		})
 	}
 }

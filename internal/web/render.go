@@ -431,8 +431,9 @@ func history(pts []fleet.Point, window, interval time.Duration, w, h float64) hi
 	// A day's ticks, 6 hours apart, are found hour by hour instead, each
 	// kept when its local hour is one of 00, 06, 12, 18: a daylight-saving
 	// change, an hour, is no multiple of 6. A longer chart's are too, each
-	// kept at a local midnight, every nth day counted from 1970 for about
-	// a week of them — the same days at every refresh.
+	// kept at the first hour of a local date — its midnight, or 01:00 where
+	// the clock springs over midnight — every nth day counted from 1970 for
+	// about a week of them: the same days at every refresh.
 	step, keep, format := historyTick, func(time.Time) bool { return true }, "15:04"
 	switch {
 	case window > fleet.DayWindow:
@@ -442,9 +443,8 @@ func history(pts []fleet.Point, window, interval time.Duration, w, h float64) hi
 			format = "2 Jan"
 		}
 		keep = func(t time.Time) bool {
-			l := t.Local()
-			y, m, d := l.Date()
-			return l.Hour() == 0 && time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Unix()/86400%every == 0
+			y, m, d := t.Local().Date()
+			return d != t.Add(-time.Hour).Local().Day() && time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Unix()/86400%every == 0
 		}
 	case window > fleet.HistoryWindow:
 		step = time.Hour

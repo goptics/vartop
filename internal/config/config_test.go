@@ -429,7 +429,8 @@ func TestParseHistory(t *testing.T) {
 			t.Errorf("ParseHistory(%q) = %v, %v; want %v", tc.in, got, err, tc.want)
 		}
 	}
-	for _, in := range []string{"", "0d", "31d", "-1d", "7", "24h", "d", "1.5d", "7 d"} {
+	for _, in := range []string{"", "0d", "31d", "-1d", "7", "24h", "d", "1.5d", "7 d",
+		"+7d", "07d", "281474976710663d", "-281474976710649d"} { // signed, padded, or 2^48 + 7 days: 7d once wrapped
 		if got, err := ParseHistory(in); err == nil {
 			t.Errorf("ParseHistory(%q) = %v, want an error", in, got)
 		}

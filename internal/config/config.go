@@ -73,14 +73,16 @@ const (
 	MaxHistory = 30 * 24 * time.Hour
 )
 
-// ParseHistory reads a server's history: whole days, "1d" to "30d".
+// ParseHistory reads a server's history: whole days, "1d" to "30d", the
+// number as written plainly — no sign, no leading zero.
 func ParseHistory(v string) (time.Duration, error) {
-	n, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
-	d := time.Duration(n) * 24 * time.Hour
-	if !strings.HasSuffix(v, "d") || err != nil || d < DefaultHistory || d > MaxHistory {
-		return 0, fmt.Errorf("history must be whole days from 1d to %dd, got %q", MaxHistory/(24*time.Hour), v)
+	maxDays := int(MaxHistory / (24 * time.Hour))
+	days, ok := strings.CutSuffix(v, "d")
+	n, err := strconv.Atoi(days)
+	if !ok || err != nil || days != strconv.Itoa(n) || n < 1 || n > maxDays {
+		return 0, fmt.Errorf("history must be whole days from 1d to %dd, got %q", maxDays, v)
 	}
-	return d, nil
+	return time.Duration(n) * 24 * time.Hour, nil
 }
 
 // HistorySpan returns History as a duration: DefaultHistory when it is
