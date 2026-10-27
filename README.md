@@ -34,7 +34,7 @@ and pause, resume, restart, stop or resize it, from your browser or the command 
 [varmq](https://github.com/goptics/varmq) is a typed worker pool and message queue for Go. Each process that uses it can serve its workers over a small REST API, `varmq.Handler`. **vartop** talks to that API on every instance of your service and puts the whole fleet in one place:
 
 - **`vartop web`**, a dashboard in your browser. It merges every instance (or shows one), refreshes at each poll, keeps the history in a local SQLite store, and lets you act on workers.
-- **`vartop action`** and **`vartop concurrency`**, the same actions from a terminal or a script, against every instance at once.
+- **`vartop action`** and **`vartop concurrency`**, the same actions from a terminal or a script, against every endpoint of a server at once: each static URL, or each pod or address Kubernetes or DNS discovery finds.
 
 There is no agent to deploy and no database to run: vartop is one binary on your machine. It finds your instances from a fixed list of URLs, the pods behind a Kubernetes Service, or the addresses a DNS name resolves to, and it collects only while `vartop web` runs.
 
@@ -44,23 +44,23 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 
 - **Fleet dashboard.** Completed per second, failed per minute, pending jobs and workers by status, with a 10-minute trend per worker.
 - **Instance grid.** Every worker on every instance at a glance: status, busy/concurrency, pending.
-- **Worker page.** Totals and success rate, and two charts (completed /s, failed /s), each with its own **1h | 24h | 7d | 30d** switch, axes and a hover readout.
+- **Worker page.** Totals and success rate, and two charts (completed /s, failed /s), each with its own **1h | 24h** switch, plus **7d** and **30d** as far as the server's `history` reaches, axes and a hover readout.
 - **History that survives restarts.** 24 hours of polls, and up to 30 days of each worker's rates per server, in a local SQLite store.
 - **Stale data called out.** A banner says how old the data is and why, instead of showing old numbers as current.
 
 **Act**
 
 - **Pause, resume, restart, stop**, and a concurrency slider, on every instance or on one; pause or resume several workers at once.
-- **The same from the CLI**, fanned out to every instance concurrently, one result line each.
+- **The same from the CLI**, fanned out to every endpoint concurrently, one result line each.
 
 **Find every instance**
 
-- **Static endpoints, Kubernetes EndpointSlices or DNS**, followed live as instances scale, restart or move.
+- **Static endpoints, or Kubernetes EndpointSlices and DNS**, the last two followed live as instances scale, restart or move.
 - **Load-balancer detection.** One URL answered by several instances is recognised, and each instance behind it is listed.
 
 **Safe by default**
 
-- **Loopback only.** The dashboard has no login, so it only listens on `127.0.0.1`, `localhost` or `::1`.
+- **Loopback only.** The dashboard has no login, so it only listens on a loopback address (`127.0.0.1`, `localhost`, `::1`, …).
 - **The token stays on the server.** vartop calls varmq on the page's behalf; the bearer token never reaches the browser.
 - **Actions only on current data.** An action is refused, and nothing is sent, while the data is stale or was collected under another configuration.
 
@@ -110,7 +110,7 @@ vartop then calls `http://<instance>:8080/varmq`. The API is unauthenticated by 
 4. **Act from the terminal**:
 
    ```bash
-   vartop action orders pause             # every instance of the default server
+   vartop action orders pause             # every endpoint of the default server
    vartop -s staging concurrency orders 8 # 8 per instance on staging
    ```
 
@@ -127,7 +127,7 @@ The page above. One row per worker, merged across every instance (or one instanc
   <img alt="A worker page: submitted, completed, successful, failed and success rate; a 7-day completed/s chart with a daily rhythm; a 24-hour failed/s chart; the concurrency slider and the pause, resume, restart and stop buttons" src="docs/images/worker-light.png">
 </picture>
 
-Click a worker for its totals and success rate, its two charts, and its controls. Each chart has its own span: **1h** from the stored polls, **24h** from 5-minute buckets, and **7d**, **30d** (or the server's own [`history`](#schema), like `14d`) merged into longer steps. Hovering a chart shows the exact window, its average, its peak and how many instances answered:
+Click a worker for its totals and success rate, its two charts, and its controls. Each chart has its own span: **1h** from the stored polls, **24h** from 5-minute buckets, and **7d**, **30d** (or the server's own [`history`](#schema), like `14d`) merged into longer steps. Hovering a chart shows how many instances answered and, on 1h, the poll's time and value; on longer spans, the exact window, its average and its peak:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/chart-hover-dark.png">
@@ -174,7 +174,7 @@ Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 | --- | --- |
 | `vartop` | Print help |
 | `vartop web` | Serve the dashboard and collect every server while it runs |
-| `vartop server list` | List all servers with health status |
+| `vartop server list` | List all servers (static servers with their health status) |
 | `vartop server add` | Register a new server via the interactive wizard (static, Kubernetes or DNS) |
 | `vartop server use <name>` | Set the default server |
 | `vartop server remove <name>` | Remove a server (`--all`: every server) |
@@ -183,11 +183,11 @@ Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 | `vartop concurrency <worker> <n>` | Set a worker's concurrency pool size |
 | `-s`, `--server <name>` | The server `web`, `action` and `concurrency` use (overrides the default) |
 
-`action` and `concurrency` run against **every instance** of the server (static endpoints, or the live Kubernetes or DNS set) concurrently and print one result line per instance; the command fails if any instance fails. `concurrency` is per instance, so `concurrency orders 8` on 3 instances gives 24 workers in total. To target one instance, pass its endpoint URL:
+`action` and `concurrency` run against **every endpoint** of the server (each static endpoint, or each pod or address Kubernetes or DNS discovery finds) concurrently and print one result line per endpoint; the command fails if any endpoint fails. Behind a load-balancer URL that is one instance, the one the balancer picks: see [Load balancers](#load-balancers). `concurrency` is per instance, so `concurrency orders 8` on 3 endpoints gives 24 workers in total. To target one endpoint, pass its URL:
 
 ```bash
-vartop action orders pause                                        # all instances
-vartop action orders pause --origin http://10.0.0.5:8080/varmq    # one instance
+vartop action orders pause                                        # every endpoint
+vartop action orders pause --origin http://10.0.0.5:8080/varmq    # one endpoint
 vartop -s staging concurrency orders 8
 ```
 
@@ -334,7 +334,7 @@ flowchart LR
     cli(["vartop action<br/>vartop concurrency"]) -->|"direct"| service
 ```
 
-`vartop web` runs a **collector** for each configured server. At every interval it polls each instance's REST API, works out each worker's rates, and writes the result to that server's file in a local SQLite store. The pages read only that store, never varmq, so every browser tab sees the same numbers and switching servers is instant. An action from the page goes to varmq from the vartop process, with the server's token. The CLI does not use the store: `vartop action` and `vartop concurrency` call each instance directly.
+`vartop web` runs a **collector** for each configured server. At every interval it polls each instance's REST API, works out each worker's rates, and writes the result to that server's file in a local SQLite store. The pages read only that store, never varmq, so every browser tab sees the same numbers and switching servers is instant. An action from the page goes to varmq from the vartop process, with the server's token. The CLI does not use the store: `vartop action` and `vartop concurrency` call each configured or discovered endpoint directly.
 
 ### Collection
 
@@ -345,11 +345,11 @@ flowchart LR
 - **After a crash**, the dead process's lease stays valid for up to 15 seconds. A `vartop web` started meanwhile watches the lease's heartbeat for 6 seconds and takes it over if it does not move.
 - **Its data directory deleted** while it runs (by a cache cleaner, say), vartop web stops, whether it collects or only shows what another collects, with *data directory removed: {dir} no longer holds the control.db …; start vartop web again*.
 - **History stored by an older vartop is filled into the 24h charts once.** A server file from before the 5-minute buckets has its stored polls summed into them in the background after vartop web starts: 50 polls at a time, each batch followed by a pause at least as long, and without holding anything the collector's own polls or the lease need, so collection carries on meanwhile. That takes about 15 seconds for 12,000 polls of a small fleet, and about 45 seconds per server for a full day of a 10 × 20 server polled every 5 seconds. Until it is done, the 24h charts show the part already filled.
-- **It logs state changes only**, to its terminal: servers added, removed or restarted, a server that cannot be polled at all (discovery or connection failing) and its recovery, store problems, and who collects. An instance that stops answering shows on the page, not in the log.
+- **It logs state changes only**, to its terminal: servers added, removed or restarted, a server that cannot be polled at all (its discovery failing: a Kubernetes watcher that cannot sync, a DNS name that does not resolve) and its recovery, store problems, and who collects. Instances that stop answering, even all of them, show on the page, not in the log.
 
 ### Charts
 
-- **Charts keep the time axis.** The sparklines span a fixed 10 minutes and the detail charts a fixed hour, each point placed at the time it was taken; a line breaks where polls are missing (vartop web was not running, or the server unreachable), so a gap shows as a gap.
+- **Charts keep the time axis.** The sparklines span a fixed 10 minutes and the detail charts the hour (or the span chosen below), each point placed at the time it was taken; a line breaks where polls are missing (vartop web was not running, or the server unreachable), so a gap shows as a gap.
 - **The detail charts have axes and a hover readout.** The two 1 h charts on a worker's page show the clock every 10 minutes along the bottom and a scale of 0, half the peak and the peak on the left, with faint gridlines. Hovering a chart draws a crosshair at the nearest poll and shows its time, value and how many instances answered, at once; over a stretch with no polls it shows nothing. A tap does the same on a touch screen. The dashboard's sparklines stay compact, with no axes.
 - **Each chart shows the hour, the day, or longer.** Completed /s and Failed /s on a worker's page each have a switch of their own: **1h | 24h**, then **7d** and **30d** as far as the server's [`history`](#schema) reaches, and the history itself when it is neither (**14d**, say). At 24h a chart spans the last day in 5-minute buckets: each point is the bucket's average rate, hovering one shows *13:05–13:10 · avg 12.4/s · peak 15.1/s · 3/3 instances* (how many answered at the poll in that window that missed the most; a poll at which none answered shows only on the 1h chart), the caption's peak is the span's highest single poll, and the clock is marked every 6 hours. A longer chart merges the buckets into the shortest of 5, 10, 15, 20, 30 and 60 minutes that gives it at most 720 points (7d: 15 minutes, 30d: an hour), dates its points (*Tue 27 Oct 13:00–14:00 · …*) and marks local midnights: every day for a week, every few days beyond. The choice is in the address (`?completed=24h&failed=7d`), so a reload, the refresh, the instance picker and a shared link keep it; a span the server's history does not offer (a link from before it was shortened, say) shows the hour. The dashboard's 10-minute trends stay as they are.
 - **History survives a restart.** Charts are drawn from what was stored, so they are back when you start `vartop web` again.
@@ -376,7 +376,7 @@ Outside Kubernetes the page says **instance** where Kubernetes says pod, and lab
 
 If a server is configured with a single **load-balancer URL** (an ingress, nginx, a cloud LB, or a normal ClusterIP Service), every request reaches *one* instance chosen by the balancer. varmq adds an `X-Varmq-Instance` header naming the process that answered every API request, defaulting to the hostname (the pod name on Kubernetes) and settable via `varmq.InstanceID`.
 
-- **The CLI** can't aggregate through a balancer, so it makes the situation visible: an action reaches one instance, not all of them (a `pause` and the following `resume` can land on different instances), and each result line names the instance that served it (`ok (instance pod-c)`).
+- **The CLI** can't aggregate through a balancer, so it makes the situation visible: an action reaches one instance, not all of them (a `pause` and the following `resume` can land on different instances), and a successful result line names the instance that answered (`127.0.0.1: ok (instance pod-c)`).
 - **vartop web** sends requests through the balancer on new connections until every instance it knows of has answered or a retry limit is reached. The dashboard then lists every instance behind the balancer as an entry of its own, labelled like any other, and its header says how many answered behind each balancer endpoint (*3 instances behind 127.0.0.1:8090* in the screenshot at the top). Detection is best-effort: a balancer that keeps a client on one backend per connection (most L4 balancers, kube-proxy) is still noticed, since every attempt is a new connection, but only instances that answered can be reported.
 
 <details>
