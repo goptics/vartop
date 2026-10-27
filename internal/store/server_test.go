@@ -1,10 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -644,5 +646,167 @@ func TestFilesPrivate(t *testing.T) {
 		if perm := fi.Mode().Perm(); perm != 0o700 {
 			t.Errorf("%s mode %v, want 0700", d, perm)
 		}
+	}
+}
+
+// TestServerFileReplaced: a writer notices its file removed, or another
+// put in its place.
+func TestServerFileReplaced(t *testing.T) {
+	dir := t.TempDir()
+	openControl(t, dir)
+	db := newWriter(t, dir, "prod")
+	if gone, err := db.Replaced(); gone || err != nil {
+		t.Fatalf("Replaced = %v, %v; want false", gone, err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "servers")); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := db.Replaced(); !gone || err != nil {
+		t.Errorf("Replaced after servers/ was removed = %v, %v; want true", gone, err)
+	}
+	newWriter(t, dir, "prod") // made anew
+	if gone, err := db.Replaced(); !gone || err != nil {
+		t.Errorf("Replaced once made anew = %v, %v; want true", gone, err)
+	}
+}
+
+// corruptRoot overwrites the root page of table in the SQLite file at path
+// with garbage, leaving its header and schema as they were: the file
+// opens, and reading table fails.
+func corruptRoot(t *testing.T, path, table string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root, size int64
+	err = db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name = ?`, table).Scan(&root)
+	if err == nil {
+		err = db.QueryRow(`PRAGMA page_size`).Scan(&size)
+	}
+	if err == nil {
+		_, err = db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	}
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xa5}, int(size)), (root-1)*size); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestControlCorruptionNotServerFile: a damaged control.db makes Append
+// fail, but not as a corrupt server file: the daemon would set a healthy
+// one aside.
+func TestControlCorruptionNotServerFile(t *testing.T) {
+	dir := t.TempDir()
+	ctl, token := claimed(t, dir)
+	db, err := OpenServer(dir, "prod", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendAll(t, db, token, tick(base, 1))
+	_ = db.Close()
+	_ = ctl.Close()
+	corruptRoot(t, controlPath(dir), "daemon")
+
+	db = newWriter(t, dir, "prod")
+	_, err = db.Append(token, tick(base.Add(time.Second), 2))
+	if err == nil || IsCorrupt(err) {
+		t.Errorf("Append with control.db damaged = %v (corrupt %v); want an error, not the server file's", err, IsCorrupt(err))
+	}
+	if s, err := db.Latest(); err != nil || s == nil || s.Pods[0].Workers["w"].Metrics.Completed != 1 {
+		t.Errorf("server file: Latest = %v, %v; want its row", s, err)
+	}
+}
+
+// TestCorruptBeginBlamed: a corrupt error from a statement that takes
+// control.db and the server file both is the server file's only when the
+// server file itself is damaged.
+func TestCorruptBeginBlamed(t *testing.T) {
+	other := t.TempDir()
+	bad := PathFor(other, "bad")
+	if err := os.MkdirAll(filepath.Dir(bad), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	corrupt(t, bad)
+	_, corruptErr := OpenServer(other, "bad", false)
+	if !IsCorrupt(corruptErr) {
+		t.Fatalf("no corrupt error to blame: %v", corruptErr)
+	}
+
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	appendAll(t, db, token, tick(base, 1))
+	if err := db.blame(corruptErr); err == nil || IsCorrupt(err) {
+		t.Errorf("blame with the server file sound = %v (corrupt %v); want it not the file's", err, IsCorrupt(err))
+	}
+	if err := db.blame(ErrLeaseLost); err != ErrLeaseLost {
+		t.Errorf("blame(ErrLeaseLost) = %v, want it as it is", err)
+	}
+	_ = db.Close()
+	corrupt(t, PathFor(dir, "prod"))
+	if err := db.blame(corruptErr); !IsCorrupt(err) {
+		t.Errorf("blame with the server file damaged = %v; want it corrupt", err)
+	}
+}
+
+// captureLog has the store log into a buffer until the test ends.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { SetLogger(nil) })
+	return &buf
+}
+
+// TestUndecodableRecords: a stored blob that cannot be decoded (bit rot
+// SQLite does not see) is an ErrUndecodable for Latest and Labels, and a
+// snapshot Window and Tail skip, logged once per file opened.
+func TestUndecodableRecords(t *testing.T) {
+	log := captureLog(t)
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	lt := tick(base.Add(2*time.Second), 3)
+	lt.Labels = &fleet.LabelState{Numbers: map[string]fleet.LabelNumber{"#a": {N: 1}}}
+	ids := appendAll(t, db, token, tick(base, 1), tick(base.Add(time.Second), 2), lt)
+	if _, err := db.db.Exec(`UPDATE snapshots SET data = x'00ff' WHERE id = ?`, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.Exec(`UPDATE labels SET state = x'00ff'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.Labels(); !errors.Is(err, ErrUndecodable) {
+		t.Errorf("Labels = %v, want ErrUndecodable", err)
+	}
+	if _, err := db.db.Exec(`UPDATE snapshots SET data = x'00ff' WHERE id = ?`, ids[2]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Latest(); !errors.Is(err, ErrUndecodable) {
+		t.Errorf("Latest = %v, want ErrUndecodable", err)
+	}
+
+	r, err := OpenServer(dir, "prod", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	snaps, newest, err := r.Window(base.Add(-time.Hour))
+	if err != nil || newest != ids[2] || !reflect.DeepEqual(completed(snaps), []uint64{1}) {
+		t.Errorf("Window = %v, %d, %v; want the one sound snapshot, newest %d", completed(snaps), newest, err, ids[2])
+	}
+	if snaps, _, err := r.Tail(0); err != nil || !reflect.DeepEqual(completed(snaps), []uint64{1}) {
+		t.Errorf("Tail = %v, %v; want the one sound snapshot", completed(snaps), err)
+	}
+	if n := strings.Count(log.String(), "cannot be decoded"); n != 1 {
+		t.Errorf("logged %d times, want once per file:\n%s", n, log)
 	}
 }

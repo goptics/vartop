@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/goptics/vartop/internal/fleet"
@@ -22,6 +24,10 @@ type ServerDB struct {
 	db     *sql.DB
 	key    string
 	writer bool
+	path   string
+	file   os.FileInfo // the file at path once a writer set it up; nil for a reader
+
+	skipped atomic.Bool // a snapshot that cannot be decoded was skipped, and logged
 
 	capBytes int64 // Prune's cap on the bytes in use: ServerCapBytes, but in tests
 	batch    int   // snapshots Prune deletes at a time past the cap
@@ -46,6 +52,27 @@ CREATE INDEX snapshots_at ON snapshots (at);`
 
 var errReadOnly = errors.New("server file opened read-only")
 
+// ErrUndecodable is the error of a stored record that cannot be decoded:
+// bit rot inside a blob, which SQLite does not see, or a codec changed
+// without a new StoreVersion.
+var ErrUndecodable = errors.New("stored record cannot be decoded")
+
+// logger is where the store reports what it gets past without failing.
+var logger atomic.Pointer[slog.Logger]
+
+// SetLogger sets where the store reports what it gets past without failing
+// — a stored snapshot it skips because it cannot be decoded, once per file
+// opened — or, with nil, has it report nothing, as before it is set: the
+// TUI owns the terminal.
+func SetLogger(l *slog.Logger) { logger.Store(l) }
+
+func storeLog() *slog.Logger {
+	if l := logger.Load(); l != nil {
+		return l
+	}
+	return slog.New(slog.DiscardHandler)
+}
+
 // errNotSetUp is a reader's error for a file that has no tables yet: its
 // writer's first connection has made it a database, and its first
 // transaction, which creates them, is not committed yet.
@@ -64,7 +91,7 @@ func OpenServer(dataDir, key string, writer bool) (*ServerDB, error) {
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		s := &ServerDB{db: openDB(path, false, ""), key: key}
+		s := &ServerDB{db: openDB(path, false, ""), key: key, path: path}
 		if err := s.checkReader(); err != nil {
 			_ = s.db.Close()
 			return nil, fmt.Errorf("open %s: %w", path, err)
@@ -88,9 +115,13 @@ func openWriter(dataDir, path, key string) (*ServerDB, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &ServerDB{db: openDB(path, true, controlPath(dataDir)), key: key, writer: true,
+	s := &ServerDB{db: openDB(path, true, controlPath(dataDir)), key: key, writer: true, path: path,
 		capBytes: ServerCapBytes, batch: 1000}
-	if err := s.init(); err != nil {
+	err = s.init()
+	if err == nil {
+		s.file, err = os.Stat(path)
+	}
+	if err != nil {
 		_ = s.db.Close()
 		if created {
 			_ = removeFile(path)
@@ -100,12 +131,48 @@ func openWriter(dataDir, path, key string) (*ServerDB, error) {
 	return s, nil
 }
 
+// Replaced reports whether the file a writer opened is no longer the one at
+// its path: removed (servers/ deleted, say), or another put in its place.
+// A writer whose file is replaced writes what no UI reads.
+func (s *ServerDB) Replaced() (bool, error) {
+	if s.file == nil {
+		return false, errReadOnly
+	}
+	return replaced(s.path, s.file)
+}
+
+// blame returns err as it is unless it says a file is corrupt and came from
+// a statement that takes control.db (attached as ctl) as well as the
+// server file — a writer's BEGIN IMMEDIATE takes both — while the server
+// file itself reads: then it is control.db's, and made an error IsCorrupt
+// is false for. Setting a healthy server file aside for control.db's fault
+// would lose its history for nothing.
+func (s *ServerDB) blame(err error) error {
+	if !IsCorrupt(err) || IsCorrupt(checkFile(s.path)) {
+		return err
+	}
+	return ctlErr(err)
+}
+
+// ctlErr makes err, an error of control.db met on a server file's
+// connection, one IsCorrupt is false for (%v, as Connect's ATTACH).
+func ctlErr(err error) error { return fmt.Errorf("control.db: %v", err) }
+
+// checkFile reads the header and schema of the database file at path, on
+// a connection of its own with nothing attached.
+func checkFile(path string) error {
+	db := openDB(path, false, "")
+	defer func() { _ = db.Close() }()
+	var n int
+	return db.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&n)
+}
+
 // init creates what the file lacks, and resets what is not this key's or
 // of this version.
 func (s *ServerDB) init() error {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return s.blame(err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(serverSchema); err != nil {
@@ -251,7 +318,7 @@ func (s *ServerDB) Append(token string, t fleet.Tick) (id int64, err error) {
 	// between the check and the insert.
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, err
+		return 0, s.blame(err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var holder string
@@ -259,7 +326,7 @@ func (s *ServerDB) Append(token string, t fleet.Tick) (id int64, err error) {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, ErrLeaseLost
 	case err != nil:
-		return 0, err
+		return 0, ctlErr(err)
 	case holder == "" || holder != token:
 		return 0, ErrLeaseLost
 	}
@@ -297,9 +364,17 @@ func (s *ServerDB) Tail(afterID int64) ([]*fleet.Snapshot, int64, error) {
 	return s.scan(`SELECT id, at, data FROM snapshots WHERE id > ?1 ORDER BY id`, afterID)
 }
 
+// tailSince is Tail, but without the snapshots taken before since: a feed
+// takes in none older than its window, whatever their ids.
+func (s *ServerDB) tailSince(afterID int64, since time.Time) ([]*fleet.Snapshot, int64, error) {
+	return s.scan(`SELECT id, at, data FROM snapshots WHERE id > ?1 AND at >= ?2 ORDER BY id`, afterID, since.UnixMilli())
+}
+
 // scan runs a query of id, at and data, and reads the newest id, in one
-// read transaction, so that the two agree.
-func (s *ServerDB) scan(query string, arg int64) ([]*fleet.Snapshot, int64, error) {
+// read transaction, so that the two agree. A snapshot that cannot be
+// decoded is skipped (and logged, the first time): one bad row must not
+// cost the whole window.
+func (s *ServerDB) scan(query string, args ...any) ([]*fleet.Snapshot, int64, error) {
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, 0, err
@@ -309,7 +384,7 @@ func (s *ServerDB) scan(query string, arg int64) ([]*fleet.Snapshot, int64, erro
 	if err := tx.QueryRow(`SELECT coalesce(max(id), 0) FROM snapshots`).Scan(&newest); err != nil {
 		return nil, 0, err
 	}
-	rows, err := tx.Query(query, arg)
+	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -323,14 +398,18 @@ func (s *ServerDB) scan(query string, arg int64) ([]*fleet.Snapshot, int64, erro
 		}
 		snap, err := decodeSnapshot(at, data)
 		if err != nil {
-			return nil, 0, fmt.Errorf("snapshot %d: %w", id, err)
+			if !s.skipped.Swap(true) {
+				storeLog().Warn("skipping stored snapshots that cannot be decoded", "file", s.path, "id", id, "err", err)
+			}
+			continue
 		}
 		snaps = append(snaps, snap)
 	}
 	return snaps, newest, rows.Err()
 }
 
-// Latest returns the newest snapshot, or nil when there is none.
+// Latest returns the newest snapshot, or nil when there is none; an error
+// wrapping ErrUndecodable when it cannot be decoded.
 func (s *ServerDB) Latest() (*fleet.Snapshot, error) {
 	var at int64
 	var data []byte
@@ -341,10 +420,15 @@ func (s *ServerDB) Latest() (*fleet.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decodeSnapshot(at, data)
+	snap, err := decodeSnapshot(at, data)
+	if err != nil {
+		return nil, fmt.Errorf("latest snapshot: %w: %w", ErrUndecodable, err)
+	}
+	return snap, nil
 }
 
-// Labels returns the label state stored last, and whether there is one.
+// Labels returns the label state stored last, and whether there is one; an
+// error wrapping ErrUndecodable when it cannot be decoded.
 func (s *ServerDB) Labels() (fleet.LabelState, bool, error) {
 	var data []byte
 	err := s.db.QueryRow(`SELECT state FROM labels WHERE id = 1`).Scan(&data)
@@ -355,7 +439,10 @@ func (s *ServerDB) Labels() (fleet.LabelState, bool, error) {
 		return fleet.LabelState{}, false, err
 	}
 	l, err := decodeLabels(data)
-	return l, err == nil, err
+	if err != nil {
+		return fleet.LabelState{}, false, fmt.Errorf("labels: %w: %w", ErrUndecodable, err)
+	}
+	return l, true, nil
 }
 
 // Prune deletes the snapshots older than Retention at now, then the oldest

@@ -1,12 +1,22 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"time"
 )
+
+// DeadAfter is how long a lease that looks fresh may go without a beat
+// before its holder is taken for dead: three beats missed.
+const DeadAfter = 3 * BeatEvery
+
+// beatPoll is how often BeatAdvances reads the beat it watches.
+const beatPoll = 100 * time.Millisecond
 
 // ErrLeaseLost means the token given is not the lease's: another daemon
 // claimed it, or it was released.
@@ -27,7 +37,9 @@ type Lease struct {
 // counter and the daemon's collection error. The daemon and every UI open
 // it; each writes its own fields.
 type Control struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
+	file os.FileInfo // the file at path when it was opened
 }
 
 const controlSchema = `
@@ -61,16 +73,26 @@ func OpenControl(dataDir string) (*Control, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	return &Control{db: db}, nil
+	fi, err := os.Stat(path)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	return &Control{db: db, path: path, file: fi}, nil
 }
 
 // Close closes the control file.
 func (c *Control) Close() error { return c.db.Close() }
 
 // fresh reports whether a lease with token, last renewed at beat (unix
-// ms), still holds at now.
+// ms), still holds at now: renewed less than LeaseTTL before now, and not
+// more than 2·BeatEvery after it. A beat further ahead is no daemon's
+// renewing, as clocks a little apart would make it, but a dead daemon's
+// last one, read after the clock stepped back: it must not hold the lease
+// for as long as the step.
 func fresh(token string, beat int64, now time.Time) bool {
-	return token != "" && now.Sub(time.UnixMilli(beat)) < LeaseTTL
+	age := now.Sub(time.UnixMilli(beat))
+	return token != "" && age < LeaseTTL && age >= -2*BeatEvery
 }
 
 // Claim makes the caller the collecting daemon, as l (but for its Token,
@@ -78,6 +100,21 @@ func fresh(token string, beat int64, now time.Time) bool {
 // then ok is false. The token it returns is what Beat, Release and every
 // ServerDB.Append need.
 func (c *Control) Claim(l Lease, now time.Time) (token string, ok bool, err error) {
+	return c.claim(l, now, "")
+}
+
+// TakeOver claims the lease as Claim does, but from the daemon holding it
+// with token dead too, however fresh its lease looks: one whose beat did
+// not advance for DeadAfter (see BeatAdvances), so dead. ok is false when
+// the lease is fresh and another's than dead: another daemon took it over
+// first, or claimed it once dead's went stale.
+func (c *Control) TakeOver(dead string, l Lease, now time.Time) (token string, ok bool, err error) {
+	return c.claim(l, now, dead)
+}
+
+// claim is Claim, taking the lease from token dead's holder too when dead
+// is not "".
+func (c *Control) claim(l Lease, now time.Time, dead string) (token string, ok bool, err error) {
 	tx, err := c.db.Begin() // IMMEDIATE: two claimants queue here
 	if err != nil {
 		return "", false, err
@@ -90,7 +127,7 @@ func (c *Control) Claim(l Lease, now time.Time) (token string, ok bool, err erro
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
 		return "", false, err
-	case fresh(cur, beat, now):
+	case fresh(cur, beat, now) && (dead == "" || cur != dead):
 		return "", false, nil
 	}
 	token = rand.Text()
@@ -117,6 +154,62 @@ func (c *Control) Beat(token string, now time.Time) (stopRequested bool, err err
 		return false, ErrLeaseLost
 	}
 	return stop != 0, err
+}
+
+// BeatAdvances watches the lease of token for up to within, and reports
+// whether its holder renewed it meanwhile: true as soon as the lease shows
+// a beat other than the one it had at first (later, or earlier after the
+// clock stepped back: renewed either way), false once within passed
+// without one, at once if the lease is not token's (or no longer is). now
+// and sleep are the clock it waits by; a ctx done ends the wait with its
+// error.
+func (c *Control) BeatAdvances(ctx context.Context, token string, within time.Duration, now func() time.Time, sleep func(time.Duration)) (advanced bool, err error) {
+	first, held, err := c.beatOf(token)
+	if err != nil || !held {
+		return false, err
+	}
+	deadline := now().Add(within)
+	for now().Before(deadline) {
+		sleep(beatPoll)
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		beat, held, err := c.beatOf(token)
+		if err != nil || !held {
+			return false, err
+		}
+		if beat != first {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// beatOf returns the beat of the lease, and whether it is token's.
+func (c *Control) beatOf(token string) (beat int64, held bool, err error) {
+	err = c.db.QueryRow(`SELECT beat FROM daemon WHERE id = 1 AND token = ? AND token <> ''`, token).Scan(&beat)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return beat, err == nil, err
+}
+
+// Replaced reports whether the file c opened is no longer the one at its
+// path: removed (the data dir deleted, say), or another put in its place.
+// A daemon whose control.db is replaced would hold a lease no UI sees,
+// while another daemon claims the new file's.
+func (c *Control) Replaced() (bool, error) { return replaced(c.path, c.file) }
+
+// replaced reports whether the file at path is no longer file.
+func replaced(path string, file os.FileInfo) (bool, error) {
+	fi, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !os.SameFile(fi, file), nil
 }
 
 // Release gives up the lease of token, so that the next daemon need not

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -329,5 +330,77 @@ func TestReaderIsReadOnly(t *testing.T) {
 	defer r.Close()
 	if _, err := r.db.Exec(`DELETE FROM meta`); err == nil {
 		t.Error("a reader deleted rows")
+	}
+}
+
+// TestFeedTailBounded: a feed left unsynced for hours (hidden) takes in no
+// more than the window on its next Sync, not every snapshot since.
+func TestFeedTailBounded(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	t0 := time.UnixMilli(time.Now().Add(-3 * time.Hour).UnixMilli())
+	n := uint64(0)
+	rows := func(from, to time.Time) {
+		for at := from; !at.After(to); at = at.Add(time.Minute) {
+			n++
+			appendAll(t, db, token, tick(at, n))
+		}
+	}
+	rows(t0.Add(-59*time.Minute), t0) // the hour before t0
+	f := newFeed(t, dir, "prod")
+	clock := t0
+	f.now = func() time.Time { return clock }
+	sync1(t, f)
+	if got := len(f.Snapshots()); got != 60 {
+		t.Fatalf("first Sync: %d snapshots, want the hour's 60", got)
+	}
+
+	rows(t0.Add(time.Minute), t0.Add(3*time.Hour)) // 3h unsynced
+	clock = t0.Add(3 * time.Hour)
+	sync1(t, f)
+	since := clock.Add(-time.Hour - 3*f.Interval())
+	snaps := f.Snapshots()
+	for _, s := range snaps {
+		if s.At.Before(since) {
+			t.Fatalf("held a snapshot of %v, older than the window (since %v); %d held", s.At, since, len(snaps))
+		}
+	}
+	if len(snaps) != 61 || f.Latest().Pods[0].Workers["w"].Metrics.Completed != n {
+		t.Errorf("%d snapshots held, want the window's 61 up to the newest", len(snaps))
+	}
+
+	// Tailing on from there takes the new rows, but none dated before the
+	// window (the clock stepped back while the daemon wrote them).
+	appendAll(t, db, token, tick(since.Add(-time.Minute), 1000), tick(clock.Add(time.Second), 1001))
+	sync1(t, f)
+	if got := completed(f.Snapshots()); got[len(got)-1] != 1001 || slices.Contains(got, 1000) {
+		t.Errorf("after a tail: %v, want 1001 last and no 1000", got[len(got)-3:])
+	}
+}
+
+// TestFeedCloseIsFinal: a Sync after Close (one in flight when the feed
+// was dropped) opens nothing, and keeps what the feed held.
+func TestFeedCloseIsFinal(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	appendAll(t, db, token, tick(base, 1))
+	f := newFeed(t, dir, "prod")
+	sync1(t, f)
+	if f.db == nil || f.Latest() == nil {
+		t.Fatalf("after Sync: db %v, Latest %v; want both", f.db, f.Latest())
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Errorf("Sync after Close = %v, want nil", err)
+	}
+	if f.db != nil {
+		t.Error("Sync after Close opened the file again")
+	}
+	if l := f.Latest(); l == nil || l.Pods[0].Workers["w"].Metrics.Completed != 1 {
+		t.Errorf("Latest after Close = %v, want the snapshot held", l)
 	}
 }

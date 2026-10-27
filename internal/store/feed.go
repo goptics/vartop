@@ -18,10 +18,12 @@ import (
 type Feed struct {
 	dataDir, key, path string
 	interval           time.Duration
+	now                func() time.Time // the clock the window is reckoned by: time.Now but in tests
 
 	ring atomic.Pointer[fleet.Ring] // replaced whole on a reload, so readers never see a mix
 
 	mu     sync.Mutex  // serialises Sync and Close; guards the fields below
+	closed bool        // Close was called: Sync opens nothing any more
 	db     *ServerDB   // nil until opened, and after an error
 	file   os.FileInfo // the file db has open
 	loaded bool        // the window was loaded from db
@@ -32,7 +34,7 @@ type Feed struct {
 // NewFeed returns an empty feed of the server configured under key, polled
 // every interval; the first Sync opens its file.
 func NewFeed(dataDir, key string, interval time.Duration) *Feed {
-	f := &Feed{dataDir: dataDir, key: key, path: PathFor(dataDir, key), interval: interval}
+	f := &Feed{dataDir: dataDir, key: key, path: PathFor(dataDir, key), interval: interval, now: time.Now}
 	f.ring.Store(fleet.NewRing(interval))
 	return f
 }
@@ -52,6 +54,9 @@ func (f *Feed) Latest() *fleet.Snapshot { return f.ring.Load().Latest() }
 // A file reset under the feed — its snapshots dropped for a new version or
 // pruned away, or the file set aside as corrupt and recreated, or removed —
 // is noticed and its contents loaded anew, never added to what was held.
+// A feed not synced for longer than its window (hidden, say) loads the
+// window anew too, rather than everything stored since. After Close, Sync
+// does nothing: the snapshots held stay.
 func (f *Feed) Sync() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -63,6 +68,9 @@ func (f *Feed) Sync() error {
 }
 
 func (f *Feed) sync() error {
+	if f.closed {
+		return nil
+	}
 	fi, err := os.Stat(f.path)
 	if errors.Is(err, fs.ErrNotExist) || err == nil && fi.Size() == 0 {
 		f.none()
@@ -90,8 +98,11 @@ func (f *Feed) sync() error {
 	if err != nil {
 		return err
 	}
-	if f.loaded && m == f.meta {
-		snaps, last, err := f.db.Tail(f.cursor)
+	since := f.now().Add(-time.Hour - 3*f.interval)
+	if latest := f.Latest(); f.loaded && m == f.meta && latest != nil && !latest.At.Before(since) {
+		// Every row after the cursor is newer than the snapshot it took:
+		// within the window. A cursor older than the window loads it anew.
+		snaps, last, err := f.db.tailSince(f.cursor, since)
 		if err != nil {
 			return err
 		}
@@ -105,7 +116,7 @@ func (f *Feed) sync() error {
 		}
 		// The ids went back: what the cursor counted is gone.
 	}
-	snaps, last, err := f.db.Window(time.Now().Add(-time.Hour - 3*f.interval))
+	snaps, last, err := f.db.Window(since)
 	if err != nil {
 		return err
 	}
@@ -135,10 +146,12 @@ func (f *Feed) close() {
 	f.db, f.file, f.loaded = nil, nil, false
 }
 
-// Close closes the feed's file. A later Sync opens it again.
+// Close closes the feed's file, for good: a later Sync (one under way when
+// the feed was dropped, say) opens nothing, and the snapshots held stay.
 func (f *Feed) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.closed = true
 	f.close()
 	return nil
 }
