@@ -1,8 +1,6 @@
 package store
 
 import (
-	"database/sql"
-	"errors"
 	"testing"
 	"time"
 
@@ -28,7 +26,7 @@ func ratedTick(at time.Time, completed float64) fleet.Tick {
 // completed and failed, as want does, up to end.
 func sameDay(t *testing.T, got, want *fleet.Day, end time.Time) {
 	t.Helper()
-	for _, label := range []string{"", "instance-2"} {
+	for _, label := range []string{"", "instance-2", "i1", "i2", "i3", "i4"} {
 		for _, failed := range []bool{false, true} {
 			g, gp := got.Rates(label, failed, end, fleet.NounFor(nil))
 			w, wp := want.Rates(label, failed, end, fleet.NounFor(nil))
@@ -131,9 +129,8 @@ func oldFile(t *testing.T, dir, token string, ticks ...fleet.Tick) {
 }
 
 // TestFillBuckets: a file whose snapshots were stored before buckets were
-// gets them filled, a batch at a time, as the collector holding the lease:
-// resumed where it stopped, never summed twice, and nothing for one that
-// does not hold it.
+// gets them filled, a batch at a time: resumed where it stopped, and never
+// summed twice.
 func TestFillBuckets(t *testing.T) {
 	dir := t.TempDir()
 	_, token := claimed(t, dir)
@@ -151,17 +148,14 @@ func TestFillBuckets(t *testing.T) {
 	appendAll(t, db, token, live)
 	want.Add(live.Snap)
 
-	if _, err := db.FillBuckets("not-the-lease", bucketT0.Add(-time.Hour), 2); !errors.Is(err, ErrLeaseLost) {
-		t.Errorf("FillBuckets without the lease = %v, want ErrLeaseLost", err)
-	}
-	more, err := db.FillBuckets(token, bucketT0.Add(-time.Hour), 2)
+	more, err := db.FillBuckets(bucketT0.Add(-time.Hour), 2)
 	if err != nil || !more {
 		t.Fatalf("first batch = %v, %v; want more to fill", more, err)
 	}
 	_ = db.Close() // stopped half way
 	db = newWriter(t, dir, "prod")
 	for range 10 {
-		if more, err = db.FillBuckets(token, bucketT0.Add(-time.Hour), 2); err != nil || !more {
+		if more, err = db.FillBuckets(bucketT0.Add(-time.Hour), 2); err != nil || !more {
 			break
 		}
 	}
@@ -173,7 +167,7 @@ func TestFillBuckets(t *testing.T) {
 		t.Fatal(err)
 	}
 	sameDay(t, got, want, bucketT0.Add(6*time.Minute))
-	if more, err := db.FillBuckets(token, bucketT0.Add(-time.Hour), 2); more || err != nil {
+	if more, err := db.FillBuckets(bucketT0.Add(-time.Hour), 2); more || err != nil {
 		t.Errorf("FillBuckets once done = %v, %v; want nothing to do", more, err)
 	}
 }
@@ -198,4 +192,154 @@ func TestReaderOfAnOldFile(t *testing.T) {
 	}
 }
 
-var _ = sql.ErrNoRows
+// TestFillLeavesTheLeaseFree: filling takes no lock on control.db, so the
+// collector's beat (and a page's poke) never waits on a fill, however long
+// it runs: a beat kept waiting past busy_timeout loses the lease's renewal
+// and stops the collector.
+func TestFillLeavesTheLeaseFree(t *testing.T) {
+	dir := t.TempDir()
+	ctl, token := claimed(t, dir)
+	oldFile(t, dir, token)
+	db := newWriter(t, dir, "prod")
+	// The snapshots of an older vartop, stored in one go, as they were
+	// before the buckets: what fills them is under test, not Append.
+	tx, err := db.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snaps := fleetTicks(300, 10, 20, 5*time.Second)
+	for _, snap := range snaps {
+		data, err := encodeSnapshot(snap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`INSERT INTO snapshots (at, data) VALUES (?, ?)`, snap.At.UnixMilli(), data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO meta (k, v) VALUES ('fill_to', (SELECT max(id) FROM snapshots)), ('filled', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		for {
+			more, err := db.FillBuckets(snaps[0].At, 25)
+			if err != nil || !more {
+				done <- err
+				return
+			}
+		}
+	}()
+	var slowest time.Duration
+	for filling := true; filling; {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			filling = false
+		case <-time.After(20 * time.Millisecond):
+			began := time.Now()
+			if err := ctl.Beat(token, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			slowest = max(slowest, time.Since(began))
+		}
+	}
+	if slowest > 100*time.Millisecond {
+		t.Errorf("a beat waited %v on the fill, want it never to wait", slowest)
+	}
+}
+
+// mixedTicks are polls of worker "w" in one bucket and the next, in the
+// states that test what the buckets sum: rates that fall as well as rise,
+// a unit down, a unit that lists the worker but did not answer for it, a
+// poll with no rate on any unit (the first after a restart), a unit just
+// started (3/3 then 3/4, whose worst is the second), and a poll no unit
+// answered.
+func mixedTicks() []fleet.Tick {
+	unit := func(label string, rate float64, ok bool) fleet.PodSnapshot {
+		sm := &fleet.Sample{CompletedRate: rate, FailedRate: rate / 4, RateOK: ok}
+		sm.Name, sm.Status = "w", "running"
+		return fleet.PodSnapshot{Key: "http://" + label, Via: "http://" + label, Label: label, Workers: map[string]*fleet.Sample{"w": sm}}
+	}
+	down := func(label string) fleet.PodSnapshot {
+		return fleet.PodSnapshot{Key: "http://" + label, Via: "http://" + label, Label: label, Err: "connection refused"}
+	}
+	unreached := func(label string) fleet.PodSnapshot {
+		p := unit(label, 0, false)
+		delete(p.Workers, "w")
+		p.Workers["other"] = &fleet.Sample{}
+		p.Unreached = []string{"w"}
+		return p
+	}
+	polls := [][]fleet.PodSnapshot{
+		{unit("i1", 6, true), unit("i2", 2, true), unit("i3", 4, true)},
+		{unit("i1", 1, true), down("i2"), unit("i3", 9, true)},
+		{unit("i1", 3, false), unit("i2", 3, false), unit("i3", 3, false)},
+		{unit("i1", 5, true), unreached("i2"), unit("i3", 2, true)},
+		{down("i1"), down("i2"), down("i3")},
+		{unit("i1", 2, true), unit("i2", 2, true), unit("i3", 2, true)},
+		{unit("i1", 2, true), unit("i2", 2, true), unit("i3", 2, true), unit("i4", 0, false)},
+		{unit("i1", 7, true), unit("i2", 1, true), unit("i3", 5, true)},
+	}
+	var ticks []fleet.Tick
+	for i, pods := range polls {
+		at := bucketT0.Add(time.Duration(i) * time.Minute) // polls 5 to 7 in the next bucket
+		for _, p := range pods {
+			for _, sm := range p.Workers {
+				sm.At = at
+			}
+		}
+		ticks = append(ticks, fleet.Tick{Snap: &fleet.Snapshot{At: at, Pods: pods}})
+	}
+	return ticks
+}
+
+// TestBucketsSumAsDay: what Append sums into the buckets, and what
+// FillBuckets sums from stored snapshots, chart exactly as fleet.Day sums
+// the same polls: averages, peaks, the worst poll's units, partial marks.
+func TestBucketsSumAsDay(t *testing.T) {
+	want := fleet.NewDay("w")
+	ticks := mixedTicks()
+	for _, tk := range ticks {
+		want.Add(tk.Snap)
+	}
+	end := bucketT0.Add(8 * time.Minute)
+
+	t.Run("append", func(t *testing.T) {
+		dir := t.TempDir()
+		_, token := claimed(t, dir)
+		db := newWriter(t, dir, "prod")
+		appendAll(t, db, token, ticks...)
+		got, err := db.Day("w", bucketT0.Add(-time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sameDay(t, got, want, end)
+	})
+	t.Run("fill", func(t *testing.T) {
+		dir := t.TempDir()
+		_, token := claimed(t, dir)
+		oldFile(t, dir, token, ticks...)
+		db := newWriter(t, dir, "prod")
+		for {
+			more, err := db.FillBuckets(bucketT0.Add(-time.Hour), 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !more {
+				break
+			}
+		}
+		got, err := db.Day("w", bucketT0.Add(-time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sameDay(t, got, want, end)
+	})
+}

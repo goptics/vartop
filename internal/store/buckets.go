@@ -28,8 +28,9 @@ CREATE TABLE buckets (
 	PRIMARY KEY (worker, start, label)
 ) WITHOUT ROWID;`
 
-// addBucket sums one point into its bucket: fleet.DayStat.Add, in SQL.
-// The SET expressions read the row as it was.
+// addBucket sums one point into its bucket: fleet.DayStat.Add, in SQL —
+// the worst poll kept is the one missing the most units, a tie going to
+// fewer contributing. The SET expressions read the row as it was.
 const addBucket = `
 INSERT INTO buckets (worker, start, label, polls, completed, failed, peak_c, peak_f, fewest, out_of)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?5, ?6, ?7, ?8)
@@ -39,8 +40,12 @@ ON CONFLICT (worker, start, label) DO UPDATE SET
 	failed = failed + excluded.failed,
 	peak_c = max(peak_c, excluded.peak_c),
 	peak_f = max(peak_f, excluded.peak_f),
-	out_of = CASE WHEN excluded.fewest < fewest THEN excluded.out_of ELSE out_of END,
-	fewest = min(fewest, excluded.fewest)`
+	out_of = CASE WHEN excluded.out_of - excluded.fewest > out_of - fewest
+		OR excluded.out_of - excluded.fewest = out_of - fewest AND excluded.fewest < fewest
+		THEN excluded.out_of ELSE out_of END,
+	fewest = CASE WHEN excluded.out_of - excluded.fewest > out_of - fewest
+		OR excluded.out_of - excluded.fewest = out_of - fewest AND excluded.fewest < fewest
+		THEN excluded.fewest ELSE fewest END`
 
 // addBuckets sums snap's points (fleet.DayPoints) into their bucket, in tx.
 func addBuckets(tx *sql.Tx, snap *fleet.Snapshot) error {
@@ -94,24 +99,26 @@ func (s *ServerDB) Day(worker string, since time.Time) (*fleet.Day, error) {
 }
 
 // FillBuckets sums into the buckets up to n of the snapshots stored before
-// the file had them (from the meta's filled up to its fill_to), as the
-// collector holding the lease of token, and reports whether more are left.
-// Each batch is one transaction holding control.db's write lock, its
-// progress recorded in it: a fill stopped half way resumes where it was,
-// and none is summed twice, whoever holds the lease next. Snapshots taken
-// before since are passed over.
-func (s *ServerDB) FillBuckets(token string, since time.Time, n int) (more bool, err error) {
+// the file had them (from the meta's filled up to its fill_to), and reports
+// whether more are left. Each batch is one transaction of the server file
+// alone, its progress recorded in it: a fill stopped half way resumes where
+// it was, and none is summed twice, by whichever collector fills next. It
+// takes no lock on control.db — unlike Append, whose transaction does — so
+// a fill, however long, never keeps the lease's beat or a page's poke
+// waiting. It needs no lease either: a collector fills only while it
+// collects. Snapshots taken before since are passed over.
+func (s *ServerDB) FillBuckets(since time.Time, n int) (more bool, err error) {
 	if !s.writer {
 		return false, errReadOnly
 	}
-	tx, err := s.db.Begin()
+	if s.filler == nil {
+		s.filler = openDB(s.path, true, "") // the server file's write lock, and no other
+	}
+	tx, err := s.filler.Begin()
 	if err != nil {
 		return false, s.blame(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := checkLease(tx, token); err != nil {
-		return false, err
-	}
 	filled, to, err := fillMarks(tx)
 	if err != nil || filled >= to {
 		return false, err

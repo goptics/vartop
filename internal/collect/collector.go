@@ -340,8 +340,9 @@ type writer struct {
 }
 
 const (
-	// fillEvery is the pause between two batches of fill, which leave the
-	// ticks room between them.
+	// fillEvery is the least pause between two batches of fill; a batch
+	// that took longer is followed by a pause as long, so that a fill takes
+	// at most half of the server file's time and leaves the ticks room.
 	fillEvery = 50 * time.Millisecond
 	// fillBatch is how many snapshots one batch of fill sums: one short
 	// transaction, even for a large fleet.
@@ -357,7 +358,7 @@ func (w *writer) run(ctx context.Context) {
 		}
 	}()
 	w.unfilled = true
-	fill := time.NewTicker(fillEvery)
+	fill := time.NewTimer(fillEvery)
 	defer fill.Stop()
 	for {
 		var filling <-chan time.Time
@@ -375,7 +376,9 @@ func (w *writer) run(ctx context.Context) {
 				return
 			}
 		case <-filling:
+			began := time.Now()
 			w.fill()
+			fill.Reset(max(fillEvery, time.Since(began)))
 		}
 	}
 }
@@ -385,8 +388,8 @@ func (w *writer) run(ctx context.Context) {
 // the 24h charts then show the history stored by an older vartop too. A
 // failure stops it until the next prune, which starts it again.
 func (w *writer) fill() {
-	more, err := w.db.FillBuckets(w.c.d.token, w.c.d.o.Now().Add(-fleet.DayWindow), fillBatch)
-	if w.c.seen.changed("fill", errString(err)) && err != nil && !errors.Is(err, store.ErrLeaseLost) {
+	more, err := w.db.FillBuckets(w.c.d.o.Now().Add(-fleet.DayWindow), fillBatch)
+	if w.c.seen.changed("fill", errString(err)) && err != nil {
 		w.c.d.o.Log.Warn("cannot fill the day buckets", "server", w.c.name, "err", err)
 	}
 	w.unfilled = more && err == nil

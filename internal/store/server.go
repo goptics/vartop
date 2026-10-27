@@ -31,6 +31,8 @@ type ServerDB struct {
 
 	capBytes int64 // Prune's cap on the bytes in use: ServerCapBytes, but in tests
 	batch    int   // snapshots Prune deletes at a time past the cap
+
+	filler *sql.DB // FillBuckets' connection, without control.db: nil until it runs
 }
 
 // meta is what a server file says about itself.
@@ -309,7 +311,12 @@ func setAside(path string) error {
 }
 
 // Close closes the file.
-func (s *ServerDB) Close() error { return s.db.Close() }
+func (s *ServerDB) Close() error {
+	if s.filler != nil {
+		_ = s.filler.Close()
+	}
+	return s.db.Close()
+}
 
 // Append stores the tick's snapshot (and its label state, when the tick
 // carries one) in one transaction, as the collector holding the lease of

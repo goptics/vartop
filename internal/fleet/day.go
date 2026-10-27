@@ -65,14 +65,16 @@ type DayStat struct {
 	Polls                     int     // the points with a rate
 	Completed, Failed         float64 // their sums
 	PeakCompleted, PeakFailed float64 // and highest
-	// Fewest of Of units expected contributed at the bucket's worst poll,
-	// counting those with no rate; Of is 0 before the first point.
+	// Fewest of Of units expected contributed at the bucket's worst poll:
+	// the one missing the most (a tie, the one with fewer contributing).
+	// Of is 0 before the first point.
 	Fewest, Of int
 }
 
 // Add sums p, a point with an expected unit, into st.
 func (st *DayStat) Add(p DayPoint) {
-	if st.Of == 0 || p.Contributing < st.Fewest {
+	missing, worst := p.Expected-p.Contributing, st.Of-st.Fewest
+	if st.Of == 0 || missing > worst || missing == worst && p.Contributing < st.Fewest {
 		st.Fewest, st.Of = p.Contributing, p.Expected
 	}
 	if p.Contributing == 0 {

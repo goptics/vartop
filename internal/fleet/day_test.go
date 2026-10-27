@@ -204,3 +204,22 @@ func TestDayPut(t *testing.T) {
 		t.Errorf("loaded = %+v (peak %v), summed = %+v (peak %v); want the same", last(t, b), pb, last(t, a), pa)
 	}
 }
+
+// TestDayWorstPollByMissing: a bucket shows its poll missing the most
+// units, whatever the order: one of 3/3 and 3/4 (a fourth unit just
+// started, no rate yet) is partial and says 3/4, not 3/3.
+func TestDayWorstPollByMissing(t *testing.T) {
+	full := orders(dayT0, [2]float64{1, 0}, [2]float64{1, 0}, [2]float64{1, 0})
+	growing := orders(dayT0.Add(time.Minute), [2]float64{1, 0}, [2]float64{1, 0}, [2]float64{1, 0}, [2]float64{0, 0})
+	growing.Pods[3].Workers["orders"].RateOK = false
+	for name, order := range map[string][]*Snapshot{"full first": {full, growing}, "growing first": {growing, full}} {
+		d := NewDay("orders")
+		for _, s := range order {
+			d.Add(s)
+		}
+		pts, _ := d.Rates("", false, dayT0, NounFor(nil))
+		if p := last(t, pts); !p.Partial || !strings.HasSuffix(p.Title, "· 3/4 instances") {
+			t.Errorf("%s: %q partial %v, want 3/4 instances, partial", name, p.Title, p.Partial)
+		}
+	}
+}
