@@ -620,7 +620,7 @@ func TestDetailRenders(t *testing.T) {
 		`class="axis-x"`,
 		`<line class="grid"`,
 		`<line class="cross"`,
-		`<script src="/static/chart.js" defer></script>`,
+		`<script src="/static/detail.js" defer></script>`,
 		`hx-post="/workers/a%2Fb%20c/actions/pause"`,
 		`hx-post="/workers/a%2Fb%20c/actions/resume"`,
 		`hx-post="/workers/a%2Fb%20c/actions/restart"`,
@@ -796,11 +796,18 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 	}
 	// The chart hover script: it follows the pointer over a 1h chart and
 	// reads the hover target's text.
-	chart, err := assets.ReadFile("static/chart.js")
-	if err != nil || !strings.Contains(string(chart), "pointermove") || !strings.Contains(string(chart), ".history") {
-		t.Errorf("chart.js not embedded or not the chart hover script: %v", err)
+	detail, err := assets.ReadFile("static/detail.js")
+	if err != nil {
+		t.Fatalf("detail.js not embedded: %v", err)
 	}
-	for _, want := range []string{"#1A1B26", "#C0CAF5", "prefers-color-scheme: light", ".mixed"} {
+	for _, want := range []string{"pointermove", ".history", `addEventListener("input"`, ".controls"} {
+		if !strings.Contains(string(detail), want) {
+			t.Errorf("detail.js lacks %q: not the charts' hover readout and the concurrency inputs kept in step", want)
+		}
+	}
+	// The primary colour is varmq's logo teal, which the native controls
+	// (the concurrency slider, checkboxes) take too.
+	for _, want := range []string{"#1A1B26", "#C0CAF5", "prefers-color-scheme: light", ".mixed", "--accent: #44BF9E", "accent-color: var(--accent)"} {
 		if !strings.Contains(strings.ToUpper(string(css)), strings.ToUpper(want)) {
 			t.Errorf("app.css lacks %q", want)
 		}

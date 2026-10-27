@@ -1,6 +1,6 @@
-// Hover readout for the 1h charts (.history): a crosshair at the poll under
-// the pointer and its text, at once, in place of the browser's delayed
-// tooltip. The text is the hover target's <title>, which stays the tooltip
+// The worker detail page's script. First, the hover readout for the 1h
+// charts (.history): a crosshair at the poll under the pointer and its
+// text, at once, in place of the browser's delayed tooltip. The text is the hover target's <title>, which stays the tooltip
 // where this script does not run. Polls replace the charts every few
 // seconds, so the readout is drawn again on each swap, before it is shown.
 (() => {
@@ -96,3 +96,14 @@
     if (chart) show(chart, pointer.x);
   });
 })();
+
+// The concurrency slider applies on release. While it is dragged, the
+// number beside it shows the value it would set; a number typed moves the
+// slider. The two never disagree.
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el.matches || !el.matches('.controls input[name="n"]')) return;
+  for (const other of el.closest(".controls").querySelectorAll('input[name="n"]')) {
+    if (other !== el) other.value = el.value;
+  }
+});

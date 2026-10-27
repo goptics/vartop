@@ -380,7 +380,7 @@ vartop
 │       ├── actions.go      # Worker action, concurrency and bulk POST routes
 │       ├── render.go       # Template loading and page model
 │       ├── templates/      # HTML pages (htmx-driven, server-rendered)
-│       └── static/         # Embedded CSS, the charts' hover script and vendored htmx
+│       └── static/         # Embedded CSS, the detail page's script (chart hover, concurrency inputs) and vendored htmx
 ├── main.go                 # Entry point
 ├── Makefile                # Build, run, clean, test targets
 ├── go.mod
