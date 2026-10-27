@@ -1,5 +1,5 @@
-/* vartop web UI. Dark is the TUI's Tokyo Night palette (internal/tui/styles.go);
-   light is Tokyo Night Day, chosen by prefers-color-scheme. */
+/* vartop web UI. Dark is Tokyo Night, light is Tokyo Night Day, chosen by
+   prefers-color-scheme. */
 :root {
   color-scheme: dark light;
   --bg: #1A1B26;

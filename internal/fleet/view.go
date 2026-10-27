@@ -30,7 +30,7 @@ import (
 
 const (
 	// TrendWindow is how far back row and KPI sparklines reach, the 10 minutes
-	// up to the newest snapshot (the TUI buckets it by time).
+	// up to the newest snapshot.
 	TrendWindow = 10 * time.Minute
 	// HistoryWindow is how far back the detail charts reach, the hour up to
 	// the newest snapshot.

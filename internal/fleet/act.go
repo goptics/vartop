@@ -32,8 +32,7 @@ const (
 	OneBalancedMsg    = "A load balancer picks which instance answers, so actions here would reach a random one. Use All instances (merged), or list the instances' own addresses in the server config."
 )
 
-// The notices of what a reader of the store — vartop web or the TUI —
-// cannot show or reach, in the same words in both.
+// The notices of what vartop web cannot show or reach.
 
 // WaitingMsg is the notice of a server with no snapshot stored yet.
 func WaitingMsg(server string) string { return "Waiting for the first snapshot of " + server + "…" }

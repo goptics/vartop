@@ -1,18 +1,13 @@
 package cmd
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
 	"github.com/goptics/vartop/internal/config"
-	"github.com/goptics/vartop/internal/store"
-	"github.com/goptics/vartop/internal/tui"
 )
 
 var (
@@ -21,70 +16,10 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "vartop",
-	Short: "vartop is a CLI tool and TUI for monitoring and managing varmq workers",
-	Long: `vartop provides a rich Terminal User Interface to view worker statuses, 
-concurrencies, and metrics from varmq mux servers.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadOrOnboard()
-		if err != nil {
-			return err
-		}
-
-		// The store and the daemon know a server by its config key.
-		key := serverFlag
-		if key == "" {
-			key = cfg.DefaultServer
-		}
-		if _, err := cfg.GetActiveServer(key); err != nil {
-			return err
-		}
-		daemon := tuiDaemon()
-
-		dataDir, err := store.DataDir()
-		if err != nil {
-			return err
-		}
-		ctl, err := store.OpenControl(dataDir)
-		if err != nil {
-			return err
-		}
-		defer ctl.Close()
-
-		// The TUI reads what the daemon collects; r starts the daemon when
-		// none runs, or one collects with another configuration.
-		m := tui.NewModel(cfg, key, dataDir, ctl, daemon)
-		p := tea.NewProgram(m, tea.WithAltScreen())
-
-		finalModel, err := p.Run()
-		// Quit closes the server files the TUI's feeds opened. Every copy of
-		// the model shares them, so the final one closes them all.
-		var closeErr error
-		switch m := finalModel.(type) {
-		case tui.Model:
-			closeErr = m.Close()
-		case *tui.Model:
-			closeErr = m.Close()
-		}
-		if err == nil {
-			err = closeErr
-		}
-		return err
-	},
-}
-
-// tuiDaemon makes sure the daemon collects (ensureDaemon) before the TUI
-// opens, as startCollecting does for vartop web, and is what the TUI is
-// told of it: r starts it, a daemon's environment is checked against this
-// vartop's (R31), and what making sure it runs said — that it did not start,
-// or the warning of a login service that failed — goes on the TUI's error
-// line: printed, it would be hidden behind the TUI's screen.
-func tuiDaemon() tui.Daemon {
-	var warn bytes.Buffer
-	err := ensureLocal(&warn)
-	if w := strings.TrimSpace(warn.String()); w != "" {
-		err = errors.Join(err, errors.New(w))
-	}
-	return tui.Daemon{Start: ensureLocalDaemon, SameEnv: sameEnvAsOwn(), StartErr: err}
+	Short: "vartop monitors and manages varmq workers from the command line and a web dashboard",
+	Long: `vartop monitors and manages the workers of varmq mux servers: from the
+command line, and in a web dashboard (vartop web) that collects every
+configured server while it runs.`,
 }
 
 // loadOrOnboard loads the configuration, starting the interactive onboarding

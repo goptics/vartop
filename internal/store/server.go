@@ -62,8 +62,7 @@ var logger atomic.Pointer[slog.Logger]
 
 // SetLogger sets where the store reports what it gets past without failing
 // — a stored snapshot it skips because it cannot be decoded, once per file
-// opened — or, with nil, has it report nothing, as before it is set: the
-// TUI owns the terminal.
+// opened — or, with nil, has it report nothing, as before it is set.
 func SetLogger(l *slog.Logger) { logger.Store(l) }
 
 func storeLog() *slog.Logger {

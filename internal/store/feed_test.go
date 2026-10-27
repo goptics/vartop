@@ -284,7 +284,7 @@ func TestConcurrentReadersWriter(t *testing.T) {
 			}
 		})
 	}
-	// A web handler and a TUI tick may sync one feed at once.
+	// Two web requests may sync one feed at once.
 	wg.Go(func() {
 		for {
 			select {

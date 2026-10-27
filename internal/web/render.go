@@ -218,7 +218,7 @@ type placed struct {
 }
 
 // chartArea is a w×h plot of the window up to the newest of a series'
-// points, which it places by time (fleet.Point.At), as the TUI does: a
+// points, which it places by time (fleet.Point.At): a
 // stretch with no snapshot is blank space of its width, not squeezed away
 // by the points around it. interval is the series' poll interval: points
 // more than two apart are not joined. 0 joins every pair, gaps aside.
