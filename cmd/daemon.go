@@ -36,6 +36,10 @@ const (
 	stopWait = 5 * time.Second
 	// leasePoll is how often the lease is read while waiting on it.
 	leasePoll = 100 * time.Millisecond
+	// suspectAfter is how old the beat of a fresh lease may be before
+	// ensureDaemon takes its daemon for possibly dead (R42): two beats
+	// missed.
+	suspectAfter = 2 * store.BeatEvery
 	// logMaxBytes is the size past which the daemon log is renamed to
 	// daemon.log.1 when a daemon starts.
 	logMaxBytes = 5 << 20
@@ -43,6 +47,10 @@ const (
 
 // stoppedMsg is what `vartop daemon stop` says once the daemon stopped.
 const stoppedMsg = "vartop daemon stopped. It starts again at your next login or the next time you open vartop."
+
+// notRespondingMsg is `vartop daemon stop`'s error when the daemon neither
+// stopped nor beat (notResponding).
+const notRespondingMsg = "the vartop daemon is not responding; its lease expires within 15s"
 
 // exitError ends vartop with code, printing err when there is one.
 type exitError struct {
@@ -263,6 +271,11 @@ var localDaemon = func() (o ensureOptions, release func(), err error) {
 // service when that is installed — Install rewrites it with this vartop's
 // executable and environment, and starts it — else as a detached process;
 // ensureDaemon waits up to startWait for it to claim the lease.
+//
+// A daemon it would keep whose beat is more than suspectAfter old may have
+// crashed (R42): it starts one anyway, without stopping that one. The new
+// daemon takes a dead one's lease over, or leaves a live one its lease and
+// exits 0 (daemon.Run); a daemon then beating again is no failure.
 func ensureDaemon(o ensureOptions) error {
 	o = o.withDefaults()
 	l, fresh, err := o.ctl.Lease()
@@ -270,9 +283,20 @@ func ensureDaemon(o ensureOptions) error {
 		return err
 	}
 	if fresh && l.Stop == 0 && sameDaemon(l, o.want) {
+		if o.now().Sub(l.Beat) <= suspectAfter {
+			return nil
+		}
+		if _, err := launchDaemon(o, l.Token); err != nil {
+			if cur, fresh, lerr := o.ctl.Lease(); lerr == nil && fresh && cur.Token == l.Token && !cur.Beat.Equal(l.Beat) {
+				return nil // it was alive, only slow to beat
+			}
+			return err
+		}
 		return nil
 	}
 	if fresh {
+		// A daemon that neither stops nor beats is left alone
+		// (notResponding): the one launched takes its lease over.
 		if l, _, err = stopDaemon(o); err != nil {
 			return err
 		}
@@ -321,10 +345,14 @@ func waitStarted(o ensureOptions, old string) (store.Lease, error) {
 }
 
 // stopDaemon asks the daemon holding a fresh lease to stop, and waits up to
-// stopWait for it to let the lease go. One that does not is killed — only
-// while its lease is fresh, so that its pid is still the daemon's — and its
-// lease let go for it, so that the next daemon need not wait for it to go
-// stale. It returns the lease it found, and how the daemon stopped.
+// stopWait for it to let the lease go. One that does not is killed only
+// while its lease is fresh and its beat moves (R33): a daemon beating is
+// alive, so the pid of its lease is still its own, not one reused since
+// it crashed. Its lease is let go for it, so that the next daemon need not
+// wait for it to go stale. One whose beat does not move for
+// store.DeadAfter is left alone (notResponding): its lease goes stale
+// within LeaseTTL, and a daemon started meanwhile takes it over
+// (daemon.Run). It returns the lease it found, and how the daemon stopped.
 func stopDaemon(o ensureOptions) (store.Lease, stopped, error) {
 	o = o.withDefaults()
 	l, fresh, err := o.ctl.Lease()
@@ -336,22 +364,41 @@ func stopDaemon(o ensureOptions) (store.Lease, stopped, error) {
 	}
 	deadline := o.now().Add(stopWait)
 	for {
-		cur, fresh, err := o.ctl.Lease()
-		if err != nil {
-			return l, notRunning, err
-		}
-		if !fresh || cur.Token != l.Token {
-			return l, stoppedAsked, nil
+		gone, err := leaseGone(o.ctl, l.Token)
+		if err != nil || gone {
+			return l, stoppedAsked, err
 		}
 		if !o.now().Before(deadline) {
 			break
 		}
 		o.sleep(leasePoll)
 	}
+	beating, err := o.ctl.BeatAdvances(context.Background(), l.Token, store.DeadAfter, o.now, o.sleep)
+	if err != nil {
+		return l, notRunning, err
+	}
+	switch gone, err := leaseGone(o.ctl, l.Token); {
+	case err != nil:
+		return l, notRunning, err
+	case gone: // it stopped while watched
+		return l, stoppedAsked, nil
+	case !beating:
+		return l, notResponding, nil
+	}
 	if err := o.kill(l.PID); err != nil {
 		return l, notRunning, fmt.Errorf("vartop daemon (pid %d) did not stop: %w", l.PID, err)
 	}
 	return l, stoppedKilled, o.ctl.Release(l.Token)
+}
+
+// leaseGone reports whether the daemon of token no longer holds a fresh
+// lease: it let it go, or it went stale.
+func leaseGone(ctl *store.Control, token string) (bool, error) {
+	cur, fresh, err := ctl.Lease()
+	if err != nil {
+		return false, err
+	}
+	return !fresh || cur.Token != token, nil
 }
 
 // stopped is how stopDaemon went.
@@ -361,6 +408,7 @@ const (
 	notRunning    stopped = iota // none was stopped: none held a fresh lease, or the error says why
 	stoppedAsked                 // the daemon stopped when asked
 	stoppedKilled                // it did not, and was killed
+	notResponding                // it neither stopped nor beat: left alone, dead or hung
 )
 
 // installService installs the login service, with this vartop's executable
@@ -658,6 +706,8 @@ var daemonStopCmd = &cobra.Command{
 		case how == notRunning:
 			fmt.Fprintln(w, "vartop daemon is not running")
 			return nil
+		case how == notResponding:
+			return errors.New(notRespondingMsg)
 		case how == stoppedKilled && o.sup.Installed():
 			// The service manager restarts a daemon killed by a signal.
 			if err := o.sup.Stop(); err != nil {

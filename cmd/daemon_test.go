@@ -452,16 +452,61 @@ func TestEnsureDaemonRestartsOnConfigPathOrKubeconfigMismatch(t *testing.T) {
 	}
 }
 
-// TestEnsureDaemonKillsHungDaemon: a daemon that does not stop when asked
-// is killed after stopWait, by the pid of its lease, and its lease let go,
-// so that the new one can claim it at once.
+// onFakeClock makes vartop's clock a fake one, starting at the real now,
+// whose sleeps pass at once; each sleep then runs hooks.
+func (d *testDaemon) onFakeClock(hooks ...func()) *fakeClock {
+	clock := &fakeClock{t: time.Now()}
+	d.o.now = clock.now
+	d.o.sleep = func(dur time.Duration) {
+		clock.sleep(dur)
+		for _, hook := range hooks {
+			hook()
+		}
+	}
+	return clock
+}
+
+// beats is a sleep hook of a daemon that renews the lease of token, as one
+// alive does: at the real now (a lease is fresh by the real clock), a
+// millisecond further each time, so that every beat differs.
+func (d *testDaemon) beats(token string) func() {
+	n := 0
+	return func() {
+		n++
+		_, _ = d.o.ctl.Beat(token, time.Now().Add(time.Duration(n)*time.Millisecond))
+	}
+}
+
+// takesOver is a sleep hook of the daemon vartop spawns finding the lease
+// of token dead fresh: once it has watched it for store.DeadAfter on clock
+// without a beat, it takes it over as l, as daemon.Run does (R34).
+func (d *testDaemon) takesOver(t *testing.T, clock *fakeClock, dead string, l store.Lease) func() {
+	var spawnedAt time.Time
+	spawn := d.o.spawn
+	d.o.spawn = func() error {
+		spawnedAt = clock.now()
+		return spawn()
+	}
+	return func() {
+		if spawnedAt.IsZero() || clock.now().Sub(spawnedAt) < store.DeadAfter {
+			return
+		}
+		if cur, _ := lease(t, d.o.ctl); cur.Token == dead {
+			if _, ok, err := d.o.ctl.TakeOver(dead, l, time.Now()); !ok || err != nil {
+				t.Errorf("TakeOver = %v, %v", ok, err)
+			}
+		}
+	}
+}
+
+// TestEnsureDaemonKillsHungDaemon: a daemon that does not stop when asked,
+// but beats, is killed after stopWait, by the pid of its lease, and its
+// lease let go, so that the new one can claim it at once.
 func TestEnsureDaemonKillsHungDaemon(t *testing.T) {
 	d := newTestDaemon(t)
-	clock := &fakeClock{t: time.Now()}
-	d.o.now, d.o.sleep = clock.now, clock.sleep
 	old := d.o.want
 	old.Build, old.PID = "old", 4242
-	claim(t, d.o.ctl, old)
+	clock := d.onFakeClock(d.beats(claim(t, d.o.ctl, old)))
 	d.startsAs(t, d.o.want)
 	began := clock.now()
 	if err := ensureDaemon(d.o); err != nil {
@@ -476,6 +521,162 @@ func TestEnsureDaemonKillsHungDaemon(t *testing.T) {
 	if l, fresh := lease(t, d.o.ctl); !fresh || l.Build != d.o.want.Build {
 		t.Errorf("lease = %+v (fresh %v), want the new daemon's", l, fresh)
 	}
+}
+
+// TestStopDaemonKillsOnlyABeatingDaemon (R33): a daemon that does not stop
+// when asked is killed only while its beat moves — it is alive, so the pid
+// of its lease is still its own. A lease that looks fresh but does not
+// beat (its daemon crashed, and the clock stepped back, or less than
+// LeaseTTL passed) is left alone, as is a daemon that stops late.
+func TestStopDaemonKillsOnlyABeatingDaemon(t *testing.T) {
+	hung := store.Lease{PID: 4242, Build: "hung"}
+	for _, tc := range []struct {
+		name      string
+		beatAt    time.Duration // of the claim, from now
+		beating   bool
+		releaseAt time.Duration // on the fake clock; 0: never
+		want      stopped
+	}{
+		{name: "beating", beating: true, want: stoppedKilled},
+		{name: "not beating", want: notResponding},
+		{name: "not beating, beat ahead of the clock", beatAt: 3 * time.Second, want: notResponding},
+		{name: "stops while watched", releaseAt: stopWait + time.Second, want: stoppedAsked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDaemon(t)
+			token, ok, err := d.o.ctl.Claim(hung, time.Now().Add(tc.beatAt))
+			if err != nil || !ok {
+				t.Fatalf("Claim() = %v, %v", ok, err)
+			}
+			var hooks []func()
+			clock := d.onFakeClock(func() {
+				for _, hook := range hooks {
+					hook()
+				}
+			})
+			began := clock.now()
+			if tc.beating {
+				hooks = append(hooks, d.beats(token))
+			}
+			if tc.releaseAt > 0 {
+				hooks = append(hooks, func() {
+					if clock.now().Sub(began) >= tc.releaseAt {
+						_ = d.o.ctl.Release(token)
+					}
+				})
+			}
+			l, how, err := stopDaemon(d.o)
+			if err != nil || how != tc.want || l.Token != token {
+				t.Fatalf("stopDaemon() = %v, %v, %v; want %v, the lease found, no error", l.Token == token, how, err, tc.want)
+			}
+			kills := d.killed()
+			cur, fresh := lease(t, d.o.ctl)
+			switch tc.want {
+			case stoppedKilled:
+				if len(kills) != 1 || kills[0] != 4242 || cur.Token != "" {
+					t.Errorf("kills %v, lease %+v; want 4242 killed and its lease let go", kills, cur)
+				}
+				if waited := clock.now().Sub(began); waited < stopWait || waited > stopWait+store.DeadAfter {
+					t.Errorf("killed after %v, want between %v and %v", waited, stopWait, stopWait+store.DeadAfter)
+				}
+			case notResponding:
+				if len(kills) != 0 || !fresh || cur.Token != token {
+					t.Errorf("kills %v, lease %+v (fresh %v); want no kill and the lease kept", kills, cur, fresh)
+				}
+				if waited := clock.now().Sub(began); waited < stopWait+store.DeadAfter {
+					t.Errorf("gave up after %v, want after %v: the beat is watched store.DeadAfter", waited, stopWait+store.DeadAfter)
+				}
+			default:
+				if len(kills) != 0 {
+					t.Errorf("killed %v; it stopped", kills)
+				}
+			}
+		})
+	}
+}
+
+// TestEnsureDaemonOverDeadDaemon: a daemon of another build that neither
+// stops nor beats is not killed; the daemon started takes its lease over
+// (R34), and vartop waits for that.
+func TestEnsureDaemonOverDeadDaemon(t *testing.T) {
+	d := newTestDaemon(t)
+	old := d.o.want
+	old.Build, old.PID = "old", 4242
+	dead := claim(t, d.o.ctl, old)
+	var clock *fakeClock
+	var takeOver func()
+	clock = d.onFakeClock(func() { takeOver() })
+	takeOver = d.takesOver(t, clock, dead, d.o.want)
+	if err := ensureDaemon(d.o); err != nil {
+		t.Fatalf("ensureDaemon() = %v", err)
+	}
+	if kills := d.killed(); len(kills) != 0 {
+		t.Errorf("killed %v; a daemon that does not beat is never killed", kills)
+	}
+	if l, fresh := lease(t, d.o.ctl); !fresh || l.Token == dead || l.Build != d.o.want.Build || d.spawned() != 1 {
+		t.Errorf("lease = %+v (fresh %v), spawns = %d; want one daemon of this build, spawned", l, fresh, d.spawned())
+	}
+}
+
+// TestEnsureDaemonSuspectLease (R42): a fresh lease of this build and
+// environment whose beat is more than 2·BeatEvery old may be a crashed
+// daemon's: vartop starts a daemon anyway, which takes a dead one's lease
+// over and leaves a live one its lease. Either way ensureDaemon succeeds.
+func TestEnsureDaemonSuspectLease(t *testing.T) {
+	setup := func(t *testing.T) (*testDaemon, string) {
+		d := newTestDaemon(t)
+		token, ok, err := d.o.ctl.Claim(d.o.want, time.Now().Add(-5*time.Second))
+		if err != nil || !ok {
+			t.Fatalf("Claim() = %v, %v", ok, err)
+		}
+		return d, token
+	}
+	t.Run("dead", func(t *testing.T) {
+		d, dead := setup(t)
+		var takeOver func()
+		clock := d.onFakeClock(func() { takeOver() })
+		takeOver = d.takesOver(t, clock, dead, d.o.want)
+		if err := ensureDaemon(d.o); err != nil {
+			t.Fatalf("ensureDaemon() = %v", err)
+		}
+		if l, fresh := lease(t, d.o.ctl); !fresh || l.Token == dead || d.spawned() != 1 {
+			t.Errorf("lease = %+v (fresh %v), spawns = %d; want a daemon spawned, holding a new lease", l, fresh, d.spawned())
+		}
+		if l, _ := lease(t, d.o.ctl); l.Stop != 0 || len(d.killed()) != 0 {
+			t.Errorf("lease %+v, kills %v; want no stop asked, no kill", l, d.killed())
+		}
+	})
+	t.Run("slow, alive", func(t *testing.T) {
+		d, token := setup(t)
+		// It beats once vartop has waited a second; the daemon spawned
+		// then leaves it the lease (it exits 0).
+		var clock *fakeClock
+		beat := d.beats(token)
+		var began time.Time
+		clock = d.onFakeClock(func() {
+			if clock.now().Sub(began) >= time.Second {
+				beat()
+			}
+		})
+		began = clock.now()
+		if err := ensureDaemon(d.o); err != nil {
+			t.Fatalf("ensureDaemon() = %v, want nil: a daemon of this build collects", err)
+		}
+		if l, fresh := lease(t, d.o.ctl); !fresh || l.Token != token || l.Stop != 0 || d.spawned() != 1 {
+			t.Errorf("lease = %+v (fresh %v), spawns = %d; want the live daemon's lease kept, one spawn", l, fresh, d.spawned())
+		}
+	})
+	t.Run("beating", func(t *testing.T) {
+		d := newTestDaemon(t)
+		token := claim(t, d.o.ctl, d.o.want)
+		d.onFakeClock()
+		if err := ensureDaemon(d.o); err != nil || d.spawned() != 0 {
+			t.Fatalf("ensureDaemon() = %v, spawns %d; want nil and none", err, d.spawned())
+		}
+		if l, _ := lease(t, d.o.ctl); l.Token != token {
+			t.Errorf("lease = %+v, want the running daemon's", l)
+		}
+	})
 }
 
 // inProcess runs daemons in this process over dataDir, as spawned
@@ -772,11 +973,9 @@ func TestDaemonStopKilledStaysStopped(t *testing.T) {
 	t.Run("killed", func(t *testing.T) {
 		d := newTestDaemon(t)
 		d.sup.installed = true
-		clock := &fakeClock{t: time.Now()}
-		d.o.now, d.o.sleep = clock.now, clock.sleep
 		hung := d.o.want
 		hung.PID = 4242
-		claim(t, d.o.ctl, hung)
+		d.onFakeClock(d.beats(claim(t, d.o.ctl, hung)))
 		out, err := runDaemonCmd(t, daemonStopCmd)
 		if err != nil || !strings.HasPrefix(out, "vartop daemon stopped.") {
 			t.Fatalf("daemon stop = %q, %v", out, err)
@@ -796,6 +995,24 @@ func TestDaemonStopKilledStaysStopped(t *testing.T) {
 			t.Errorf("service calls %v; want none", calls)
 		}
 	})
+}
+
+// TestDaemonStopNotResponding (R33): `daemon stop` of a daemon that
+// neither stops nor beats kills nothing, and says why it did not stop.
+func TestDaemonStopNotResponding(t *testing.T) {
+	d := newTestDaemon(t)
+	d.sup.installed = true
+	dead := d.o.want
+	dead.PID = 4242
+	claim(t, d.o.ctl, dead)
+	d.onFakeClock()
+	out, err := runDaemonCmd(t, daemonStopCmd)
+	if want := "the vartop daemon is not responding; its lease expires within 15s"; err == nil || err.Error() != want {
+		t.Errorf("daemon stop = %q, %v; want the error %q", out, err, want)
+	}
+	if kills, calls := d.killed(), d.sup.called(); len(kills) != 0 || len(calls) != 0 {
+		t.Errorf("kills %v, service calls %v; want none", kills, calls)
+	}
 }
 
 // TestLosingRunKeepsLog: a `daemon run` that finds another daemon
