@@ -379,6 +379,38 @@ func TestFeedTailBounded(t *testing.T) {
 	}
 }
 
+// TestFeedKeepsHistoryWhenIdle: a feed nothing new reaches for longer
+// than its window (the daemon down) keeps what it holds, for the UIs to
+// show stale ("the vartop daemon is not running"), not as never collected;
+// once rows come again it takes in the window.
+func TestFeedKeepsHistoryWhenIdle(t *testing.T) {
+	dir := t.TempDir()
+	_, token := claimed(t, dir)
+	db := newWriter(t, dir, "prod")
+	t0 := time.UnixMilli(time.Now().Add(-3 * time.Hour).UnixMilli())
+	appendAll(t, db, token, tick(t0.Add(-time.Minute), 1), tick(t0, 2))
+	f := newFeed(t, dir, "prod")
+	clock := t0
+	f.now = func() time.Time { return clock }
+	sync1(t, f)
+
+	clock = t0.Add(2 * time.Hour) // nothing written since t0
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{1, 2}) {
+		t.Fatalf("after 2h with nothing new: %v, want 1 2 kept", got)
+	}
+	sync1(t, f)
+	if l := f.Latest(); l == nil || !l.At.Equal(t0) {
+		t.Errorf("Latest = %v, want the snapshot of t0", l)
+	}
+
+	appendAll(t, db, token, tick(clock, 3))
+	sync1(t, f)
+	if got := completed(f.Snapshots()); !reflect.DeepEqual(got, []uint64{3}) {
+		t.Errorf("once collected again: %v, want the window's 3", got)
+	}
+}
+
 // TestFeedCloseIsFinal: a Sync after Close (one in flight when the feed
 // was dropped) opens nothing, and keeps what the feed held.
 func TestFeedCloseIsFinal(t *testing.T) {

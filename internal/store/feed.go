@@ -99,7 +99,8 @@ func (f *Feed) sync() error {
 		return err
 	}
 	since := f.now().Add(-time.Hour - 3*f.interval)
-	if latest := f.Latest(); f.loaded && m == f.meta && latest != nil && !latest.At.Before(since) {
+	same := f.loaded && m == f.meta // the file the snapshots held came from, not reset since
+	if latest := f.Latest(); same && latest != nil && !latest.At.Before(since) {
 		// Every row after the cursor is newer than the snapshot it took:
 		// within the window. A cursor older than the window loads it anew.
 		snaps, last, err := f.db.tailSince(f.cursor, since)
@@ -119,6 +120,13 @@ func (f *Feed) sync() error {
 	snaps, last, err := f.db.Window(since)
 	if err != nil {
 		return err
+	}
+	if same && len(snaps) == 0 && last >= f.cursor {
+		// Nothing within the window, and nothing dropped: the server was
+		// not collected for longer than the window (the daemon down). What
+		// the feed holds stays, for the UIs to show stale.
+		f.cursor = last
+		return nil
 	}
 	ring := fleet.NewRing(f.interval)
 	for _, s := range snaps {
