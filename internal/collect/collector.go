@@ -25,7 +25,7 @@ const (
 )
 
 // internalError is the error of the snapshot a tick that panicked stores.
-const internalError = "internal error (see daemon log)"
+const internalError = "internal error (see vartop web's log)"
 
 // collector collects one configured server: it opens the server's file,
 // builds its pool and runs a fleet.Collector over it, whose ticks a writer
@@ -410,7 +410,7 @@ func (w *writer) write(q queued) bool {
 	switch {
 	case errors.Is(err, store.ErrLeaseLost):
 		if w.c.d.end(0, nil) {
-			w.c.d.o.Log.Warn("lease lost: another daemon collects")
+			w.c.d.o.Log.Warn("lease lost: another vartop collects")
 		}
 		return false
 	case err != nil:

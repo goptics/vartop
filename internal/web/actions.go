@@ -43,13 +43,13 @@ type target struct {
 
 // bind returns what r acts on (see target), once its form names a
 // configured server whose newest snapshot may be acted on — current, under
-// a fresh lease of this environment's daemon (store.DaemonState.Acts, R44)
+// a fresh lease of this environment's collector (store.Collector.Acts, R44)
 // — and has the unit the form names. A server without one is poked, and
-// given up to fleet.SettleWait to take one, unless no daemon runs to
+// given up to fleet.SettleWait to take one, unless no collector runs to
 // answer; the lease is read again after. Otherwise it answers 409 with the
-// notice why — not configured, the lease unreadable, the daemon collecting
+// notice why — not configured, the lease unreadable, the collector collecting
 // in another environment, waiting for the first snapshot, stale (or a
-// previous daemon's, or no daemon collecting), the unit gone or unknown,
+// previous collector's, or no collector collecting), the unit gone or unknown,
 // the form out of date — and returns false; nothing may reach varmq then.
 //
 // The unit parameter is taken as it is, unlike a page's (see labelOf): a
@@ -80,7 +80,7 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 	// on), then the lease: whatever they hold was taken under it, or an
 	// earlier one (R44).
 	snaps := t.feed.Snapshots()
-	d := h.daemon()
+	d := h.collector()
 	if refused(w, d) {
 		return nil, false
 	}
@@ -88,7 +88,7 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		h.refresh(r.Context(), t)
 		// Again: the lease may have changed hands while it waited.
 		snaps = t.feed.Snapshots()
-		if d = h.daemon(); refused(w, d) {
+		if d = h.collector(); refused(w, d) {
 			return nil, false
 		}
 	}
@@ -118,10 +118,10 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 
 // refused answers 409 when d lets no action out, whatever the snapshot,
 // and reports whether it did: the lease cannot be read (R44: fail closed),
-// or the daemon collects in another environment (R31) — its snapshots name
+// or the collector collects in another environment (R31) — its snapshots name
 // units of that one, which this config's token must not reach. Nothing is
 // poked then either.
-func refused(w http.ResponseWriter, d store.DaemonState) bool {
+func refused(w http.ResponseWriter, d store.Collector) bool {
 	switch {
 	case d.Err != nil:
 		conflict(w, fleet.LeaseErrMsg(d.Err))
@@ -147,9 +147,9 @@ func otherParam(n fleet.Noun) string {
 
 // refresh pokes t's server and syncs its feed until it holds a snapshot
 // taken after the poke, for up to fleet.SettleWait or until ctx ends. With
-// no daemon running, which would answer the poke, it returns at once.
+// no collector running, which would answer the poke, it returns at once.
 func (h *handler) refresh(ctx context.Context, t *target) {
-	if !h.daemonRunning() {
+	if !h.collecting() {
 		return
 	}
 	at, err := h.src.Control.Poke(t.key)
@@ -340,7 +340,7 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 //
 // A refresh of a server whose newest snapshot is not current by then (no
 // snapshot came, and the one held aged past the threshold, say; see
-// store.DaemonState.Current) shows no current value, as a page does.
+// store.Collector.Current) shows no current value, as a page does.
 func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, worker string, results []fleet.ActionResult) {
 	if slices.ContainsFunc(results, func(res fleet.ActionResult) bool { return res.Outcome != "no change" }) {
 		// The snapshot held is still the best there is if none comes.
@@ -349,7 +349,7 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, t *target, wor
 	snaps := t.feed.Snapshots()
 	var stale string
 	latest, now := latestOf(snaps), time.Now()
-	switch d := h.daemon(); {
+	switch d := h.collector(); {
 	case d.Other:
 		stale = fleet.OtherConfigMsg(d.Lease.PID)
 	case latest != nil && !d.Current(latest, t.srv.PollInterval(), now):

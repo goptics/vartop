@@ -23,19 +23,19 @@ import (
 	"github.com/goptics/vartop/internal/store"
 )
 
-// harness runs daemons in-process over a temporary data dir and config
+// harness runs collectors in-process over a temporary data dir and config
 // file.
 type harness struct {
 	t       *testing.T
 	dir     string // the data dir
 	cfgPath string
 	mtime   time.Time    // of the config file last written, so that every write changes it
-	offset  atomic.Int64 // added to the daemons' clock
+	offset  atomic.Int64 // added to the collectors' clock
 	logs    logBuffer
 	// build makes a server's pool; api.PoolFor when nil. Set it before
 	// start.
 	build func(*config.Server) (*api.Pool, error)
-	// sleep is the daemons' Options.Sleep; set it before start.
+	// sleep is the collectors' Options.Sleep; set it before start.
 	sleep func(time.Duration)
 
 	ctlOnce sync.Once
@@ -66,7 +66,7 @@ func (h *harness) writeConfig(servers map[string]*config.Server) {
 }
 
 // writeRaw writes data as the config file, with an mtime a second past the
-// last one's, so that the daemon sees a change even on a coarse clock.
+// last one's, so that the collector sees a change even on a coarse clock.
 func (h *harness) writeRaw(data []byte) {
 	h.t.Helper()
 	if err := os.WriteFile(h.cfgPath, data, 0o600); err != nil {
@@ -78,7 +78,7 @@ func (h *harness) writeRaw(data []byte) {
 	}
 }
 
-// readConfig is the daemon's Options.Config: config.Load, but of the
+// readConfig is the collector's Options.Config: config.Load, but of the
 // harness's file.
 func (h *harness) readConfig() (*config.Config, string, error) {
 	data, err := os.ReadFile(h.cfgPath)
@@ -105,8 +105,8 @@ func (h *harness) readConfig() (*config.Config, string, error) {
 
 func (h *harness) now() time.Time { return time.Now().Add(time.Duration(h.offset.Load())) }
 
-// daemonRun is a Run in progress.
-type daemonRun struct {
+// collectorRun is a Run in progress.
+type collectorRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	code   int
@@ -115,10 +115,10 @@ type daemonRun struct {
 
 // start runs a collector claiming the lease as pid; it is stopped when the
 // test ends, before the fakes it polls shut down.
-func (h *harness) start(pid int) *daemonRun {
+func (h *harness) start(pid int) *collectorRun {
 	h.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &daemonRun{cancel: cancel, done: make(chan struct{})}
+	r := &collectorRun{cancel: cancel, done: make(chan struct{})}
 	o := Options{
 		DataDir:   h.dir,
 		Config:    h.readConfig,
@@ -137,7 +137,7 @@ func (h *harness) start(pid int) *daemonRun {
 }
 
 // wait returns Run's result, failing the test if it takes over timeout.
-func (r *daemonRun) wait(t *testing.T, timeout time.Duration) (int, error) {
+func (r *collectorRun) wait(t *testing.T, timeout time.Duration) (int, error) {
 	t.Helper()
 	select {
 	case <-r.done:
@@ -149,7 +149,7 @@ func (r *daemonRun) wait(t *testing.T, timeout time.Duration) (int, error) {
 }
 
 // stop cancels Run and returns its result.
-func (r *daemonRun) stop(t *testing.T) (int, error) {
+func (r *collectorRun) stop(t *testing.T) (int, error) {
 	t.Helper()
 	r.cancel()
 	return r.wait(t, 5*time.Second)
@@ -204,7 +204,7 @@ func (h *harness) waitSnaps(server string, n int, timeout time.Duration) []*flee
 	return snaps
 }
 
-// waitLog waits until the daemon log has a line containing s.
+// waitLog waits until the collector log has a line containing s.
 func (h *harness) waitLog(s string, timeout time.Duration) {
 	h.t.Helper()
 	fleettest.WaitUntil(h.t, timeout, "log "+s, func() bool { return h.logs.count(s) > 0 })
@@ -219,7 +219,7 @@ func (h *harness) exists(server string) bool {
 	return err == nil
 }
 
-// logBuffer collects the daemon log.
+// logBuffer collects the collector log.
 type logBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -256,7 +256,7 @@ func oneServer(url string) map[string]*config.Server {
 	return map[string]*config.Server{"a": {Interval: 1, Endpoints: []string{url}}}
 }
 
-func TestSecondDaemonExitsZero(t *testing.T) {
+func TestSecondCollectorExitsZero(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", nil)
 	h := newHarness(t)
 	h.writeConfig(oneServer(srv.URL))
@@ -267,15 +267,15 @@ func TestSecondDaemonExitsZero(t *testing.T) {
 	// it the lease.
 	second := h.start(2)
 	if code, err := second.wait(t, store.DeadAfter); code != 0 || err != nil {
-		t.Errorf("second daemon: Run = %d, %v; want 0, nil", code, err)
+		t.Errorf("second collector: Run = %d, %v; want 0, nil", code, err)
 	}
 	if l, fresh, err := h.control().Lease(); err != nil || !fresh || l.PID != 1 {
-		t.Errorf("Lease = %+v, fresh %v, %v; want the first daemon's, fresh", l, fresh, err)
+		t.Errorf("Lease = %+v, fresh %v, %v; want the first collector's, fresh", l, fresh, err)
 	}
 	h.waitSnaps("a", n+1, 3*time.Second) // the first one collects on
 }
 
-// waitBeats waits until the daemon has renewed its lease n more times: a
+// waitBeats waits until the collector has renewed its lease n more times: a
 // span of time, with no sleep of a guessed length.
 func (h *harness) waitBeats(n int) {
 	h.t.Helper()
@@ -290,15 +290,15 @@ func (h *harness) waitBeats(n int) {
 	})
 }
 
-// fakeWatch makes a daemon's watch of a lease holder's beat pass at once:
-// each of its sleeps moves the daemons' clock on instead. The daemons'
+// fakeWatch makes a collector's watch of a lease holder's beat pass at once:
+// each of its sleeps moves the collectors' clock on instead. The collectors'
 // clock stays ahead of the real one afterwards, so a lease they renew is
 // not fresh by it.
 func (h *harness) fakeWatch() {
 	h.sleep = func(d time.Duration) { h.offset.Add(int64(d)) }
 }
 
-// deadLease leaves the lease as a daemon that died without letting it go
+// deadLease leaves the lease as a collector that died without letting it go
 // (a crash, a SIGKILL) does: fresh, and never to be renewed. It returns
 // its token.
 func (h *harness) deadLease() string {
@@ -310,8 +310,8 @@ func (h *harness) deadLease() string {
 	return token
 }
 
-// TestCrashedHolderTakenOver (R34): a daemon started while the lease of a
-// dead one is still fresh — a supervisor restarts a crashed daemon within
+// TestCrashedHolderTakenOver (R34): a collector started while the lease of a
+// dead one is still fresh — a supervisor restarts a crashed collector within
 // LeaseTTL — watches its beat for DeadAfter, takes the lease over, and
 // collects.
 func TestCrashedHolderTakenOver(t *testing.T) {
@@ -323,14 +323,14 @@ func TestCrashedHolderTakenOver(t *testing.T) {
 	h.start(3)
 	h.waitSnaps("a", 1, 5*time.Second)
 	if l, _, err := h.control().Lease(); err != nil || l.PID != 3 || l.Token == dead {
-		t.Errorf("Lease = %+v, %v; want the new daemon's", l, err)
+		t.Errorf("Lease = %+v, %v; want the new collector's", l, err)
 	}
 	if watched := time.Duration(h.offset.Load()); watched < store.DeadAfter || watched > store.DeadAfter+time.Second {
 		t.Errorf("took the lease over after watching %v, want DeadAfter (%v)", watched, store.DeadAfter)
 	}
 }
 
-// TestWatchEndsWithCtx: a daemon watching a lease holder's beat (on the
+// TestWatchEndsWithCtx: a collector watching a lease holder's beat (on the
 // real clock) stops when told to, at once, taking nothing over.
 func TestWatchEndsWithCtx(t *testing.T) {
 	h := newHarness(t)
@@ -345,15 +345,12 @@ func TestWatchEndsWithCtx(t *testing.T) {
 		t.Errorf("Run took %v to stop while watching, want it at once", took)
 	}
 	if l, _, err := h.control().Lease(); err != nil || l.Token != dead {
-		t.Errorf("Lease = %+v, %v; want the dead daemon's still", l, err)
-	}
-	if n := h.logs.count("another vartop daemon is collecting"); n != 0 {
-		t.Errorf("a stopped watch logged another daemon collecting:\n%s", &h.logs)
+		t.Errorf("Lease = %+v, %v; want the dead collector's still", l, err)
 	}
 }
 
-// TestTwoWatchersOneWins (R34): two daemons started together over a dead
-// daemon's fresh lease both watch it; exactly one takes it over and
+// TestTwoWatchersOneWins (R34): two collectors started together over a dead
+// collector's fresh lease both watch it; exactly one takes it over and
 // collects, the other exits 0.
 func TestTwoWatchersOneWins(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", nil)
@@ -361,9 +358,9 @@ func TestTwoWatchersOneWins(t *testing.T) {
 	h.writeConfig(oneServer(srv.URL))
 	h.fakeWatch()
 	h.deadLease()
-	runs := map[int]*daemonRun{4: h.start(4), 5: h.start(5)}
+	runs := map[int]*collectorRun{4: h.start(4), 5: h.start(5)}
 	var loser, winner int
-	fleettest.WaitUntil(t, 5*time.Second, "one daemon to exit", func() bool {
+	fleettest.WaitUntil(t, 5*time.Second, "one collector to exit", func() bool {
 		for pid, r := range runs {
 			select {
 			case <-r.done:
@@ -390,10 +387,10 @@ func TestTwoWatchersOneWins(t *testing.T) {
 	}
 }
 
-// TestDataDirRemovedExits (R36): a daemon whose data dir is deleted under
+// TestDataDirRemovedExits (R36): a collector whose data dir is deleted under
 // it — removed, or removed and made anew by a UI — exits 1 at its next
 // beat, rather than collect on into files no UI reads while another
-// daemon claims the new control.db.
+// collector claims the new control.db.
 func TestDataDirRemovedExits(t *testing.T) {
 	for _, anew := range []bool{false, true} {
 		t.Run(fmt.Sprintf("made anew %v", anew), func(t *testing.T) {
@@ -455,9 +452,9 @@ func TestConfigDeletedStopsCollecting(t *testing.T) {
 	})
 }
 
-// TestTakeoverEndsOldDaemon: a daemon whose lease another claimed (its
+// TestTakeoverEndsOldCollector: a collector whose lease another claimed (its
 // lease looked stale, as after a sleep) writes nothing more and exits 0.
-func TestTakeoverEndsOldDaemon(t *testing.T) {
+func TestTakeoverEndsOldCollector(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", nil)
 	h := newHarness(t)
 	h.writeConfig(oneServer(srv.URL))
@@ -470,17 +467,17 @@ func TestTakeoverEndsOldDaemon(t *testing.T) {
 	}
 	n := len(h.snaps("a"))
 	if code, err := old.wait(t, 2*time.Second); code != 0 || err != nil {
-		t.Errorf("old daemon: Run = %d, %v; want 0, nil", code, err)
+		t.Errorf("old collector: Run = %d, %v; want 0, nil", code, err)
 	}
 	if got := len(h.snaps("a")); got != n {
-		t.Errorf("old daemon stored %d snapshots after losing its lease", got-n)
+		t.Errorf("old collector stored %d snapshots after losing its lease", got-n)
 	}
 	if l, _, err := ctl.Lease(); err != nil || l.PID != 3 || l.Token == "" {
 		t.Errorf("Lease = %+v, %v; want the new claimant's, still held", l, err)
 	}
 }
 
-// TestConfigAddRemoveEdit: with no servers the daemon idles; a server added
+// TestConfigAddRemoveEdit: with no servers the collector idles; a server added
 // to the config is collected, one edited is restarted (and no other), one
 // removed stops being polled while its file stays.
 func TestConfigAddRemoveEdit(t *testing.T) {
@@ -532,7 +529,7 @@ func TestConfigAddRemoveEdit(t *testing.T) {
 }
 
 // TestBadConfigKeepsLastGood (Review Focus 3): a half-written config is
-// logged once, and the daemon collects on with the last good one. Nothing
+// logged once, and the collector collects on with the last good one. Nothing
 // it holds is taken for a removed server: with the clock past the grace,
 // a sweep would otherwise remove every file.
 func TestBadConfigKeepsLastGood(t *testing.T) {
@@ -566,7 +563,7 @@ func TestBadConfigKeepsLastGood(t *testing.T) {
 	}
 }
 
-// TestBadConfigAtStartDeletesNothing: a daemon that starts on a config it
+// TestBadConfigAtStartDeletesNothing: a collector that starts on a config it
 // cannot read collects nothing and removes no file, however old; once the
 // config is mended, it collects.
 func TestBadConfigAtStartDeletesNothing(t *testing.T) {

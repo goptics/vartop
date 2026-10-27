@@ -19,7 +19,7 @@ import (
 )
 
 // ServerDB is one server's file: its snapshots, one row per tick, and its
-// label state. The daemon opens it as the writer; the UIs as readers.
+// label state. The collector opens it as the writer; the UIs as readers.
 type ServerDB struct {
 	db     *sql.DB
 	key    string
@@ -78,11 +78,11 @@ func storeLog() *slog.Logger {
 var errNotSetUp = fmt.Errorf("server file not set up yet: %w", fs.ErrNotExist)
 
 // OpenServer opens the file of the server configured under key (see
-// PathFor). A writer — the daemon — creates it if needed; drops its
+// PathFor). A writer — the collector — creates it if needed; drops its
 // snapshots, keeping its labels, when they are of another StoreVersion; and
 // renames a corrupt file to <file>.corrupt-<unix seconds> and starts afresh.
 // A reader needs the file to exist and be set up (an error wrapping
-// fs.ErrNotExist when it is not: the daemon may be creating it), and to be
+// fs.ErrNotExist when it is not: the collector may be creating it), and to be
 // of this key and version.
 func OpenServer(dataDir, key string, writer bool) (*ServerDB, error) {
 	path := PathFor(dataDir, key)
@@ -297,7 +297,7 @@ func setAside(path string) error {
 func (s *ServerDB) Close() error { return s.db.Close() }
 
 // Append stores the tick's snapshot (and its label state, when the tick
-// carries one) in one transaction, as the daemon holding the lease of
+// carries one) in one transaction, as the collector holding the lease of
 // token: if it does not, nothing is written and the error is ErrLeaseLost.
 // It returns the snapshot's id.
 func (s *ServerDB) Append(token string, t fleet.Tick) (id int64, err error) {

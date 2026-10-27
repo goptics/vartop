@@ -260,7 +260,7 @@ func TestPolylines(t *testing.T) {
 
 // TestSparklinePlacesByTime (R39): a web chart places each point at its
 // time over the chart's fixed window, up to the newest point: a stretch
-// with no snapshots — no daemon ran — is blank space of its width, the
+// with no snapshots — no collector ran — is blank space of its width, the
 // line broken where points are more than two intervals apart (a late poll
 // is not a break). Points older than the window are not drawn, nor counted
 // in its peak.

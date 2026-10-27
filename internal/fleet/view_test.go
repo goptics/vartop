@@ -966,134 +966,9 @@ func TestStale(t *testing.T) {
 	}
 }
 
-// TestCompletedRatesMatchRowSpark: CompletedRates is the Spark of a worker's
-// row (what BuildDashboard charts) — the same points over the same window,
-// merged or of one unit — without their tooltips, which a UI that draws none
-// does not pay to format.
-func TestCompletedRatesMatchRowSpark(t *testing.T) {
-	notRated := func() *Sample { return smp("Running", 8, 0, 8, 0) }
-	var snaps []*Snapshot
-	for n := range 160 { // 13 minutes of 5s polls: longer than the window
-		var pods []PodSnapshot
-		switch {
-		case n%7 == 3: // p1 down
-			pods = []PodSnapshot{
-				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 0), "billing": notRated()}),
-				{Key: "p1", Via: "p1", Label: "p1", Err: "connection refused"},
-				notReached("p2", map[string]*Sample{"billing": rated(smp("Running", 1, 0, 1, 0), 3, 0)}, "orders"),
-			}
-		case n%11 == 5: // nothing rated yet
-			pods = []PodSnapshot{
-				okPod("p0", map[string]*Sample{"orders": notRated(), "billing": notRated()}),
-				okPod("p1", map[string]*Sample{"orders": notRated()}),
-			}
-		default:
-			pods = []PodSnapshot{
-				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 1), "billing": rated(smp("Running", 1, 0, 1, 0), 2, 0)}),
-				okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 0.5, 0)}),
-			}
-		}
-		snaps = append(snaps, snap(atTick(n), pods...))
-	}
-
-	for _, pod := range []string{"", "p0", "p1", "p2", "nope"} {
-		d := BuildDashboard(snaps, pod, 5*time.Second, podNoun)
-		for _, name := range []string{"orders", "billing", "nowhere"} {
-			got := CompletedRates(snaps, pod, name)
-			var want []Point
-			for _, r := range d.Rows {
-				if r.Name == name {
-					want = r.Spark
-				}
-			}
-			if want == nil { // no such row: the series is the window's gaps
-				want = WorkerRates(newest(snaps, TrendWindow), pod, name, completedRate, podNoun)
-			}
-			if len(got) != len(want) {
-				t.Fatalf("pod %q worker %q: %d points, want %d", pod, name, len(got), len(want))
-			}
-			for i := range got {
-				if got[i].V != want[i].V || got[i].Gap != want[i].Gap || got[i].Partial != want[i].Partial {
-					t.Fatalf("pod %q worker %q point %d = %+v, want %+v without the Title", pod, name, i, got[i], want[i])
-				}
-				if got[i].Title != "" {
-					t.Fatalf("pod %q worker %q point %d has a Title %q", pod, name, i, got[i].Title)
-				}
-			}
-		}
-	}
-	if got := CompletedRates(snaps, "", "orders"); len(got) != 121 {
-		t.Errorf("CompletedRates covers %d of 160 polls, want the last 10 minutes: 121", len(got))
-	}
-	if got := CompletedRates(nil, "", "orders"); len(got) != 0 {
-		t.Errorf("CompletedRates of no snapshots = %v, want none", got)
-	}
-}
-
-// TestRates1hMatchDetail: CompletedRates1h and FailedRates1h are the series
-// BuildDetail charts — the same points over the whole of the snapshots,
-// merged or of one unit, per second — without their tooltips, which a UI
-// that draws none does not pay to format.
-func TestRates1hMatchDetail(t *testing.T) {
-	var snaps []*Snapshot
-	for n := range 400 { // 33 minutes of 5s polls: longer than the 10-minute window
-		var pods []PodSnapshot
-		switch {
-		case n%7 == 3: // p1 down
-			pods = []PodSnapshot{
-				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 2)}),
-				{Key: "p1", Via: "p1", Label: "p1", Err: "connection refused"},
-				notReached("p2", map[string]*Sample{}, "orders"),
-			}
-		case n%11 == 5: // nothing rated yet
-			pods = []PodSnapshot{
-				okPod("p0", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 0)}),
-				okPod("p1", map[string]*Sample{"orders": smp("Running", 8, 0, 8, 0)}),
-			}
-		default:
-			pods = []PodSnapshot{
-				okPod("p0", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), float64(n), 1)}),
-				okPod("p1", map[string]*Sample{"orders": rated(smp("Running", 8, 0, 8, 0), 0.5, float64(n%5))}),
-			}
-		}
-		snaps = append(snaps, snap(atTick(n), pods...))
-	}
-
-	same := func(what string, got, want []Point) {
-		t.Helper()
-		if len(got) != len(want) {
-			t.Fatalf("%s: %d points, want %d", what, len(got), len(want))
-		}
-		for i := range got {
-			if got[i].V != want[i].V || got[i].Gap != want[i].Gap || got[i].Partial != want[i].Partial {
-				t.Fatalf("%s: point %d = %+v, want %+v without the Title", what, i, got[i], want[i])
-			}
-			if got[i].Title != "" {
-				t.Fatalf("%s: point %d has a Title %q", what, i, got[i].Title)
-			}
-		}
-	}
-	for _, pod := range []string{"", "p0", "p1"} { // p2 is in no newest snapshot: BuildDetail has no detail of it
-		d, ok := BuildDetail(snaps, pod, "orders", 5*time.Second, podNoun)
-		if !ok {
-			t.Fatalf("pod %q: orders reported absent", pod)
-		}
-		same("completed, pod "+pod, CompletedRates1h(snaps, pod, "orders"), d.Completed1h)
-		same("failed, pod "+pod, FailedRates1h(snaps, pod, "orders"), d.Failed1h)
-	}
-	if got := CompletedRates1h(snaps, "", "orders"); len(got) != 400 {
-		t.Errorf("CompletedRates1h covers %d of 400 polls, want them all: the history, not the 10-minute window", len(got))
-	}
-	for _, got := range [][]Point{CompletedRates1h(nil, "", "orders"), FailedRates1h(nil, "", "orders")} {
-		if len(got) != 0 {
-			t.Errorf("the rates of no snapshots = %v, want none", got)
-		}
-	}
-}
-
 // TestEverySeriesCarriesTimes (R39): every point of every series builder
 // carries the At of the snapshot it was built from — rate points, partial
-// points and gaps alike — so that both UIs place it by time, from one
+// points and gaps alike — so that the charts place it by time, from one
 // source.
 func TestEverySeriesCarriesTimes(t *testing.T) {
 	down := PodSnapshot{Key: "p1", Via: "p1", Label: "p1", Err: "connection refused"}
@@ -1135,11 +1010,6 @@ func TestEverySeriesCarriesTimes(t *testing.T) {
 	check("WorkerRates", WorkerRates(snaps, "", "orders", completedRate, podNoun), snaps)
 	check("fleetRates", fleetRates(snaps, "", completedRate, 1, "/s", podNoun), snaps)
 	check("pendingSeries", pendingSeries(snaps, "", podNoun), snaps)
-	check("CompletedRates", CompletedRates(snaps, "", "orders"), window)
-	check("CompletedRatesOf", CompletedRatesOf(snaps, map[string][]string{"p0": {"orders"}})["p0"]["orders"], window)
-	check("CompletedRatesOf, a unit never seen", CompletedRatesOf(snaps, map[string][]string{"p9": {"orders"}})["p9"]["orders"], window)
-	check("CompletedRates1h", CompletedRates1h(snaps, "", "orders"), snaps)
-	check("FailedRates1h", FailedRates1h(snaps, "", "orders"), snaps)
 	det, ok := BuildDetail(snaps, "", "orders", 5*time.Second, podNoun)
 	if !ok {
 		t.Fatal("orders reported absent")
@@ -1148,59 +1018,9 @@ func TestEverySeriesCarriesTimes(t *testing.T) {
 	check("detail failed", det.Failed1h, snaps)
 }
 
-// TestCompletedRatesOfMatchesCompletedRates (T8): the series CompletedRatesOf
-// builds in one pass are those CompletedRates builds one at a time, for every
-// label and worker asked: a unit absent from the early snapshots, one that
-// answered nothing, a worker it did not reach, a sample with no rate, a label
-// twice in one snapshot (the first counts, as for PodsOf), and snapshots older
-// than the trend window, left out.
-func TestCompletedRatesOfMatchesCompletedRates(t *testing.T) {
-	var snaps []*Snapshot
-	for n := range 150 { // 12.5 minutes of 5s polls: longer than the trend window
-		w := func(rate float64) *Sample { return rated(smp("Running", 4, 1, 3, 0), rate, 0) }
-		p0 := okPod("p0", map[string]*Sample{"orders": w(float64(n)), "billing": w(1)})
-		pods := []PodSnapshot{p0}
-		switch n % 5 {
-		case 1: // p0 answered nothing
-			pods[0] = PodSnapshot{Key: "p0", Via: "p0", Label: "p0", Err: "connection refused"}
-		case 2: // billing not reached; orders without a rate
-			p0.Workers = map[string]*Sample{"orders": smp("Running", 4, 1, 3, 0)}
-			p0.Unreached = []string{"billing"}
-			pods[0] = p0
-		case 3: // p0 twice: the first counts
-			pods = append(pods, okPod("p0", map[string]*Sample{"orders": w(999), "billing": w(999)}))
-		case 4: // p0 twice, the first answered nothing: it still counts
-			pods = []PodSnapshot{{Key: "p0", Via: "p0", Label: "p0", Err: "connection refused"},
-				okPod("p0", map[string]*Sample{"orders": w(999), "billing": w(999)})}
-		}
-		if n >= 100 { // p1 comes late
-			pods = append(pods, okPod("p1", map[string]*Sample{"orders": w(7)}))
-		}
-		snaps = append(snaps, snap(atTick(n), pods...))
-	}
-	want := map[string][]string{"p0": {"orders", "billing", "absent"}, "p1": {"orders", "billing"}, "p9": {"orders"}}
-
-	got := CompletedRatesOf(snaps, want)
-	for label, workers := range want {
-		for _, name := range workers {
-			if exp := CompletedRates(snaps, label, name); !reflect.DeepEqual(got[label][name], exp) {
-				t.Errorf("%s/%s:\n got %+v\nwant %+v", label, name, got[label][name], exp)
-			}
-		}
-	}
-	if len(got) != len(want) || len(got["p0"]) != 3 || len(got["p1"]) != 2 || len(got["p9"]) != 1 {
-		t.Errorf("CompletedRatesOf built %v, want exactly the series asked for", got)
-	}
-	if got := CompletedRatesOf(nil, want); len(got["p0"]["orders"]) != 0 {
-		t.Errorf("no snapshots: %+v, want no points", got)
-	}
-}
-
 // TestDetailSeriesBoundedToTheHour (R39): the detail series chart the hour
 // up to the newest snapshot, whatever older ones they are given — a feed
 // held open across a collection gap holds more than an hour's worth.
-// CompletedRates1h and FailedRates1h, its points without tooltips, are
-// bounded alike.
 func TestDetailSeriesBoundedToTheHour(t *testing.T) {
 	var snaps []*Snapshot
 	add := func(from, to int) {
@@ -1218,7 +1038,6 @@ func TestDetailSeriesBoundedToTheHour(t *testing.T) {
 	}
 	for what, pts := range map[string][]Point{
 		"Completed1h": d.Completed1h, "Failed1h": d.Failed1h,
-		"CompletedRates1h": CompletedRates1h(snaps, "", "orders"), "FailedRates1h": FailedRates1h(snaps, "", "orders"),
 	} {
 		if len(pts) != 241 {
 			t.Errorf("%s: %d points, want the hour's 241", what, len(pts))

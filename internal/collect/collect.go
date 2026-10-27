@@ -1,8 +1,8 @@
-// Package daemon is vartop's collector: the one process, holding the
-// store's lease, that polls every configured server into the store for the
-// UIs to read. It follows the config as servers are added, removed or
-// changed, polls a server at once when a UI pokes it, and keeps the server
-// files pruned.
+// Package collect is vartop's collector: run by vartop web while it runs,
+// holding the store's lease, it polls every configured server into the
+// store for the pages to read. It follows the config as servers are added,
+// removed or changed, polls a server at once when an action pokes it, and
+// keeps the server files pruned.
 package collect
 
 import (
@@ -21,12 +21,12 @@ import (
 )
 
 const (
-	// PokeEvery is how often the daemon looks for pokes and stop requests.
+	// PokeEvery is how often the collector looks for pokes.
 	PokeEvery = 250 * time.Millisecond
 	// MinPokeGap is the least time between two polls of a server that
 	// pokes ask for.
 	MinPokeGap = time.Second
-	// ConfigEvery is how often the daemon looks for a change to the config.
+	// ConfigEvery is how often the collector looks for a change to the config.
 	ConfigEvery = 2 * time.Second
 	// PruneEvery is how often the server files are pruned.
 	PruneEvery = 5 * time.Minute
@@ -50,19 +50,19 @@ type Options struct {
 	Lease     store.Lease      // what the lease is claimed as
 	Now       func() time.Time // the clock of the lease, pruning and file removal; time.Now when nil
 	// Sleep is what Run waits with, by the Now clock, while it watches
-	// whether the daemon holding a fresh lease still beats; a sleep cut
+	// whether the collector holding a fresh lease still beats; a sleep cut
 	// short once ctx ends when nil.
 	Sleep func(time.Duration)
 	Log   *slog.Logger // state changes only; discarded when nil
 }
 
-// Run collects every configured server into the store until ctx ends, a
-// stop is requested or another daemon takes the lease, and returns 0 for
-// each. Finding another daemon's lease fresh, it watches that daemon's beat
-// for store.DeadAfter: it returns 0 if the beat moves, and takes the lease
-// over if not — the holder died without letting it go (a supervisor
-// restarts a crashed daemon well within LeaseTTL) — unless another daemon
-// takes it first. It returns a non-zero code with the error when
+// Run collects every configured server into the store until ctx ends or
+// another collector takes the lease, and returns 0 for each. Finding
+// another collector's lease fresh, it watches that collector's beat for
+// store.DeadAfter: it returns 0 if the beat moves, and takes the lease
+// over if not — the holder died without letting it go (a vartop web
+// started again soon after a crash) — unless another collector takes it
+// first. It returns a non-zero code with the error when
 // control.db fails, or is deleted under it.
 func Run(ctx context.Context, o Options) (code int, err error) {
 	if o.DataDir == "" {
@@ -120,9 +120,9 @@ func Run(ctx context.Context, o Options) (code int, err error) {
 	return code, err
 }
 
-// takeOver watches the beat of the daemon whose fresh lease refused Run's
+// takeOver watches the beat of the collector whose fresh lease refused Run's
 // claim, for store.DeadAfter, and takes the lease over if it does not
-// move. ok is false when that daemon beats, when another daemon took the
+// move. ok is false when that collector beats, when another collector took the
 // lease first, or when ctx ended.
 func takeOver(ctx context.Context, ctl *store.Control, o Options) (token string, ok bool, err error) {
 	l, _, err := ctl.Lease()
@@ -140,7 +140,7 @@ func takeOver(ctx context.Context, ctl *store.Control, o Options) (token string,
 	case err != nil || advanced:
 		return "", false, err
 	}
-	o.Log.Warn("the daemon holding the lease does not beat; taking it over", "pid", l.PID, "beat", l.Beat)
+	o.Log.Warn("the collector holding the lease does not beat; taking it over", "pid", l.PID, "beat", l.Beat)
 	return ctl.TakeOver(l.Token, o.Lease, o.Now())
 }
 
@@ -149,7 +149,7 @@ type holder struct {
 	o     Options
 	ctl   *store.Control
 	token string
-	seen  stateLog // the daemon's own
+	seen  stateLog // the collector's own
 
 	conf       configWatch
 	collectors map[string]*collector      // by server name: the config's servers
@@ -176,7 +176,7 @@ func (d *holder) end(code int, err error) bool {
 	}
 }
 
-// run is the daemon's loop: it renews the lease, passes pokes on, follows
+// run is the collector's loop: it renews the lease, passes pokes on, follows
 // the config and has the files pruned, until it has to stop. It never
 // waits on a server.
 func (d *holder) run(ctx context.Context) (int, error) {
@@ -184,7 +184,7 @@ func (d *holder) run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 1, fmt.Errorf("read pokes: %w", err)
 	}
-	d.pokes = pokes // a poke from before the start is no poke for this daemon
+	d.pokes = pokes // a poke from before the start is no poke for this collector
 	d.reload()
 
 	beat := time.NewTicker(store.BeatEvery)
@@ -201,11 +201,11 @@ func (d *holder) run(ctx context.Context) (int, error) {
 			return e.code, e.err
 		case <-beat.C:
 			// A control.db deleted under it (with the data dir, by a cache
-			// cleaner say) still takes its beats, while the UIs, and a
-			// daemon one of them starts, use a new one.
+			// cleaner say) still takes its beats, while the pages, and the
+			// collector run next, use a new one.
 			gone, err := d.ctl.Replaced()
 			if gone {
-				return 1, fmt.Errorf("data directory removed: %s no longer holds the control.db this daemon opened", d.o.DataDir)
+				return 1, fmt.Errorf("data directory removed: %s no longer holds the control.db this collector opened", d.o.DataDir)
 			}
 			if d.seen.changed("replaced", errString(err)) && err != nil {
 				d.o.Log.Warn("cannot check the data directory", "err", err)
@@ -251,7 +251,7 @@ func (d *holder) poke() {
 	}
 }
 
-// maintain, once every PruneEvery by the daemon's clock, has every server
+// maintain, once every PruneEvery by the collector's clock, has every server
 // file pruned and removes the files of servers absent from the config for
 // RemovedGrace. Before a config was read, no file is taken for a removed
 // server's.

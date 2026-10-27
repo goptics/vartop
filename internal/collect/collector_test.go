@@ -80,7 +80,7 @@ func TestHungDiscoveryIsolated(t *testing.T) {
 	_, a := fleettest.NewVarmq(t, "a", nil)
 	_, b := fleettest.NewVarmq(t, "b", nil)
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) }) // after the daemon stops
+	t.Cleanup(func() { close(release) }) // after the collector stops
 	h := newHarness(t)
 	h.build = func(s *config.Server) (*api.Pool, error) {
 		if s.Name == "hung" {
@@ -171,7 +171,7 @@ func TestPokeTriggersPoll(t *testing.T) {
 	}
 
 	// Poked every 100ms for a second: polled every MinPokeGap, not every
-	// time the daemon looks.
+	// time the collector looks.
 	n = len(h.snaps("a"))
 	for range 10 {
 		if _, err := ctl.Poke("a"); err != nil {
@@ -221,7 +221,7 @@ func TestPanicBecomesErrorSnapshot(t *testing.T) {
 	})
 	h.start(7)
 
-	const internal = "internal error (see daemon log)"
+	const internal = "internal error (see vartop web's log)"
 	snaps := h.waitSnaps("boom", 2, 3*time.Second)
 	for _, s := range snaps {
 		if s.Err != internal || len(s.Pods) != 0 {
@@ -248,7 +248,7 @@ func TestPanicBecomesErrorSnapshot(t *testing.T) {
 	})
 }
 
-// TestLabelsSurviveRestart: a restarted daemon numbers the units as the
+// TestLabelsSurviveRestart: a restarted collector numbers the units as the
 // last one did, and a newcomer takes the lowest number free.
 func TestLabelsSurviveRestart(t *testing.T) {
 	_, srvs := fleettest.NewInstances(t, "x", "y", "z")
@@ -259,12 +259,12 @@ func TestLabelsSurviveRestart(t *testing.T) {
 	h.writeConfig(map[string]*config.Server{"s": {Interval: 1, Endpoints: urls[1:]}})
 	first := h.start(1)
 	want := map[string]string{urls[1]: "instance-1", urls[2]: "instance-2"}
-	fleettest.WaitUntil(t, 3*time.Second, "the first daemon's labels", func() bool {
+	fleettest.WaitUntil(t, 3*time.Second, "the first collector's labels", func() bool {
 		s := h.latest("s")
 		return s != nil && equalMaps(labels(s), want)
 	})
 	if code, err := first.stop(t); code != 0 || err != nil {
-		t.Fatalf("first daemon: Run = %d, %v; want 0, nil", code, err)
+		t.Fatalf("first collector: Run = %d, %v; want 0, nil", code, err)
 	}
 
 	// urls[0] sorts first: numbered afresh, it would be instance-1.
@@ -290,7 +290,7 @@ func equalMaps(a, b map[string]string) bool {
 	return true
 }
 
-// TestRatesContinueAfterRestart: the first snapshot a restarted daemon
+// TestRatesContinueAfterRestart: the first snapshot a restarted collector
 // takes is rated against the last one stored.
 func TestRatesContinueAfterRestart(t *testing.T) {
 	_, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"w": {Status: "Running", Completed: 10}})
@@ -303,7 +303,7 @@ func TestRatesContinueAfterRestart(t *testing.T) {
 	first := h.start(1)
 	fleettest.WaitUntil(t, 5*time.Second, "a rated snapshot", func() bool { return rated(h.latest("a")) })
 	if code, err := first.stop(t); code != 0 || err != nil {
-		t.Fatalf("first daemon: Run = %d, %v; want 0, nil", code, err)
+		t.Fatalf("first collector: Run = %d, %v; want 0, nil", code, err)
 	}
 
 	n := len(h.snaps("a"))
@@ -629,13 +629,13 @@ func TestStoreErrorRecorded(t *testing.T) {
 }
 
 // TestControlCorruptionKeepsServerFiles: control.db damaged under a
-// running writer (the reviewer's probe: its daemon table's root page
+// running writer (the reviewer's probe: its collector table's root page
 // overwritten) makes the write fail, but sets no server file aside.
 func TestControlCorruptionKeepsServerFiles(t *testing.T) {
 	f := newLabelsFixture(t)
 	f.sink(0)
 	f.drain(1)
-	corruptTable(t, filepath.Join(f.dir, "control.db"), "daemon")
+	corruptTable(t, filepath.Join(f.dir, "control.db"), "daemon") // the lease table
 	f.sink(0)
 	f.drain(1)
 	path := store.PathFor(f.dir, "a")
@@ -733,7 +733,7 @@ func (b *breaker) add(t *testing.T, u string) {
 // TestFanOutPanicIsolated (R14): a panic in a goroutine a tick fans out
 // to (a direct endpoint's poll; a balancer pass's attempt) stores an error
 // snapshot for that server, logged once with the stack it was raised on,
-// while the daemon runs on and other servers are collected.
+// while the collector runs on and other servers are collected.
 func TestFanOutPanicIsolated(t *testing.T) {
 	b := newBreaker(t)
 	_, direct := fleettest.NewVarmq(t, "d", nil)
@@ -757,7 +757,7 @@ func TestFanOutPanicIsolated(t *testing.T) {
 	})
 
 	b.on.Store(true)
-	const internal = "internal error (see daemon log)"
+	const internal = "internal error (see vartop web's log)"
 	for _, name := range []string{"d", "lb"} {
 		fleettest.WaitUntil(t, 3*time.Second, name+"'s error snapshot", func() bool {
 			s := h.latest(name)

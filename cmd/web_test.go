@@ -50,7 +50,7 @@ func fakeOrdersVarmq(t *testing.T) *httptest.Server {
 }
 
 // collectingSource is the web UI's source over a temporary data dir, with
-// cfg its config and a daemon collecting it in-process until the test
+// cfg its config and a collector collecting it in-process until the test
 // ends, before the fakes it polls shut down. Start starts nothing.
 func collectingSource(t *testing.T, cfg *config.Config) web.Source {
 	t.Helper()
@@ -78,7 +78,7 @@ func collectingSource(t *testing.T, cfg *config.Config) web.Source {
 	}
 }
 
-// startServeWeb runs serveWeb over a daemon collecting cfg (see
+// startServeWeb runs serveWeb over a collector collecting cfg (see
 // collectingSource) on a free loopback port in the background. The
 // returned channel yields its result; opened yields each URL passed to
 // open. Cancel the context to stop it.
@@ -222,7 +222,7 @@ func TestServeWebServesAndShutsDown(t *testing.T) {
 	if !strings.HasSuffix(url, "/?server=prod") {
 		t.Errorf("opened %q, want prod's dashboard", url)
 	}
-	getUntil(t, url, "orders") // the daemon's first snapshot is async
+	getUntil(t, url, "orders") // the collector's first snapshot is async
 	cancel()
 
 	if err := waitResult(t, result); err != nil {
@@ -365,7 +365,7 @@ func TestWebLogsStoreNotices(t *testing.T) {
 	}
 }
 
-// TestWebSourceChecksEnv (R31): vartop web checks the daemon's lease
+// TestWebSourceChecksEnv (R31): vartop web checks the collector's lease
 // against its own environment — its config file and KUBECONFIG.
 func TestWebSourceChecksEnv(t *testing.T) {
 	isolate(t)
@@ -375,7 +375,7 @@ func TestWebSourceChecksEnv(t *testing.T) {
 	}
 	defer release()
 	if src.SameEnv == nil {
-		t.Fatal("webSource has no SameEnv: the web would act on another environment's daemon's units")
+		t.Fatal("webSource has no SameEnv: the web would act on another environment's collector's units")
 	}
 	own := ownLease()
 	if !src.SameEnv(own) {
@@ -384,7 +384,7 @@ func TestWebSourceChecksEnv(t *testing.T) {
 	other := own
 	other.ConfigPath = "/elsewhere/vartop/config.json"
 	if src.SameEnv(other) {
-		t.Error("SameEnv takes a daemon reading another config file for this environment's")
+		t.Error("SameEnv takes a collector reading another config file for this environment's")
 	}
 }
 

@@ -1,5 +1,5 @@
 // Package store is vartop's shared history on disk: SQLite files that the
-// daemon writes and the UIs read. control.db holds the daemon's lease, the
+// collector writes and the UIs read. control.db holds the collector's lease, the
 // UIs' poke counters and each server's collection error; every configured
 // server has a file of its own under servers/ with its snapshots (24h) and
 // label state. Times are wall-clock unix milliseconds. Nothing here talks
@@ -33,10 +33,10 @@ const (
 	ServerCapBytes = 256 << 20
 	// LeaseTTL is how long a lease stays fresh after its last beat.
 	LeaseTTL = 15 * time.Second
-	// BeatEvery is how often the daemon renews its lease.
+	// BeatEvery is how often the collector renews its lease.
 	BeatEvery = 2 * time.Second
 	// StoreVersion is the shape of the snapshot records. A file of another
-	// version has its snapshots dropped when the daemon opens it.
+	// version has its snapshots dropped when the collector opens it.
 	StoreVersion = 1
 )
 

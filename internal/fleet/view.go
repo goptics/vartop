@@ -44,7 +44,7 @@ const (
 
 // Point is one chart sample. At is when the snapshot it was built from was
 // taken (Snapshot.At): every series builder sets it on every point, gaps
-// included, and the UIs place points by it — a series' window ends at its
+// included, and the charts place points by it — a series' window ends at its
 // newest point's At.
 type Point struct {
 	At      time.Time
@@ -163,9 +163,9 @@ func Health(latest *Snapshot) HealthView {
 // every interval, is stale at now: older than 3 intervals and 2s of slack.
 // A server whose polls run to their 0.8·interval deadline has snapshots
 // interval + 0.8·interval apart, each stored 0.8·interval after its At: up
-// to 2.6 intervals old while the daemon collects as it should. With no
-// snapshot (nil) there is nothing old to show: it is not stale. Both UIs
-// call a server stale by this one rule.
+// to 2.6 intervals old while the collector collects as it should. With no
+// snapshot (nil) there is nothing old to show: it is not stale. Pages and
+// actions call a server stale by this one rule.
 func Stale(latest *Snapshot, interval time.Duration, now time.Time) bool {
 	return latest != nil && now.Sub(latest.At) > 3*interval+2*time.Second
 }
@@ -479,85 +479,6 @@ func newest(snaps []*Snapshot, span time.Duration) []*Snapshot {
 // healthy pod lacking the worker is not expected. With no contributing pod the
 // point is a gap.
 func WorkerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n Noun) []Point {
-	return workerRates(snaps, pod, name, pick, &n)
-}
-
-// CompletedRates is the completed/s of one worker over the trend window up to
-// the newest of snaps, the points of the Spark of its row in BuildDashboard
-// (merged, or of the pod labelled pod), without their tooltips: the Title of
-// a point costs a format call, and a UI that draws no tooltips wants a series
-// for every row it shows.
-func CompletedRates(snaps []*Snapshot, pod, name string) []Point {
-	return workerRates(newest(snaps, TrendWindow), pod, name, completedRate, nil)
-}
-
-// CompletedRatesOf is CompletedRates of each worker want names on each unit,
-// by label: label → worker → points, each series the one CompletedRates gives
-// of that label and worker. It builds them in one pass over the snapshots,
-// each unit's samples looked up once per snapshot, where a CompletedRates per
-// series would scan every unit of every snapshot for its label: a UI that
-// draws a series for every row of a large fleet wants them all (T8).
-//
-// As PodsOf, a label met twice in a snapshot is its first unit's. A label or
-// worker the snapshots lack charts gaps.
-func CompletedRatesOf(snaps []*Snapshot, want map[string][]string) map[string]map[string][]Point {
-	window := newest(snaps, TrendWindow)
-	type series struct {
-		name string
-		pts  []Point
-	}
-	of := make(map[string][]series, len(want)) // by label, each worker once
-	out := make(map[string]map[string][]Point, len(want))
-	for label, workers := range want {
-		out[label] = make(map[string][]Point, len(workers))
-		for _, name := range workers {
-			if _, dup := out[label][name]; dup {
-				continue
-			}
-			pts := make([]Point, len(window))
-			for i, s := range window {
-				pts[i] = Point{At: s.At, Gap: true}
-			}
-			out[label][name] = pts
-			of[label] = append(of[label], series{name, pts})
-		}
-	}
-	seen := make(map[string]bool)
-	for i, s := range window {
-		clear(seen)
-		for _, p := range s.Pods {
-			if seen[p.Label] {
-				continue // PodsOf takes the first
-			}
-			seen[p.Label] = true
-			if p.Err != "" {
-				continue
-			}
-			for _, w := range of[p.Label] {
-				if sm := p.Workers[w.name]; sm != nil && sm.RateOK {
-					w.pts[i] = Point{At: s.At, V: completedRate(sm)}
-				}
-			}
-		}
-	}
-	return out
-}
-
-// CompletedRates1h and FailedRates1h are the completed/s and failed/s of one
-// worker over the hour up to the newest of snaps, merged or of the pod
-// labelled pod: the points of Completed1h and Failed1h of BuildDetail,
-// without their tooltips — for a UI that draws none (see CompletedRates).
-func CompletedRates1h(snaps []*Snapshot, pod, name string) []Point {
-	return workerRates(newest(snaps, HistoryWindow), pod, name, completedRate, nil)
-}
-
-// FailedRates1h is CompletedRates1h for the failed/s.
-func FailedRates1h(snaps []*Snapshot, pod, name string) []Point {
-	return workerRates(newest(snaps, HistoryWindow), pod, name, failedRate, nil)
-}
-
-// workerRates is WorkerRates; with n nil the points have no Title.
-func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64, n *Noun) []Point {
 	out := make([]Point, len(snaps))
 	for i, s := range snaps {
 		var sum float64
@@ -581,15 +502,10 @@ func workerRates(snaps []*Snapshot, pod, name string, pick func(*Sample) float64
 			contributing++
 			sum += pick(sm)
 		}
-		switch {
-		case n == nil && contributing == 0:
-			out[i] = Point{At: s.At, Gap: true}
-		case n == nil:
-			out[i] = Point{At: s.At, V: sum, Partial: contributing < expected}
-		case contributing == 0:
+		if contributing == 0 {
 			out[i] = noDataPoint(s)
-		default:
-			out[i] = ratePoint(s, sum, contributing, expected, 1, "/s", *n)
+		} else {
+			out[i] = ratePoint(s, sum, contributing, expected, 1, "/s", n)
 		}
 	}
 	return out

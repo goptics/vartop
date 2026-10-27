@@ -702,7 +702,7 @@ func corruptRoot(t *testing.T, path, table string) {
 }
 
 // TestControlCorruptionNotServerFile: a damaged control.db makes Append
-// fail, but not as a corrupt server file: the daemon would set a healthy
+// fail, but not as a corrupt server file: the collector would set a healthy
 // one aside.
 func TestControlCorruptionNotServerFile(t *testing.T) {
 	dir := t.TempDir()
@@ -714,7 +714,7 @@ func TestControlCorruptionNotServerFile(t *testing.T) {
 	appendAll(t, db, token, tick(base, 1))
 	_ = db.Close()
 	_ = ctl.Close()
-	corruptRoot(t, controlPath(dir), "daemon")
+	corruptRoot(t, controlPath(dir), "daemon") // the lease table
 
 	db = newWriter(t, dir, "prod")
 	_, err = db.Append(token, tick(base.Add(time.Second), 2))

@@ -481,7 +481,7 @@ func TestTwoTabsTwoServers(t *testing.T) {
 		"east": {Interval: 1, Endpoints: []string{aSrv.URL}},
 		"west": {Interval: 1, Endpoints: []string{bSrv.URL}},
 	}})
-	f.startDaemon()
+	f.startCollector()
 	f.waitFirst("east")
 	f.waitFirst("west")
 
@@ -525,7 +525,7 @@ func TestServerIdentityIsConfigKey(t *testing.T) {
 		"dev":     {Interval: 1, Endpoints: []string{"http://dev.invalid"}},
 	}})
 	f.cfg.Servers["prod-eu"].Name = "Production EU"
-	f.startDaemon()
+	f.startCollector()
 	f.waitFirst("prod-eu")
 
 	for _, path := range []string{"/?server=prod-eu", "/"} {
@@ -732,7 +732,7 @@ func TestRemovedServerPage(t *testing.T) {
 		"multi": {Interval: 1, Endpoints: []string{aSrv.URL, bSrv.URL}},
 		"other": {Interval: 1, Endpoints: []string{"http://other.invalid"}},
 	}}, "multi")
-	f.stopDaemon() // so that every call the fakes get from now is the UI's
+	f.stopCollector() // so that every call the fakes get from now is the UI's
 	calls := len(fa.Calls()) + len(fb.Calls())
 	f.setConfig(&config.Config{DefaultServer: "multi", Servers: map[string]*config.Server{
 		"other": {Interval: 1, Endpoints: []string{"http://other.invalid"}},
@@ -882,19 +882,19 @@ func bannerOf(body string) string {
 	return banner
 }
 
-// TestOtherConfigDaemon (R31): another vartop collecting in another
+// TestOtherConfigCollector (R31): another vartop collecting in another
 // environment than this vartop web's — another config file or KUBECONFIG —
 // stores snapshots of units this web must not send its token to. Every
 // page says so, with no current value; every action is refused with that
 // notice, nothing sent and nothing poked.
-func TestOtherConfigDaemon(t *testing.T) {
+func TestOtherConfigCollector(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	f := newFixture(t, &config.Config{DefaultServer: "multi", Servers: map[string]*config.Server{
 		"multi": {Interval: 1, Endpoints: urlsOf(aSrv, bSrv), Token: testToken},
 	}})
 	f.leaseConfig = "/b/vartop/config.json"
 	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
-	f.startDaemon()
+	f.startCollector()
 	f.waitFirst("multi")
 	pokes := f.pokes("multi")
 
@@ -912,7 +912,7 @@ func TestOtherConfigDaemon(t *testing.T) {
 	status, _, _ = strings.Cut(status, "</div>")
 	if !strings.Contains(status, `<span class="health" title="healthy / total instances">— instances</span>`) ||
 		!strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">3</td>`) {
-		t.Errorf("the page shows current values of the other environment's daemon:\n%s", body)
+		t.Errorf("the page shows current values of the other environment's collector:\n%s", body)
 	}
 
 	for _, a := range []struct {
@@ -934,21 +934,21 @@ func TestOtherConfigDaemon(t *testing.T) {
 	}
 	noPatches(t, fa, fb)
 	if got := f.pokes("multi"); got != pokes {
-		t.Errorf("pokes %d, want %d: the other environment's daemon was poked", got, pokes)
+		t.Errorf("pokes %d, want %d: the other environment's collector was poked", got, pokes)
 	}
 
-	// This environment's daemon: the page is as ever.
+	// This environment's collector: the page is as ever.
 	f.setEnvCheck(nil)
 	_, body = fetch(t, f.srv, "/?server=multi", false)
 	if strings.Contains(body, "another configuration") || !strings.Contains(body, "2/2 instances") {
-		t.Errorf("a daemon of this environment: the page still refuses it:\n%s", body)
+		t.Errorf("a collector of this environment: the page still refuses it:\n%s", body)
 	}
 }
 
 // TestOtherConfigWaiting (R31): before the first snapshot, another vartop
 // collecting in another environment is said so too — it may never collect
 // this server. Its lease let go is still that
-// environment's (R44): what the store holds came from its daemon.
+// environment's (R44): what the store holds came from its collector.
 func TestOtherConfigWaiting(t *testing.T) {
 	_, aSrv := fleettest.NewVarmq(t, "a", nil)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
@@ -969,7 +969,7 @@ func TestOtherConfigWaiting(t *testing.T) {
 		t.Errorf("POST = %d %q, want 409 with %q", resp.StatusCode, body, otherConfig)
 	}
 
-	f.release() // the daemon stopped
+	f.release() // the collector stopped
 	checks := f.envChecks()
 	_, body = fetch(t, f.srv, "/?server=multi", false)
 	if banner := bannerOf(body); strings.Count(banner, otherConfig) != 1 {
@@ -992,12 +992,12 @@ func handOffUnits(at time.Time, fa, fb *httptest.Server) *fleet.Snapshot {
 		labelled(okPod(fb.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 2, 2, 0)}), "instance-2"))
 }
 
-// TestOtherConfigHandOff (R44): while the daemons change hands — the other
+// TestOtherConfigHandOff (R44): while the collectors change hands — the other
 // environment's stopped, and this one's not claimed yet, or claimed but
 // not written yet —
 // the newest snapshot is still the other one's, and fresh. It is not
 // current: no value shown, every action refused, nothing sent. Once this
-// environment's daemon writes, all is as ever.
+// environment's collector writes, all is as ever.
 func TestOtherConfigHandOff(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
@@ -1025,7 +1025,7 @@ func TestOtherConfigHandOff(t *testing.T) {
 		t.Errorf("pokes %d, want %d: nothing to poke for the other environment's snapshot", got, pokes)
 	}
 
-	// This environment's daemon claims: the newest snapshot, older than
+	// This environment's collector claims: the newest snapshot, older than
 	// the claim, is still the other's.
 	f.leaseConfig = "/a/vartop/config.json"
 	f.claim()
@@ -1036,28 +1036,28 @@ func TestOtherConfigHandOff(t *testing.T) {
 	}
 	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">No new data for `) {
-		t.Errorf("POST before this daemon's first snapshot = %d %q, want 409 with the stale copy", resp.StatusCode, body)
+		t.Errorf("POST before this collector's first snapshot = %d %q, want 409 with the stale copy", resp.StatusCode, body)
 	}
 	noPatches(t, fa, fb)
 	if got := f.pokes("multi"); got != pokes+1 {
-		t.Errorf("pokes %d, want %d: this environment's daemon is poked once, and waited for", got, pokes+1)
+		t.Errorf("pokes %d, want %d: this environment's collector is poked once, and waited for", got, pokes+1)
 	}
 
 	// Its first snapshot: current, and acted on.
 	f.write("multi", handOffUnits(time.Now(), aSrv, bSrv))
 	_, body = fetch(t, f.srv, "/?server=multi", false)
 	if strings.Contains(bannerOf(body), "No new data") || !strings.Contains(body, current) {
-		t.Errorf("this daemon's first snapshot: want it current:\n%s", body)
+		t.Errorf("this collector's first snapshot: want it current:\n%s", body)
 	}
 	resp, body = post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("POST after this daemon's first snapshot = %d, want 200:\n%s", resp.StatusCode, body)
+		t.Errorf("POST after this collector's first snapshot = %d, want 200:\n%s", resp.StatusCode, body)
 	}
 	wantPatches(t, fa, "PATCH /workers/orders/actions/pause")
 	wantPatches(t, fb, "PATCH /workers/orders/actions/pause")
 }
 
-// TestActionRefusedWhenLeaseUnreadable (R44): with the daemon's lease
+// TestActionRefusedWhenLeaseUnreadable (R44): with the collector's lease
 // unreadable, whose units the newest snapshot names is not known: an
 // action is refused, nothing sent. The pages keep showing the snapshot,
 // by the stale rule.
@@ -1092,7 +1092,7 @@ func TestOldHistoryShowsStale(t *testing.T) {
 	}})
 	f.claim()
 	f.write("multi", snap(time.Now().Add(-2*time.Hour), okPod(aSrv.URL, map[string]*fleet.Sample{"orders": smp("Running", 4, 1, 3, 2)})))
-	f.release() // the daemon stopped
+	f.release() // the collector stopped
 
 	down := regexp.MustCompile(`<p class="banner stale">No new data for 2h0m\ds — vartop web is not collecting\.</p>`)
 	for _, path := range []string{"/?server=multi", "/grid?server=multi", "/workers/orders?server=multi"} {
@@ -1157,12 +1157,12 @@ func TestNoStartRoute(t *testing.T) {
 	}
 }
 
-// TestGETNeverCallsVarmq: pages read the store only; with the daemon
+// TestGETNeverCallsVarmq: pages read the store only; with the collector
 // stopped, no page load reaches varmq.
 func TestGETNeverCallsVarmq(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
 	_, f := newTestServer(t, aSrv, bSrv)
-	f.stopDaemon()
+	f.stopCollector()
 	calls := func() int { return len(fa.Calls()) + len(fb.Calls()) }
 
 	before := calls()

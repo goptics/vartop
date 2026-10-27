@@ -13,7 +13,7 @@ import (
 
 // Feed is a UI's view of one server's file: the last hour of snapshots
 // (with none that recent, the newest alone), loaded once and then followed
-// as the daemon appends. It rates nothing:
+// as the collector appends. It rates nothing:
 // the rates come stored. Sync may be called from several goroutines; the
 // snapshots it holds are read-only.
 type Feed struct {
@@ -50,7 +50,7 @@ func (f *Feed) Snapshots() []*fleet.Snapshot { return f.ring.Load().Snapshots() 
 // Latest returns the newest snapshot held, or nil.
 func (f *Feed) Latest() *fleet.Snapshot { return f.ring.Load().Latest() }
 
-// Sync takes in what the daemon stored since the last Sync. The first one
+// Sync takes in what the collector stored since the last Sync. The first one
 // opens the file (none yet, or an empty one, is no error: nothing to show)
 // and loads the last hour. After an error the file is closed, and the next Sync starts over.
 // A file reset under the feed — its snapshots dropped for a new version or
@@ -129,7 +129,7 @@ func (f *Feed) sync() error {
 	}
 	if same && len(snaps) == 0 && last >= f.cursor {
 		// Nothing within the window, and nothing dropped: the server was
-		// not collected for longer than the window (the daemon down). What
+		// not collected for longer than the window (the collector down). What
 		// the feed holds stays, for the UIs to show stale.
 		f.cursor = last
 		return nil
@@ -158,7 +158,7 @@ func (f *Feed) sync() error {
 	return nil
 }
 
-// none empties the feed of a server with no file, or one the daemon has
+// none empties the feed of a server with no file, or one the collector has
 // only just created: nothing to show yet.
 func (f *Feed) none() {
 	f.close()

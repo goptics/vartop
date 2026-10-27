@@ -34,8 +34,8 @@ type Lease struct {
 	Started, Beat          time.Time
 }
 
-// Control is control.db: the daemon's lease, and per server the UIs' poke
-// counter and the daemon's collection error. The daemon and every UI open
+// Control is control.db: the collector's lease, and per server the UIs' poke
+// counter and the collector's collection error. The collector and every UI open
 // it; each writes its own fields.
 type Control struct {
 	db   *sql.DB
@@ -90,8 +90,8 @@ func (c *Control) Close() error { return c.db.Close() }
 
 // fresh reports whether a lease with token, last renewed at beat (unix
 // ms), still holds at now: renewed less than LeaseTTL before now, and not
-// more than 2·BeatEvery after it. A beat further ahead is no daemon's
-// renewing, as clocks a little apart would make it, but a dead daemon's
+// more than 2·BeatEvery after it. A beat further ahead is no collector's
+// renewing, as clocks a little apart would make it, but a dead collector's
 // last one, read after the clock stepped back: it must not hold the lease
 // for as long as the step.
 func fresh(token string, beat int64, now time.Time) bool {
@@ -99,18 +99,18 @@ func fresh(token string, beat int64, now time.Time) bool {
 	return token != "" && age < LeaseTTL && age >= -2*BeatEvery
 }
 
-// Claim makes the caller the collecting daemon, as l (but for its Token,
-// Started, Beat and Stop), unless another daemon's lease is fresh at now:
+// Claim makes the caller the collector, as l (but for its Token, Started
+// and Beat), unless another collector's lease is fresh at now:
 // then ok is false. The token it returns is what Beat, Release and every
 // ServerDB.Append need.
 func (c *Control) Claim(l Lease, now time.Time) (token string, ok bool, err error) {
 	return c.claim(l, now, "")
 }
 
-// TakeOver claims the lease as Claim does, but from the daemon holding it
+// TakeOver claims the lease as Claim does, but from the collector holding it
 // with token dead too, however fresh its lease looks: one whose beat did
 // not advance for DeadAfter (see BeatAdvances), so dead. ok is false when
-// the lease is fresh and another's than dead: another daemon took it over
+// the lease is fresh and another's than dead: another collector took it over
 // first, or claimed it once dead's went stale.
 func (c *Control) TakeOver(dead string, l Lease, now time.Time) (token string, ok bool, err error) {
 	return c.claim(l, now, dead)
@@ -201,8 +201,8 @@ func (c *Control) beatOf(token string) (beat int64, held bool, err error) {
 
 // Replaced reports whether the file c opened is no longer the one at its
 // path: removed (the data dir deleted, say), or another put in its place.
-// A daemon whose control.db is replaced would hold a lease no UI sees,
-// while another daemon claims the new file's.
+// A collector whose control.db is replaced would hold a lease no UI sees,
+// while another collector claims the new file's.
 func (c *Control) Replaced() (bool, error) { return replaced(c.path, c.file) }
 
 // pinID makes fi, a stat of a file just opened, identify that file. On
@@ -224,15 +224,15 @@ func replaced(path string, file os.FileInfo) (bool, error) {
 	return !os.SameFile(fi, file), nil
 }
 
-// Release gives up the lease of token, so that the next daemon need not
+// Release gives up the lease of token, so that the next collector need not
 // wait for it to go stale. Releasing a lease already lost does nothing.
 func (c *Control) Release(token string) error {
 	_, err := c.db.Exec(`UPDATE daemon SET token = '' WHERE id = 1 AND token = ? AND token <> ''`, token)
 	return err
 }
 
-// Lease returns the last daemon's lease, and whether it is fresh: held and
-// renewed less than LeaseTTL ago. With no daemon ever, it is the zero
+// Lease returns the last collector's lease, and whether it is fresh: held and
+// renewed less than LeaseTTL ago. With no collector ever, it is the zero
 // Lease, not fresh.
 func (c *Control) Lease() (Lease, bool, error) {
 	var l Lease
@@ -249,13 +249,13 @@ func (c *Control) Lease() (Lease, bool, error) {
 	return l, fresh(l.Token, beat, time.Now()), nil
 }
 
-// DaemonState is what a UI reads of the daemon in control.db (see
-// ReadDaemon), and what that makes of the snapshots the store holds: which
-// newest snapshot is current, and may be acted on (R44). Both UIs judge by
-// it alone.
-type DaemonState struct {
-	Lease Lease // the last daemon's, fresh or not; the zero Lease when none ever claimed
-	Fresh bool  // a daemon holds the lease: it collects
+// Collector is what vartop web reads of the collector in control.db (see
+// ReadCollector), and what that makes of the snapshots the store holds: which
+// newest snapshot is current, and may be acted on (R44). vartop web judges
+// by it alone.
+type Collector struct {
+	Lease Lease // the last collector's, fresh or not; the zero Lease when none ever claimed
+	Fresh bool  // a collector holds the lease: it collects
 	// Other: the lease — fresh, released or stale — is of another
 	// environment than the reader's (R31). Release and a crash keep its
 	// config path and KUBECONFIG: the snapshots stored under it are of
@@ -265,30 +265,30 @@ type DaemonState struct {
 	Err   error // the lease could not be read: nothing above is known
 }
 
-// ReadDaemon reads c's lease, and checks its environment with sameEnv; nil
-// takes every daemon's for the reader's. A lease no daemon ever claimed is
+// ReadCollector reads c's lease, and checks its environment with sameEnv; nil
+// takes every collector's for the reader's. A lease no collector ever claimed is
 // of no environment.
-func ReadDaemon(c *Control, sameEnv func(Lease) bool) DaemonState {
+func ReadCollector(c *Control, sameEnv func(Lease) bool) Collector {
 	l, fresh, err := c.Lease()
 	if err != nil {
-		return DaemonState{Err: err}
+		return Collector{Err: err}
 	}
-	return DaemonState{Lease: l, Fresh: fresh, Other: !l.Started.IsZero() && sameEnv != nil && !sameEnv(l)}
+	return Collector{Lease: l, Fresh: fresh, Other: !l.Started.IsZero() && sameEnv != nil && !sameEnv(l)}
 }
 
-// Running reports whether a daemon runs to answer a poke, as far as d
+// Running reports whether a collector runs to answer a poke, as far as d
 // knows: a lease that cannot be read counts as held, since nothing says
-// the daemon is down.
-func (d DaemonState) Running() bool { return d.Fresh || d.Err != nil }
+// the collector is down.
+func (d Collector) Running() bool { return d.Fresh || d.Err != nil }
 
 // Current reports whether latest, the newest snapshot of a server polled
 // every interval, is current at now (R44): not stale (fleet.Stale), the
 // lease of the reader's environment, and latest taken under it — not
-// before its daemon claimed it. An older one is a previous daemon's; once
-// a daemon claims, the previous one's appends fail (the token check), so
+// before its collector claimed it. An older one is a previous collector's; once
+// a collector claims, the previous one's appends fail (the token check), so
 // every newer one is its own. A lease that cannot be read leaves the stale
 // rule alone. No snapshot (nil) is not current.
-func (d DaemonState) Current(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
+func (d Collector) Current(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
 	switch {
 	case latest == nil || fleet.Stale(latest, interval, now):
 		return false
@@ -299,14 +299,14 @@ func (d DaemonState) Current(latest *fleet.Snapshot, interval time.Duration, now
 }
 
 // Acts reports whether an action may be sent on latest at now (R44): a
-// daemon of the reader's environment holds a fresh lease, and latest is
+// collector of the reader's environment holds a fresh lease, and latest is
 // current under it. A lease that cannot be read refuses it: whose units
 // latest names is not known.
-func (d DaemonState) Acts(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
+func (d Collector) Acts(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
 	return d.Err == nil && d.Fresh && d.Current(latest, interval, now)
 }
 
-// Poke asks the daemon to poll server now, and returns when it asked: a
+// Poke asks the collector to poll server now, and returns when it asked: a
 // snapshot taken after the poke is newer.
 func (c *Control) Poke(server string) (time.Time, error) {
 	at := time.Now().Round(0)
@@ -315,7 +315,7 @@ func (c *Control) Poke(server string) (time.Time, error) {
 	return at, err
 }
 
-// Pokes returns every server's poke counter; the daemon polls a server
+// Pokes returns every server's poke counter; the collector polls a server
 // whose counter moved.
 func (c *Control) Pokes() (map[string]int64, error) {
 	rows, err := c.db.Query(`SELECT name, poke FROM servers`)

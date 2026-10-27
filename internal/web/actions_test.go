@@ -397,7 +397,7 @@ func TestPOSTBindsConfigKey(t *testing.T) {
 		"prod-eu": {Interval: 1, Endpoints: []string{fSrv.URL}},
 	}})
 	fx.cfg.Servers["prod-eu"].Name = "Production EU"
-	fx.startDaemon()
+	fx.startCollector()
 	fx.waitFirst("prod-eu")
 	srv := fx.srv
 
@@ -1152,7 +1152,7 @@ func TestActionResponsesUseNoun(t *testing.T) {
 }
 
 // TestActionRefusedWhenStale: with a stale newest snapshot nothing is sent:
-// what the pages show may no longer be the server. With no daemon running
+// what the pages show may no longer be the server. With no collector running
 // the refusal is at once; with one, the server is poked and given
 // fleet.SettleWait to answer first.
 func TestActionRefusedWhenStale(t *testing.T) {
@@ -1184,17 +1184,17 @@ func TestActionRefusedWhenStale(t *testing.T) {
 			t.Errorf("POST %s %v = %d %q, want 409 with %q", c.path, c.form, resp.StatusCode, body, down)
 		}
 		if took := time.Since(start); took > time.Second {
-			t.Errorf("POST %s took %v: no daemon answers a poke, so nothing is waited for", c.path, took)
+			t.Errorf("POST %s took %v: no collector answers a poke, so nothing is waited for", c.path, took)
 		}
 	}
 
-	// A daemon holds the lease but does not answer: poked, then refused.
+	// A collector holds the lease but does not answer: poked, then refused.
 	f.claim()
 	before := f.pokes("multi")
 	start := time.Now()
 	resp, body := post(t, f.srv, "/workers/orders/actions/pause", multi(), true)
 	if resp.StatusCode != http.StatusConflict || !strings.HasPrefix(body, `<p class="banner">No new data for 1m`) {
-		t.Errorf("POST with a daemon that does not answer = %d %q, want 409 with the stale copy", resp.StatusCode, body)
+		t.Errorf("POST with a collector that does not answer = %d %q, want 409 with the stale copy", resp.StatusCode, body)
 	}
 	if took := time.Since(start); took < fleet.SettleWait/2 || f.pokes("multi") != before+1 {
 		t.Errorf("POST took %v with %d pokes, want the server poked once and waited for", took, f.pokes("multi")-before)
@@ -1356,21 +1356,21 @@ func TestOldFormPOSTSendsNothing(t *testing.T) {
 
 // TestActionResponseShowsStale: an action's refreshed #live, like a page,
 // shows no current value once the newest snapshot is stale — here because
-// no daemon answers the poke after the action, and the snapshot ages past
+// no collector answers the poke after the action, and the snapshot ages past
 // the threshold while the response waits for one.
 func TestActionResponseShowsStale(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{
 		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}}, // stale after 3·2s + 2s = 8s
 	}})
-	// A daemon runs, as far as the lease says, but answers no poke. It
+	// A collector runs, as far as the lease says, but answers no poke. It
 	// claimed before the snapshot was taken, which is its own (R44); its
 	// lease, 7s old, holds for 8s more.
 	now := time.Now()
 	f.claimAt(now.Add(-7 * time.Second))
 	// 6.2s old: fresh to bind the action with 1.8s to spare (for the write
 	// and the POST); stale once the response has waited out the whole
-	// SettleWait (2s) for a snapshot no daemon takes, 8.2s or more old.
+	// SettleWait (2s) for a snapshot no collector takes, 8.2s or more old.
 	// The two margins can only sum to SettleWait; the response's is sure,
 	// time moving only forward.
 	f.write("multi", snap(now.Add(-6200*time.Millisecond),

@@ -66,8 +66,8 @@ const budget3 = 18
 // testToken is the token of every newTestServer server; no response may carry it.
 const testToken = "s3cr3t-tok"
 
-// fixture serves the web UI over a store in a temporary data dir. A daemon
-// running in-process fills it (startDaemon), or the test writes the
+// fixture serves the web UI over a store in a temporary data dir. A collector
+// running in-process fills it (startCollector), or the test writes the
 // snapshots itself under a lease it holds (claim, write).
 type fixture struct {
 	t   *testing.T
@@ -76,17 +76,17 @@ type fixture struct {
 	h   *handler
 	srv *httptest.Server
 
-	// build makes the daemon's pools; api.PoolFor when nil. Set it before
-	// startDaemon.
+	// build makes the collector's pools; api.PoolFor when nil. Set it before
+	// startCollector.
 	build func(*config.Server) (*api.Pool, error)
 
-	// leaseConfig is the config path in the lease of the daemon
-	// startDaemon runs, or that claim takes. Set it before either.
+	// leaseConfig is the config path in the lease of the collector
+	// startCollector runs, or that claim takes. Set it before either.
 	leaseConfig string
 
 	mu       sync.Mutex
-	cfg      *config.Config // what the daemon and the UI read; replaced whole, never changed
-	run      *daemonRun     // the daemon running, nil if none
+	cfg      *config.Config // what the collector and the UI read; replaced whole, never changed
+	run      *collectorRun  // the collector running, nil if none
 	token    string         // the lease the test holds, "" if none
 	feeds    map[string]*store.Feed
 	envCheck func(store.Lease) bool // Source.SameEnv's answer; every lease is of this environment when nil
@@ -136,12 +136,12 @@ func newFixture(t *testing.T, cfg *config.Config) *fixture {
 	return f
 }
 
-// startLive serves cfg with a daemon collecting it, once the server keyed
+// startLive serves cfg with a collector collecting it, once the server keyed
 // name has its first snapshot.
 func startLive(t *testing.T, cfg *config.Config, name string) *fixture {
 	t.Helper()
 	f := newFixture(t, cfg)
-	f.startDaemon()
+	f.startCollector()
 	f.waitFirst(name)
 	return f
 }
@@ -152,7 +152,7 @@ func (f *fixture) config() (*config.Config, error) {
 	return f.cfg, nil
 }
 
-// setConfig replaces the config the daemon and the UI read.
+// setConfig replaces the config the collector and the UI read.
 func (f *fixture) setConfig(cfg *config.Config) {
 	for name, s := range cfg.Servers {
 		s.Name = name
@@ -184,23 +184,23 @@ func (f *fixture) envChecks() int {
 	return f.envCalls
 }
 
-// lease is the lease of the daemon the fixture runs, or of the test.
+// lease is the lease of the collector the fixture runs, or of the test.
 func (f *fixture) lease() store.Lease {
 	return store.Lease{PID: os.Getpid(), ConfigPath: f.leaseConfig}
 }
 
-// daemonRun is a collect.Run in progress.
-type daemonRun struct {
+// collectorRun is a collect.Run in progress.
+type collectorRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-// startDaemon runs a daemon in-process over the fixture's data dir and
+// startCollector runs a collector in-process over the fixture's data dir and
 // config; it is stopped when the test ends, before the fakes it polls.
-func (f *fixture) startDaemon() {
+func (f *fixture) startCollector() {
 	f.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &daemonRun{cancel: cancel, done: make(chan struct{})}
+	r := &collectorRun{cancel: cancel, done: make(chan struct{})}
 	o := collect.Options{
 		DataDir:   f.dir,
 		Config:    func() (*config.Config, string, error) { cfg, err := f.config(); return cfg, "", err },
@@ -217,11 +217,11 @@ func (f *fixture) startDaemon() {
 	f.mu.Lock()
 	f.run = r
 	f.mu.Unlock()
-	f.t.Cleanup(f.stopDaemon)
+	f.t.Cleanup(f.stopCollector)
 }
 
-// stopDaemon stops the daemon and waits for it to let the lease go.
-func (f *fixture) stopDaemon() {
+// stopCollector stops the collector and waits for it to let the lease go.
+func (f *fixture) stopCollector() {
 	f.mu.Lock()
 	r := f.run
 	f.run = nil
@@ -233,18 +233,18 @@ func (f *fixture) stopDaemon() {
 	select {
 	case <-r.done:
 	case <-time.After(10 * time.Second):
-		f.t.Error("daemon still running 10s after it was stopped")
+		f.t.Error("collector still running 10s after it was stopped")
 	}
 }
 
-// claim takes the lease, as a daemon does, so that the test writes the
+// claim takes the lease, as a collector does, so that the test writes the
 // snapshots (see write).
 func (f *fixture) claim() {
 	f.t.Helper()
 	f.claimAt(time.Now())
 }
 
-// claimAt is claim, as a daemon claiming at at: the snapshots it took
+// claimAt is claim, as a collector claiming at at: the snapshots it took
 // since, and only those, are its own (R44). Its beat is at's too, so the
 // lease holds until LeaseTTL after at.
 func (f *fixture) claimAt(at time.Time) {
@@ -258,7 +258,7 @@ func (f *fixture) claimAt(at time.Time) {
 	f.mu.Unlock()
 }
 
-// release lets the lease the test holds go, as a daemon stopping does.
+// release lets the lease the test holds go, as a collector stopping does.
 func (f *fixture) release() {
 	f.t.Helper()
 	f.mu.Lock()
@@ -271,7 +271,7 @@ func (f *fixture) release() {
 }
 
 // write stores s as the newest snapshot of the server keyed name, under
-// the lease the test holds or else the running daemon's.
+// the lease the test holds or else the running collector's.
 func (f *fixture) write(name string, s *fleet.Snapshot) {
 	f.t.Helper()
 	f.mu.Lock()
@@ -339,7 +339,7 @@ func (f *fixture) pokes(name string) int64 {
 	return pokes[name]
 }
 
-// newTestServer serves the web UI over a daemon collecting "multi", the
+// newTestServer serves the web UI over a collector collecting "multi", the
 // default server, which polls the given fake varmqs every second with
 // testToken. A second configured server, "b", points at an unreachable
 // endpoint. It returns once multi's first snapshot is in.
@@ -402,7 +402,7 @@ func threeVarmqs(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server) {
 // reached; its pods are labelled by the instance that answered.
 var kubernetesServer = config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}
 
-// unitsFixture serves the web UI over a daemon whose only server, "multi",
+// unitsFixture serves the web UI over a collector whose only server, "multi",
 // is a copy of server polling src's endpoints every second. It returns once
 // the first snapshot is in.
 func unitsFixture(t *testing.T, server config.Server, src *mutableSource) *fixture {
@@ -410,7 +410,7 @@ func unitsFixture(t *testing.T, server config.Server, src *mutableSource) *fixtu
 	server.Interval = 1
 	f := newFixture(t, &config.Config{Servers: map[string]*config.Server{"multi": &server}})
 	f.build = func(*config.Server) (*api.Pool, error) { return api.NewPool(src, ""), nil }
-	f.startDaemon()
+	f.startCollector()
 	f.waitFirst("multi")
 	return f
 }
@@ -421,7 +421,7 @@ func serveUnits(t *testing.T, server config.Server, fakes ...*httptest.Server) *
 	return unitsFixture(t, server, &mutableSource{eps: urlsOf(fakes...)}).srv
 }
 
-// serveBalanced serves the web UI over a daemon whose only server, "multi",
+// serveBalanced serves the web UI over a collector whose only server, "multi",
 // polls endpoints every second, once its latest snapshot has exactly the
 // unit keys want, in any order.
 func serveBalanced(t *testing.T, endpoints []string, want ...string) (*httptest.Server, *fixture) {

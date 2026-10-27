@@ -1,5 +1,5 @@
 // Package web serves vartop's browser UI: the HTTP handlers and templates
-// that render what the vartop daemon collected into the store, server by
+// that render what the collector collected into the store, server by
 // server as each request names it, and send worker actions to their units.
 package web
 
@@ -214,7 +214,7 @@ func recoverPanics(logf func(format string, args ...any), next http.Handler) htt
 func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" }
 
 // The copy of what a page or an action cannot show or reach, beyond what
-// fleet words for both UIs (fleet.WaitingMsg and the rest).
+// fleet words (fleet.WaitingMsg and the rest).
 
 // noServersMsg is the notice of a config with no server at all.
 const noServersMsg = "No servers are configured"
@@ -295,7 +295,7 @@ func pageTitle(what, server string) string {
 // oldest first, and whether the page shows them; when it does not, the
 // Page says why: the config cannot be read, the server is not configured,
 // or it has no snapshot yet. A newest snapshot that is not current
-// (store.DaemonState.Current: stale, a previous daemon's, or another
+// (store.Collector.Current: stale, a previous collector's, or another
 // environment's) is shown with no current value, and a notice saying why:
 // how old it is, or the other environment.
 //
@@ -336,7 +336,7 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	snaps = feed.Snapshots()
 	latest := latestOf(snaps)
 	fill(&p, snaps)
-	d := h.daemon()
+	d := h.collector()
 	if d.Other {
 		// Another environment's snapshots: no current value, and no
 		// action (see bind) until this environment's collector collects.
@@ -351,7 +351,7 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 		return p, nil, false
 	case d.Other:
 	case !d.Current(latest, interval, now):
-		// Stale, or a previous daemon's: this one has not written yet.
+		// Stale, or a previous collector's: this one has not written yet.
 		p.Stale = h.staleMsg(p.Server, latest, now)
 	case latest.Err != "":
 		p.Banner = p.Server + ": " + latest.Err
@@ -370,7 +370,7 @@ func (p Page) status(r *http.Request) int {
 }
 
 // config reads the config. One that cannot be read (half written, say)
-// gives way to the last one read, as the daemon's does; with none read
+// gives way to the last one read, as the collector's does; with none read
 // yet, the error is returned.
 func (h *handler) config() (*config.Config, error) {
 	cfg, err := h.src.Config()
@@ -415,18 +415,20 @@ func labelOf(srv *config.Server, value string) string {
 	return value
 }
 
-// daemonRunning reports whether a daemon holds a fresh lease. A lease that
-// cannot be read counts as held: nothing says the daemon is down.
-func (h *handler) daemonRunning() bool { return h.daemon().Running() }
+// collecting reports whether a collector holds a fresh lease. A lease that
+// cannot be read counts as held: nothing says the collector is down.
+func (h *handler) collecting() bool { return h.collector().Running() }
 
-// daemon is what control.db says of the daemon now: its lease, and whether
+// collector is what control.db says of the collector now: its lease, and whether
 // that is of another environment than this vartop's (Source.SameEnv, R31),
 // fresh or not; by which a snapshot is current or acted on (R44). Read it
 // after the feed's Sync: what that took in was taken under this lease, or
 // an earlier one.
-func (h *handler) daemon() store.DaemonState { return store.ReadDaemon(h.src.Control, h.src.SameEnv) }
+func (h *handler) collector() store.Collector {
+	return store.ReadCollector(h.src.Control, h.src.SameEnv)
+}
 
-// serverErr is the collection error the daemon recorded for the server
+// serverErr is the collection error the collector recorded for the server
 // keyed key, else latest's, else "".
 func (h *handler) serverErr(key string, latest *fleet.Snapshot) string {
 	if errs, err := h.src.Control.ServerErrs(); err == nil && errs[key] != "" {
@@ -440,9 +442,9 @@ func (h *handler) serverErr(key string, latest *fleet.Snapshot) string {
 
 // staleMsg says how old latest, the stale newest snapshot of the server
 // keyed key, is at now, and why there is none newer (see fleet.StaleMsg):
-// the daemon is not running (down), or the server's collection error.
+// the collector is not running (down), or the server's collection error.
 func (h *handler) staleMsg(key string, latest *fleet.Snapshot, now time.Time) string {
-	down := !h.daemonRunning()
+	down := !h.collecting()
 	var srvErr string
 	if !down {
 		srvErr = h.serverErr(key, latest)

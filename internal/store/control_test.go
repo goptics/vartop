@@ -24,7 +24,7 @@ func openControl(t *testing.T, dataDir string) *Control {
 
 func TestLeaseClaimBeatRelease(t *testing.T) {
 	dir := t.TempDir()
-	a, b := openControl(t, dir), openControl(t, dir) // two daemons
+	a, b := openControl(t, dir), openControl(t, dir) // two collectors
 	now := time.Now().Round(0)
 
 	if _, fresh, err := a.Lease(); fresh || err != nil {
@@ -49,7 +49,7 @@ func TestLeaseClaimBeatRelease(t *testing.T) {
 	}
 
 	// The holder stops beating; once the lease is LeaseTTL old another
-	// daemon takes over, and the old token is worthless.
+	// collector takes over, and the old token is worthless.
 	late := now.Add(BeatEvery + LeaseTTL + time.Millisecond)
 	next, ok, err := b.Claim(Lease{PID: 42}, late)
 	if err != nil || !ok || next == "" || next == old {
@@ -80,7 +80,7 @@ func TestLeaseClaimBeatRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l, fresh, err := a.Lease(); fresh || err != nil || l.PID != 42 {
-		t.Errorf("Lease after Release = %+v, fresh %v, %v; want the last daemon's, not fresh", l, fresh, err)
+		t.Errorf("Lease after Release = %+v, fresh %v, %v; want the last collector's, not fresh", l, fresh, err)
 	}
 	if err := b.Beat(next, late.Add(2*BeatEvery)); !errors.Is(err, ErrLeaseLost) {
 		t.Errorf("Beat after Release = %v, want ErrLeaseLost", err)
@@ -139,7 +139,7 @@ func TestServerErrs(t *testing.T) {
 
 // TestFreshBounds: a lease is fresh from a beat up to 2·BeatEvery in the
 // future (clocks a little apart) to one under LeaseTTL old; a beat further
-// ahead, as a dead daemon's reads after the clock stepped back, is not.
+// ahead, as a dead collector's reads after the clock stepped back, is not.
 func TestFreshBounds(t *testing.T) {
 	now := time.UnixMilli(time.Now().UnixMilli())
 	for _, c := range []struct {
@@ -289,7 +289,7 @@ func TestBeatAdvances(t *testing.T) {
 }
 
 // TestTakeOver: a lease whose holder is dead (fresh as it looks) goes to
-// the first daemon to take it over; one more watcher of the same dead
+// the first collector to take it over; one more watcher of the same dead
 // holder finds it taken and gets nothing.
 func TestTakeOver(t *testing.T) {
 	dir := t.TempDir()
@@ -364,60 +364,60 @@ func TestControlReplaced(t *testing.T) {
 	}
 }
 
-// TestReadDaemon (R31, R44): what a UI reads of the daemon. The lease's
+// TestReadCollector (R31, R44): what a UI reads of the collector. The lease's
 // environment is checked whether it is fresh, released or stale: whatever
-// the store holds came from that daemon. A lease no daemon ever claimed is
+// the store holds came from that collector. A lease no collector ever claimed is
 // of no environment; one that cannot be read says nothing, but that it
 // cannot.
-func TestReadDaemon(t *testing.T) {
+func TestReadCollector(t *testing.T) {
 	dir := t.TempDir()
 	ctl := openControl(t, dir)
 	checked := 0
 	ownEnv := func(l Lease) bool { checked++; return l.ConfigPath == "/a/config.json" }
 
-	if d := ReadDaemon(ctl, ownEnv); d.Fresh || d.Other || d.Err != nil || checked != 0 || d.Running() {
-		t.Errorf("no daemon ever: %+v, %d checks; want not fresh, not other, unchecked, not running", d, checked)
+	if d := ReadCollector(ctl, ownEnv); d.Fresh || d.Other || d.Err != nil || checked != 0 || d.Running() {
+		t.Errorf("no collector ever: %+v, %d checks; want not fresh, not other, unchecked, not running", d, checked)
 	}
 	now := time.Now()
 	token, ok, err := ctl.Claim(Lease{PID: 1, ConfigPath: "/b/config.json"}, now)
 	if !ok || err != nil {
 		t.Fatalf("Claim = %v, %v", ok, err)
 	}
-	d := ReadDaemon(ctl, ownEnv)
+	d := ReadCollector(ctl, ownEnv)
 	if !d.Fresh || !d.Other || d.Err != nil || !d.Running() || d.Lease.ConfigPath != "/b/config.json" ||
 		!d.Lease.Started.Equal(time.UnixMilli(now.UnixMilli())) {
-		t.Errorf("another environment's daemon: %+v; want fresh, other, running, its lease", d)
+		t.Errorf("another environment's collector: %+v; want fresh, other, running, its lease", d)
 	}
 	if err := ctl.Release(token); err != nil {
 		t.Fatal(err)
 	}
-	if d := ReadDaemon(ctl, ownEnv); d.Fresh || !d.Other || d.Running() {
+	if d := ReadCollector(ctl, ownEnv); d.Fresh || !d.Other || d.Running() {
 		t.Errorf("its lease released: %+v; want not fresh, still other, not running", d)
 	}
-	if d := ReadDaemon(ctl, nil); d.Other {
+	if d := ReadCollector(ctl, nil); d.Other {
 		t.Errorf("no environment check: %+v; want every lease this environment's", d)
 	}
 	if _, ok, err := ctl.Claim(Lease{PID: 2, ConfigPath: "/a/config.json"}, now.Add(-LeaseTTL)); !ok || err != nil {
 		t.Fatalf("Claim = %v, %v", ok, err)
 	}
-	if d := ReadDaemon(ctl, ownEnv); d.Fresh || d.Other || d.Running() {
+	if d := ReadCollector(ctl, ownEnv); d.Fresh || d.Other || d.Running() {
 		t.Errorf("own environment's lease, stale: %+v; want not fresh, not other", d)
 	}
 
 	gone := openControl(t, dir)
 	_ = gone.Close()
-	if d := ReadDaemon(gone, ownEnv); d.Err == nil || !d.Running() || d.Other || d.Fresh {
+	if d := ReadCollector(gone, ownEnv); d.Err == nil || !d.Running() || d.Other || d.Fresh {
 		t.Errorf("lease unreadable: %+v; want its error, counted running (nothing says it is down)", d)
 	}
 }
 
-// TestDaemonStateCurrent (R44): a server's newest snapshot is current only
+// TestCollectorCurrent (R44): a server's newest snapshot is current only
 // when it is not stale, the lease is of the reader's environment (fresh,
 // released or stale), and the snapshot was taken under it: not before its
-// daemon claimed it, which makes an older one a previous daemon's. An
+// collector claimed it, which makes an older one a previous collector's. An
 // action needs, besides, a fresh lease that can be read: one that cannot
 // refuses it (fail closed), while pages keep the stale rule alone.
-func TestDaemonStateCurrent(t *testing.T) {
+func TestCollectorCurrent(t *testing.T) {
 	now := time.UnixMilli(time.Now().UnixMilli())
 	started := now.Add(-2 * time.Second) // the snapshots at and before it are fresh
 	own := Lease{Token: "t", ConfigPath: "/a", Started: started, Beat: now}
@@ -429,21 +429,21 @@ func TestDaemonStateCurrent(t *testing.T) {
 	const interval = time.Second // stale past 5s
 	for _, c := range []struct {
 		name          string
-		d             DaemonState
+		d             Collector
 		latest        *fleet.Snapshot
 		current, acts bool
 	}{
-		{"own daemon's, fresh", DaemonState{Lease: own, Fresh: true}, at(now.Add(-time.Second)), true, true},
-		{"taken as it claimed", DaemonState{Lease: own, Fresh: true}, at(started), true, true},
-		{"taken before it claimed: a previous daemon's", DaemonState{Lease: own, Fresh: true}, at(started.Add(-time.Millisecond)), false, false},
-		{"stale", DaemonState{Lease: own, Fresh: true}, at(now.Add(-5*time.Second - time.Millisecond)), false, false},
-		{"none", DaemonState{Lease: own, Fresh: true}, nil, false, false},
-		{"own daemon stopped: no action", DaemonState{Lease: ownReleased}, at(now.Add(-time.Second)), true, false},
-		{"another environment's daemon", DaemonState{Lease: other, Fresh: true, Other: true}, at(now), false, false},
-		{"another environment's, released", DaemonState{Lease: other, Other: true}, at(now), false, false},
-		{"no daemon ever", DaemonState{}, at(now), true, false},
-		{"lease unreadable", DaemonState{Err: errors.New("database is locked")}, at(now), true, false},
-		{"lease unreadable, stale", DaemonState{Err: errors.New("database is locked")}, at(now.Add(-time.Minute)), false, false},
+		{"own collector's, fresh", Collector{Lease: own, Fresh: true}, at(now.Add(-time.Second)), true, true},
+		{"taken as it claimed", Collector{Lease: own, Fresh: true}, at(started), true, true},
+		{"taken before it claimed: a previous collector's", Collector{Lease: own, Fresh: true}, at(started.Add(-time.Millisecond)), false, false},
+		{"stale", Collector{Lease: own, Fresh: true}, at(now.Add(-5*time.Second - time.Millisecond)), false, false},
+		{"none", Collector{Lease: own, Fresh: true}, nil, false, false},
+		{"own collector stopped: no action", Collector{Lease: ownReleased}, at(now.Add(-time.Second)), true, false},
+		{"another environment's collector", Collector{Lease: other, Fresh: true, Other: true}, at(now), false, false},
+		{"another environment's, released", Collector{Lease: other, Other: true}, at(now), false, false},
+		{"no collector ever", Collector{}, at(now), true, false},
+		{"lease unreadable", Collector{Err: errors.New("database is locked")}, at(now), true, false},
+		{"lease unreadable, stale", Collector{Err: errors.New("database is locked")}, at(now.Add(-time.Minute)), false, false},
 	} {
 		if got := c.d.Current(c.latest, interval, now); got != c.current {
 			t.Errorf("%s: Current = %v, want %v", c.name, got, c.current)

@@ -1,7 +1,7 @@
 // Package fleet is vartop's model of a varmq fleet, with no HTTP of its own:
 // a collector that polls every unit of a server (its direct endpoints and
 // the instances behind its load balancers) into snapshots, the per-worker
-// rates derived from them, the view models the UIs render, and the action
+// rates derived from them, the view models vartop web renders, and the action
 // core that sends a worker action to the units in scope.
 package fleet
 

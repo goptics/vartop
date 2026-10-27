@@ -75,7 +75,7 @@ func TestFeedWindowThenTail(t *testing.T) {
 }
 
 // TestFeedSurvivesReset is Review Focus 4: a reader holds a server file
-// while the daemon resets it: a version change drops the snapshots (and ids
+// while the collector resets it: a version change drops the snapshots (and ids
 // start over, so the new rows may reach the feed's cursor before it looks
 // again), a corrupt file is renamed aside and recreated, a prune empties
 // it, a removed server's file is created anew. The next Sync reloads from
@@ -168,7 +168,7 @@ func TestFeedSurvivesReset(t *testing.T) {
 	_ = db.Close()
 }
 
-// TestFeedWaitsForEmptyFile: a file the daemon has created but not yet
+// TestFeedWaitsForEmptyFile: a file the collector has created but not yet
 // initialised (0 bytes) is waited for like a missing one, not an error.
 func TestFeedWaitsForEmptyFile(t *testing.T) {
 	dir := t.TempDir()
@@ -195,10 +195,10 @@ func TestFeedWaitsForEmptyFile(t *testing.T) {
 	}
 }
 
-// TestFeedWaitsForFileBeingSetUp: a file the daemon is creating is a
+// TestFeedWaitsForFileBeingSetUp: a file the collector is creating is a
 // database before it has its tables — its first connection writes the
 // header — and a reader that opens it then finds nothing yet, not an
-// error. Nor does the daemon's status.
+// error. Nor does the collector's status.
 func TestFeedWaitsForFileBeingSetUp(t *testing.T) {
 	dir := t.TempDir()
 	path := PathFor(dir, "prod")
@@ -371,7 +371,7 @@ func TestFeedTailBounded(t *testing.T) {
 	}
 
 	// Tailing on from there takes the new rows, but none dated before the
-	// window (the clock stepped back while the daemon wrote them).
+	// window (the clock stepped back while the collector wrote them).
 	appendAll(t, db, token, tick(since.Add(-time.Minute), 1000), tick(clock.Add(time.Second), 1001))
 	sync1(t, f)
 	if got := completed(f.Snapshots()); got[len(got)-1] != 1001 || slices.Contains(got, 1000) {
@@ -380,8 +380,8 @@ func TestFeedTailBounded(t *testing.T) {
 }
 
 // TestFeedKeepsHistoryWhenIdle: a feed nothing new reaches for longer
-// than its window (the daemon down) keeps what it holds, for the UIs to
-// show stale ("the vartop daemon is not running"), not as never collected;
+// than its window (the collector down) keeps what it holds, for the UIs to
+// show stale ("the collector is not running"), not as never collected;
 // once rows come again it takes in the window.
 func TestFeedKeepsHistoryWhenIdle(t *testing.T) {
 	dir := t.TempDir()
@@ -412,7 +412,7 @@ func TestFeedKeepsHistoryWhenIdle(t *testing.T) {
 }
 
 // TestFeedSeedsWithNewest (R43): a feed loading a window that is empty
-// while the file has rows — the daemon down for longer than the window —
+// while the file has rows — the collector down for longer than the window —
 // holds the file's newest row, so that the UIs show it stale, with its
 // age, instead of waiting for a first snapshot. It stays while nothing
 // new comes, and the window replaces it once rows do. An undecodable
@@ -458,7 +458,7 @@ func TestFeedSeedsWithNewest(t *testing.T) {
 }
 
 // TestFeedSeedAgreesWithCursor (R43): the row a load with an empty window
-// holds is the one its Window counted to, not one the daemon appended
+// holds is the one its Window counted to, not one the collector appended
 // right after: the next Sync takes that one in, once.
 func TestFeedSeedAgreesWithCursor(t *testing.T) {
 	dir := t.TempDir()
@@ -471,7 +471,7 @@ func TestFeedSeedAgreesWithCursor(t *testing.T) {
 	f.now = func() time.Time { return clock }
 	f.windowRead = func() {
 		f.windowRead = nil
-		appendAll(t, db, token, tick(clock, 2)) // the daemon, started as the UI loads
+		appendAll(t, db, token, tick(clock, 2)) // the collector, started as the UI loads
 	}
 
 	sync1(t, f)
