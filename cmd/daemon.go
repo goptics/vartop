@@ -92,55 +92,6 @@ func buildID() string {
 	return fmt.Sprintf("%s (%d bytes, modified %s)", exe, fi.Size(), fi.ModTime().UTC().Format(time.RFC3339Nano))
 }
 
-// ownLease is this vartop as a daemon's lease records it: its build, and
-// the environment collection depends on.
-func ownLease() store.Lease {
-	path, _ := config.Path() // "" when there is no config dir: the daemon reads no config either
-	return store.Lease{
-		PID:        os.Getpid(),
-		Build:      buildID(),
-		ConfigPath: path,
-		Kubeconfig: os.Getenv("KUBECONFIG"),
-		PathEnv:    os.Getenv("PATH"),
-	}
-}
-
-// readConfig is the daemon's Options.Config: the config, and where its file
-// is even when it cannot be read, so that the daemon watches it still.
-func readConfig() (*config.Config, string, error) {
-	path, err := config.Path()
-	if err != nil {
-		return nil, "", err
-	}
-	cfg, err := config.Load()
-	return cfg, path, err
-}
-
-// sameDaemon reports whether the daemon of lease l collects as want would:
-// the same build, config path and KUBECONFIG. PATH is not compared, so
-// that ordinary differences between shells restart nothing.
-func sameDaemon(l, want store.Lease) bool {
-	return l.Build == want.Build && sameEnv(l, want)
-}
-
-// sameEnv reports whether the daemons of leases a and b collect in the same
-// environment: the same config path and KUBECONFIG, whatever their build
-// (or PATH). A UI acts on a server only while the daemon collects in its
-// environment (R31): the token it sends must not go to endpoints
-// discovered under another config.
-func sameEnv(a, b store.Lease) bool {
-	return a.ConfigPath == b.ConfigPath && a.Kubeconfig == b.Kubeconfig
-}
-
-// sameEnvAsOwn returns the UIs' check of a lease (R31): whether its daemon
-// collects in this vartop's environment, sameEnv with ownLease (read
-// once). The UIs check the lease whether it is fresh, released or stale:
-// the snapshots stored under it are of its daemon's environment (R44).
-func sameEnvAsOwn() func(store.Lease) bool {
-	own := ownLease()
-	return func(l store.Lease) bool { return sameEnv(l, own) }
-}
-
 func daemonLogPath(dataDir string) string { return filepath.Join(dataDir, "daemon.log") }
 
 // rotateIdleLog renames dataDir's daemon log to daemon.log.1 when it has

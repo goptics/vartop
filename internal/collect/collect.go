@@ -93,10 +93,7 @@ func Run(ctx context.Context, o Options) (code int, err error) {
 		return 1, fmt.Errorf("claim the lease: %w", err)
 	}
 	if !ok {
-		if ctx.Err() == nil {
-			o.Log.Info("another vartop daemon is collecting")
-		}
-		return 0, nil
+		return 0, nil // the caller says who collects: it would be said on every call
 	}
 	o.Log.Info("collecting", "pid", o.Lease.PID, "build", o.Lease.Build, "data", o.DataDir)
 

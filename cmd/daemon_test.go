@@ -1222,10 +1222,6 @@ func TestBareDaemonRuns(t *testing.T) {
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("vartop daemon = %v", err)
 	}
-	log, _ := os.ReadFile(filepath.Join(d.o.dataDir, "daemon.log"))
-	if !bytes.Contains(log, []byte("another vartop daemon is collecting")) {
-		t.Errorf("daemon.log:\n%s\nwant the run's log", log)
-	}
 	if err := daemonCmd.Args(daemonCmd, []string{"bogus"}); err == nil {
 		t.Error("vartop daemon bogus accepted")
 	}
