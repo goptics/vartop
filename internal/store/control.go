@@ -1,0 +1,361 @@
+package store
+
+import (
+	"cmp"
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"time"
+
+	"github.com/goptics/vartop/internal/fleet"
+)
+
+// DeadAfter is how long a lease that looks fresh may go without a beat
+// before its holder is taken for dead: three beats missed.
+const DeadAfter = 3 * BeatEvery
+
+// beatPoll is how often BeatAdvances reads the beat it watches.
+const beatPoll = 100 * time.Millisecond
+
+// ErrLeaseLost means the token given is not the lease's: another
+// collector claimed it, or it was released.
+var ErrLeaseLost = errors.New("collector lease lost")
+
+// Lease is the row of the vartop collecting into the store.
+type Lease struct {
+	Token string // "" once released
+	PID   int
+	// The collector's environment, as far as collection depends on it.
+	ConfigPath, Kubeconfig string
+	Started, Beat          time.Time
+}
+
+// Control is control.db: the collector's lease, and per server the UIs' poke
+// counter and the collector's collection error. The collector and every UI open
+// it; each writes its own fields.
+type Control struct {
+	db   *sql.DB
+	path string
+	file os.FileInfo // the file at path when it was opened
+}
+
+const controlSchema = `
+-- build, path_env and stop are unused: the vartop daemon of
+-- 2026-10-26 wrote them. They stay so that its files open unchanged.
+CREATE TABLE IF NOT EXISTS daemon (
+	id          INTEGER PRIMARY KEY CHECK (id = 1),
+	token       TEXT    NOT NULL,
+	pid         INTEGER NOT NULL,
+	build       TEXT    NOT NULL,
+	config_path TEXT    NOT NULL,
+	kubeconfig  TEXT    NOT NULL,
+	path_env    TEXT    NOT NULL,
+	started     INTEGER NOT NULL,
+	beat        INTEGER NOT NULL,
+	stop        INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS servers (
+	name TEXT PRIMARY KEY,
+	err  TEXT    NOT NULL DEFAULT '',
+	poke INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;`
+
+// OpenControl opens dataDir's control file, creating it (and dataDir) if
+// needed.
+func OpenControl(dataDir string) (*Control, error) {
+	path := controlPath(dataDir)
+	if _, err := prepareFile(path); err != nil {
+		return nil, err
+	}
+	db := openDB(path, true, "")
+	if _, err := db.Exec(controlSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	pinID(fi)
+	return &Control{db: db, path: path, file: fi}, nil
+}
+
+// Close closes the control file.
+func (c *Control) Close() error { return c.db.Close() }
+
+// fresh reports whether a lease with token, last renewed at beat (unix
+// ms), still holds at now: renewed less than LeaseTTL before now, and not
+// more than 2·BeatEvery after it. A beat further ahead is no collector's
+// renewing, as clocks a little apart would make it, but a dead collector's
+// last one, read after the clock stepped back: it must not hold the lease
+// for as long as the step.
+func fresh(token string, beat int64, now time.Time) bool {
+	age := now.Sub(time.UnixMilli(beat))
+	return token != "" && age < LeaseTTL && age >= -2*BeatEvery
+}
+
+// Claim makes the caller the collector, as l (but for its Token, Started
+// and Beat), unless another collector's lease is fresh at now:
+// then ok is false. The token it returns is what Beat, Release and every
+// ServerDB.Append need.
+func (c *Control) Claim(l Lease, now time.Time) (token string, ok bool, err error) {
+	return c.claim(l, now, "")
+}
+
+// TakeOver claims the lease as Claim does, but from the collector holding it
+// with token dead too, however fresh its lease looks: one whose beat did
+// not advance for DeadAfter (see BeatAdvances), so dead. ok is false when
+// the lease is fresh and another's than dead: another collector took it over
+// first, or claimed it once dead's went stale.
+func (c *Control) TakeOver(dead string, l Lease, now time.Time) (token string, ok bool, err error) {
+	return c.claim(l, now, dead)
+}
+
+// claim is Claim, taking the lease from token dead's holder too when dead
+// is not "".
+func (c *Control) claim(l Lease, now time.Time, dead string) (token string, ok bool, err error) {
+	tx, err := c.db.Begin() // IMMEDIATE: two claimants queue here
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var cur string
+	var beat int64
+	switch err := tx.QueryRow(`SELECT token, beat FROM daemon WHERE id = 1`).Scan(&cur, &beat); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return "", false, err
+	case fresh(cur, beat, now) && (dead == "" || cur != dead):
+		return "", false, nil
+	}
+	token = rand.Text()
+	ms := now.UnixMilli()
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO daemon
+		(id, token, pid, build, config_path, kubeconfig, path_env, started, beat, stop)
+		VALUES (1, ?, ?, '', ?, ?, '', ?, ?, 0)`,
+		token, l.PID, l.ConfigPath, l.Kubeconfig, ms, ms); err != nil {
+		return "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return token, true, nil
+}
+
+// Beat renews the lease of token at now. ErrLeaseLost: the lease is no
+// longer token's.
+func (c *Control) Beat(token string, now time.Time) error {
+	res, err := c.db.Exec(`UPDATE daemon SET beat = ? WHERE id = 1 AND token = ? AND token <> ''`, now.UnixMilli(), token)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return cmp.Or(err, ErrLeaseLost)
+	}
+	return nil
+}
+
+// BeatAdvances watches the lease of token for up to within, and reports
+// whether its holder renewed it meanwhile: true as soon as the lease shows
+// a beat other than the one it had at first (later, or earlier after the
+// clock stepped back: renewed either way), false once within passed
+// without one, at once if the lease is not token's (or no longer is). now
+// and sleep are the clock it waits by; a ctx done ends the wait with its
+// error.
+func (c *Control) BeatAdvances(ctx context.Context, token string, within time.Duration, now func() time.Time, sleep func(time.Duration)) (advanced bool, err error) {
+	first, held, err := c.beatOf(token)
+	if err != nil || !held {
+		return false, err
+	}
+	deadline := now().Add(within)
+	for now().Before(deadline) {
+		sleep(beatPoll)
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		beat, held, err := c.beatOf(token)
+		if err != nil || !held {
+			return false, err
+		}
+		if beat != first {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// beatOf returns the beat of the lease, and whether it is token's.
+func (c *Control) beatOf(token string) (beat int64, held bool, err error) {
+	err = c.db.QueryRow(`SELECT beat FROM daemon WHERE id = 1 AND token = ? AND token <> ''`, token).Scan(&beat)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return beat, err == nil, err
+}
+
+// Replaced reports whether the file c opened is no longer the one at its
+// path: removed (the data dir deleted, say), or another put in its place.
+// A collector whose control.db is replaced would hold a lease no UI sees,
+// while another collector claims the new file's.
+func (c *Control) Replaced() (bool, error) { return replaced(c.path, c.file) }
+
+// pinID makes fi, a stat of a file just opened, identify that file. On
+// Windows os.Stat leaves the file's ID to the first os.SameFile, which
+// reads it from whatever has the path by then: a file put in its place
+// before Replaced first looked would go unnoticed. Elsewhere it does
+// nothing.
+func pinID(fi os.FileInfo) { _ = os.SameFile(fi, fi) }
+
+// replaced reports whether the file at path is no longer file.
+func replaced(path string, file os.FileInfo) (bool, error) {
+	fi, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !os.SameFile(fi, file), nil
+}
+
+// Release gives up the lease of token, so that the next collector need not
+// wait for it to go stale. Releasing a lease already lost does nothing.
+func (c *Control) Release(token string) error {
+	_, err := c.db.Exec(`UPDATE daemon SET token = '' WHERE id = 1 AND token = ? AND token <> ''`, token)
+	return err
+}
+
+// Lease returns the last collector's lease, and whether it is fresh: held and
+// renewed less than LeaseTTL ago. With no collector ever, it is the zero
+// Lease, not fresh.
+func (c *Control) Lease() (Lease, bool, error) {
+	var l Lease
+	var started, beat int64
+	err := c.db.QueryRow(`SELECT token, pid, config_path, kubeconfig, started, beat FROM daemon WHERE id = 1`).
+		Scan(&l.Token, &l.PID, &l.ConfigPath, &l.Kubeconfig, &started, &beat)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Lease{}, false, nil
+	}
+	if err != nil {
+		return Lease{}, false, err
+	}
+	l.Started, l.Beat = time.UnixMilli(started), time.UnixMilli(beat)
+	return l, fresh(l.Token, beat, time.Now()), nil
+}
+
+// Collector is what vartop web reads of the collector in control.db (see
+// ReadCollector), and what that makes of the snapshots the store holds: which
+// newest snapshot is current, and may be acted on (R44). vartop web judges
+// by it alone.
+type Collector struct {
+	Lease Lease // the last collector's, fresh or not; the zero Lease when none ever claimed
+	Fresh bool  // a collector holds the lease: it collects
+	// Other: the lease — fresh, released or stale — is of another
+	// environment than the reader's (R31). Release and a crash keep its
+	// config path and KUBECONFIG: the snapshots stored under it are of
+	// that configuration's servers, whose units this one's token must not
+	// reach.
+	Other bool
+	Err   error // the lease could not be read: nothing above is known
+}
+
+// ReadCollector reads c's lease, and checks its environment with sameEnv; nil
+// takes every collector's for the reader's. A lease no collector ever claimed is
+// of no environment.
+func ReadCollector(c *Control, sameEnv func(Lease) bool) Collector {
+	l, fresh, err := c.Lease()
+	if err != nil {
+		return Collector{Err: err}
+	}
+	return Collector{Lease: l, Fresh: fresh, Other: !l.Started.IsZero() && sameEnv != nil && !sameEnv(l)}
+}
+
+// Running reports whether a collector runs to answer a poke, as far as d
+// knows: a lease that cannot be read counts as held, since nothing says
+// the collector is down.
+func (d Collector) Running() bool { return d.Fresh || d.Err != nil }
+
+// Current reports whether latest, the newest snapshot of a server polled
+// every interval, is current at now (R44): not stale (fleet.Stale), the
+// lease of the reader's environment, and latest taken under it — not
+// before its collector claimed it. An older one is a previous collector's; once
+// a collector claims, the previous one's appends fail (the token check), so
+// every newer one is its own. A lease that cannot be read leaves the stale
+// rule alone. No snapshot (nil) is not current.
+func (d Collector) Current(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
+	switch {
+	case latest == nil || fleet.Stale(latest, interval, now):
+		return false
+	case d.Err != nil:
+		return true
+	}
+	return !d.Other && !latest.At.Before(d.Lease.Started)
+}
+
+// Acts reports whether an action may be sent on latest at now (R44): a
+// collector of the reader's environment holds a fresh lease, and latest is
+// current under it. A lease that cannot be read refuses it: whose units
+// latest names is not known.
+func (d Collector) Acts(latest *fleet.Snapshot, interval time.Duration, now time.Time) bool {
+	return d.Err == nil && d.Fresh && d.Current(latest, interval, now)
+}
+
+// Poke asks the collector to poll server now, and returns when it asked: a
+// snapshot taken after the poke is newer.
+func (c *Control) Poke(server string) (time.Time, error) {
+	at := time.Now().Round(0)
+	_, err := c.db.Exec(`INSERT INTO servers (name, poke) VALUES (?, 1)
+		ON CONFLICT (name) DO UPDATE SET poke = poke + 1`, server)
+	return at, err
+}
+
+// Pokes returns every server's poke counter; the collector polls a server
+// whose counter moved.
+func (c *Control) Pokes() (map[string]int64, error) {
+	rows, err := c.db.Query(`SELECT name, poke FROM servers`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pokes := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var n int64
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		pokes[name] = n
+	}
+	return pokes, rows.Err()
+}
+
+// SetServerErr records why server cannot be collected; "" clears it.
+func (c *Control) SetServerErr(server, msg string) error {
+	_, err := c.db.Exec(`INSERT INTO servers (name, err) VALUES (?, ?)
+		ON CONFLICT (name) DO UPDATE SET err = excluded.err`, server, msg)
+	return err
+}
+
+// ServerErrs returns the servers that have a collection error, with it.
+func (c *Control) ServerErrs() (map[string]string, error) {
+	rows, err := c.db.Query(`SELECT name, err FROM servers WHERE err <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	errs := make(map[string]string)
+	for rows.Next() {
+		var name, msg string
+		if err := rows.Scan(&name, &msg); err != nil {
+			return nil, err
+		}
+		errs[name] = msg
+	}
+	return errs, rows.Err()
+}

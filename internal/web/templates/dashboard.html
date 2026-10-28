@@ -1,0 +1,65 @@
+{{define "live_body"}}{{with .Dashboard}}{{$k := .KPIs}}
+<section class="kpis" aria-label="Fleet totals">
+  <div class="card">
+    <h3>Completed /s</h3>
+    <p class="big">{{if or $.Stale (noData $k.Completed)}}—{{else}}{{printf "%.1f" $k.CompletedPerSec}}{{end}}</p>
+    {{template "spark" (sparkline $k.Completed trendWindow $.Interval 160 32)}}
+  </div>
+  <div class="card failed">
+    <h3>Failed /min</h3>
+    <p class="big">{{if or $.Stale (noData $k.Failed)}}—{{else}}{{printf "%.1f" $k.FailedPerMin}}{{end}}</p>
+    {{template "spark" (sparkline $k.Failed trendWindow $.Interval 160 32)}}
+  </div>
+  <div class="card pending">
+    <h3>Pending (max/{{$.Noun.One}})</h3>
+    <p class="big">{{if or $.Stale (noData $k.Pending)}}—{{else}}{{$k.PendingMax}}{{end}}</p>
+    {{template "spark" (sparkline $k.Pending trendWindow $.Interval 160 32)}}
+  </div>
+  <div class="card">
+    <h3>Workers by status</h3>
+    <p class="sub">{{$.Noun.One}} × worker</p>
+    <ul class="chips">{{if $.Stale}}<li>—</li>{{else}}{{range statusClasses}}{{$n := index $k.StatusCounts .}}{{if $n}}<li class="status {{.}}">{{$n}} {{.}}</li>{{end}}{{end}}{{if not $k.StatusCounts}}<li>—</li>{{end}}{{end}}</ul>
+  </div>
+</section>
+{{if .Rows}}<div class="table-wrap">
+<table class="workers">
+  <thead><tr>
+    <th class="sel"><span class="sr">Select</span></th>
+    <th>Worker</th>
+    <th>Status</th>
+    <th>Concurrency (per {{$.Noun.One}})</th>
+    <th class="num">Busy</th>
+    <th class="num">Idle</th>
+    <th class="num">Pending (max/{{$.Noun.One}})</th>
+    <th>Completed /s (10 min)</th>
+  </tr></thead>
+  <tbody>{{range .Rows}}
+  <tr id="{{.ID}}">
+    <td class="sel"><input type="checkbox" id="sel-{{.ID}}" form="bulk" name="names" value="{{.Name}}" aria-label="Select {{.Name}}" hx-preserve></td>
+    <td class="name"><a href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></td>
+    <td>{{if $.Stale}}—{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}{{end}}</td>
+    <td>{{if $.Stale}}—{{else}}{{.Concurrency}}{{end}}</td>
+    <td class="num">{{if or .Unknown $.Stale}}—{{else}}{{.Busy}}{{end}}</td>
+    <td class="num">{{if or .Unknown $.Stale}}—{{else}}{{.Idle}}{{end}}</td>
+    <td class="num"{{with .PendingTip}}{{if not $.Stale}} title="{{.}}"{{end}}{{end}}>{{if or .Unknown $.Stale}}—{{else}}{{.PendingMax}}{{end}}</td>
+    <td class="trend">{{template "spark" (sparkline .Spark trendWindow $.Interval 120 24)}}</td>
+  </tr>{{end}}
+  </tbody>
+</table>
+</div>{{else if not $.Banner}}<p class="empty">No workers reported yet.</p>{{end}}
+{{end}}{{end}}
+
+{{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
+{{define "live_oob"}}<div id="live" hx-swap-oob="outerHTML">{{template "live_body" .}}</div>{{end}}
+
+{{define "content"}}{{template "live" .}}
+<div id="results" aria-live="polite"></div>
+{{if .Dashboard}}{{if .OneBalanced}}<p class="note">{{oneBalanced}}</p>
+{{else}}<form id="bulk" class="bulk" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+  {{template "server_field" .}}
+  {{template "label_field" .}}
+  <span>Selected workers on {{.Scope}}:</span>
+  <button type="button" hx-post="/bulk/pause">Pause selected</button>
+  <button type="button" hx-post="/bulk/resume">Resume selected</button>
+</form>{{end}}{{end}}
+{{end}}
