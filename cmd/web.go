@@ -275,7 +275,8 @@ var webCmd = &cobra.Command{
 	Long: `vartop web serves the dashboard on --host and --port (loopback only: the
 dashboard has no login) and opens it in your browser. While it runs it
 collects every configured server into the data directory, keeping 24h of
-history; when it stops, collection stops too.`,
+polls and each worker's rates for the server's history (1d to 30d); when it
+stops, collection stops too.`,
 	// A failure here (port in use, shutdown) is not a usage mistake.
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
