@@ -1,6 +1,6 @@
 {{define "content"}}<p class="back"><a href="{{queuesURL .Server}}">← Queues</a></p>
 {{with .Jobs}}<div class="detail-head">
-  <h2>{{.Queue.ID}}</h2>
+  <h1>{{.Queue.ID}}</h1>
   <span class="sub">on {{range $i, $l := .Queue.On}}{{if $i}}, {{end}}{{$l}}{{end}}</span>
 </div>
 <nav class="seg states" aria-label="Job state">{{range .Tabs}}<a href="{{.URL}}"{{if .Current}} aria-current="page"{{end}}>{{.State}}{{if ge .Count 0}} <span class="count">{{.Count}}</span>{{end}}</a>{{end}}</nav>

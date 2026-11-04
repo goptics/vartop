@@ -74,7 +74,7 @@ func TestQueueJobsPage(t *testing.T) {
 		t.Fatalf("GET %s = %d:\n%s", page, status, body)
 	}
 	for _, want := range []string{
-		"<h2>" + tenantID + "</h2>",
+		"<h1>" + tenantID + "</h1>",
 		"order-42", "2 attempts",
 		`<span class="err">out of stock</span></summary>`,    // summary: the final error
 		`Attempt 1 · <time datetime="2025-11-04T04:00:01Z">`, // errors oldest first

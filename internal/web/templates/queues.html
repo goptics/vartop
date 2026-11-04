@@ -32,4 +32,5 @@
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
 
-{{define "content"}}{{template "live" .}}{{end}}
+{{define "content"}}<h1 class="sr">Queues</h1>
+{{template "live" .}}{{end}}

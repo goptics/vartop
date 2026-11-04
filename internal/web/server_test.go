@@ -202,7 +202,7 @@ func TestPagesRender(t *testing.T) {
 	// The grid shows every unit, so it offers no unit select.
 	t.Run("instance select", func(t *testing.T) {
 		for path, want := range map[string]bool{"/": true, "/workers/orders": true, "/grid": false, "/grid?server=b": false} {
-			if _, body := fetch(t, srv, path, false); strings.Contains(body, `<select name="instance">`) != want {
+			if _, body := fetch(t, srv, path, false); strings.Contains(body, `<select name="instance" id="pick-unit">`) != want {
 				t.Errorf("GET %s: instance select shown = %v, want %v", path, !want, want)
 			}
 		}
@@ -361,13 +361,13 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	// (merged) there is a change.
 	merged := map[string]string{dash: "/?server=multi", detail: "/workers/orders?server=multi"}
 	for _, path := range []string{dash, detail} {
-		banner := `<p class="banner">Instance ` + label + ` is no longer reported — reload · <a href="` + merged[path] + `">All instances (merged)</a></p>`
+		banner := `<p class="banner">Instance ` + label + ` is no longer reported — reload · <a id="banner-merged" href="` + merged[path] + `">All instances (merged)</a></p>`
 		for _, hx := range []bool{true, false} { // a poll, a full load
 			status, body := fetch(t, srv, path, hx)
 			if status != http.StatusOK || !strings.Contains(body, banner) {
 				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
 			}
-			_, picker, _ := strings.Cut(body, `<select name="instance">`)
+			_, picker, _ := strings.Cut(body, `<select name="instance" id="pick-unit">`)
 			picker, _, _ = strings.Cut(picker, `</select>`)
 			if gone := `<option value="` + label + `" selected disabled>` + label + `</option>`; strings.Count(picker, " selected") != 1 || !strings.Contains(picker, gone) {
 				t.Errorf("GET %s (hx %v): picker %q, want only %q selected", path, hx, picker, gone)
@@ -465,7 +465,7 @@ func TestDetailOfEscapedName(t *testing.T) {
 		t.Fatalf("GET /workers/a%%2Fb%%20c = %d, want 200", status)
 	}
 	// The poller and the unit select must reach the same worker again.
-	for _, want := range []string{`<h2>a/b c</h2>`, `hx-get="/workers/a%2Fb%20c?server=multi"`, `hx-get="/workers/a%2Fb%20c"`} {
+	for _, want := range []string{`<h1>a/b c</h1>`, `hx-get="/workers/a%2Fb%20c?server=multi"`, `hx-get="/workers/a%2Fb%20c"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body lacks %q", want)
 		}
@@ -500,7 +500,7 @@ func TestTwoTabsTwoServers(t *testing.T) {
 		}
 	}
 	_, body := fetch(t, f.srv, "/?server=west", false)
-	for _, want := range []string{`<option value="west" selected>`, `<select name="server">`, `name="server" value="west"`} {
+	for _, want := range []string{`<option value="west" selected>`, `<select name="server" id="pick-server">`, `name="server" value="west"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("west's page lacks %q", want)
 		}
@@ -613,7 +613,7 @@ func TestKubernetesPodParam(t *testing.T) {
 		t.Errorf("dashboard of pod b should show orders only:\n%s", body)
 	}
 	for _, want := range []string{
-		`<select name="pod">`,
+		`<select name="pod" id="pick-unit">`,
 		`<option value="b" selected`,
 		`<input type="hidden" name="pod" value="b">`,
 		`href="/workers/orders?pod=b&amp;server=multi"`,
@@ -676,7 +676,7 @@ func TestUnknownAndGoneLabels(t *testing.T) {
 
 		gone := "Instance " + label + " is no longer reported — reload"
 		_, body := fetch(t, f.srv, "/?server=multi&instance="+label, false)
-		if !strings.Contains(body, `<p class="banner">`+gone+` · <a href="/?server=multi">All instances (merged)</a>`) {
+		if !strings.Contains(body, `<p class="banner">`+gone+` · <a id="banner-merged" href="/?server=multi">All instances (merged)</a>`) {
 			t.Errorf("gone unit's page lacks the banner with the merged view:\n%s", body)
 		}
 		for _, c := range []struct {
@@ -911,7 +911,7 @@ func TestOtherConfigCollector(t *testing.T) {
 	_, status, _ := strings.Cut(body, `<div id="status">`)
 	status, _, _ = strings.Cut(status, "</div>")
 	if !strings.Contains(status, `<span class="health" title="healthy / total instances">— instances</span>`) ||
-		!strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">3</td>`) {
+		!strings.Contains(body, `<td class="num" data-label="Busy">—</td>`) || strings.Contains(body, `">3</td>`) {
 		t.Errorf("the page shows current values of the other environment's collector:\n%s", body)
 	}
 
@@ -1005,7 +1005,7 @@ func TestOtherConfigHandOff(t *testing.T) {
 		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
 	}})
 	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
-	current := `<td class="num">5</td>` // the idle workers, shown only while current
+	current := `<td class="num" data-label="Idle">5</td>` // the idle workers, shown only while current
 
 	f.leaseConfig = "/b/vartop/config.json"
 	f.claim()
@@ -1114,7 +1114,7 @@ func TestActionRefusedWhenLeaseUnreadable(t *testing.T) {
 		t.Errorf("POST = %d %q, want 409 saying the lease cannot be read", resp.StatusCode, body)
 	}
 	noPatches(t, fa, fb)
-	if _, body := fetch(t, f.srv, "/?server=multi", false); !strings.Contains(body, `<td class="num">5</td>`) {
+	if _, body := fetch(t, f.srv, "/?server=multi", false); !strings.Contains(body, `<td class="num" data-label="Idle">5</td>`) {
 		t.Errorf("the page no longer shows the fresh snapshot:\n%s", body)
 	}
 }
@@ -1165,7 +1165,7 @@ func TestStaleBanner(t *testing.T) {
 		}
 	}
 	_, body := fetch(t, f.srv, "/?server=multi", false)
-	if !strings.Contains(body, ">orders<") || !strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">1</td>`) {
+	if !strings.Contains(body, ">orders<") || !strings.Contains(body, `<td class="num" data-label="Busy">—</td>`) || strings.Contains(body, `">1</td>`) {
 		t.Errorf("a stale dashboard should list orders with its current values as —:\n%s", body)
 	}
 	// Nor the health of the stale snapshot.
@@ -1223,7 +1223,7 @@ func TestTokenNeverInResponses(t *testing.T) {
 	srv, _ := newTestServer(t, aSrv, bSrv, dead)
 
 	_, grid := fetch(t, srv, "/grid", false)
-	if !strings.Contains(grid, `<small class="err">`) {
+	if !strings.Contains(grid, `<span class="err">`) {
 		t.Fatal("the dead unit's error is not rendered; the test would miss a token in it")
 	}
 

@@ -6,18 +6,20 @@
 <table class="grid">
   <thead><tr>
     <th>Worker</th>{{range $pods}}
-    <th{{if and .Err (not $.Stale)}} class="down"{{end}} title="{{.Tip}}">{{.Label}}{{if and .Err (not $.Stale)}}<small class="err">{{.Err}}</small>{{end}}</th>{{end}}
+    <th{{if and .Err (not $.Stale)}} class="down"{{end}} title="{{.Tip}}">{{.Label}}{{if and .Err (not $.Stale)}}<small class="err">unreachable</small>{{end}}</th>{{end}}
   </tr></thead>
   <tbody>{{range .Rows}}
   <tr>
-    <th scope="row" class="name"><a href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></th>{{range $i, $c := .Cells}}
+    <th scope="row" class="name"><a id="link-{{domID .Name}}" href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></th>{{range $i, $c := .Cells}}
     <td{{if and (index $pods $i).Err (not $.Stale)}} class="down"{{end}}>{{if $.Stale}}—{{else if $c.Present}}<span class="status {{$c.Class}}">{{$c.Status}}</span> · {{$c.Busy}}/{{$c.Concurrency}} · {{$c.Pending}}{{else if $c.Unreached}}<span class="na">not reached</span>{{else}}—{{end}}</td>{{end}}
   </tr>{{end}}
   </tbody>
 </table>
-</div>{{end}}
+</div>
+<ul class="units">{{range $pods}}<li><b>{{.Label}}</b> {{.Tip}}{{if and .Err (not $.Stale)}}: <span class="err">{{.Err}}</span>{{end}}</li>{{end}}</ul>{{end}}
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
 
-{{define "content"}}{{template "live" .}}{{end}}
+{{define "content"}}<h1 class="sr">{{.Noun.Cap}} grid</h1>
+{{template "live" .}}{{end}}

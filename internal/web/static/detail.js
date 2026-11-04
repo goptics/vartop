@@ -97,7 +97,8 @@
   });
 })();
 
-// The concurrency slider applies on release. While it is dragged, the
+// The concurrency slider applies once it stops moving (600ms after the last
+// change: each arrow key is a change of its own). While it is dragged, the
 // number beside it shows the value it would set; a number typed moves the
 // slider. The two never disagree.
 document.addEventListener("input", (e) => {

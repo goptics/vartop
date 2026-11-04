@@ -1,7 +1,7 @@
 {{define "server_field"}}<input type="hidden" name="server" value="{{.Server}}">{{end}}
 {{define "label_field"}}<input type="hidden" name="{{.Noun.Param}}" value="{{.Pod}}">{{end}}
 {{define "range_fields"}}{{with .Ranges.Completed}}<input type="hidden" name="completed" value="{{spanParam .}}">{{end}}{{with .Ranges.Failed}}<input type="hidden" name="failed" value="{{spanParam .}}">{{end}}{{end}}
-{{define "range_switch"}}<span class="seg" role="group" aria-label="Span">{{range .}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}} hx-get="{{.URL}}" hx-target="body" hx-push-url="true" hx-sync="#page:replace">{{.Text}}</a>{{end}}</span>{{end}}
+{{define "range_switch"}}<span class="seg" role="group" aria-label="Span">{{range .}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}} id="{{.ID}}" hx-get="{{.URL}}" hx-target="body" hx-push-url="true" hx-sync="#page:replace">{{.Text}}</a>{{end}}</span>{{end}}
 {{define "spark"}}<svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>{{end}}
 {{define "history"}}<div class="history">
   <div class="axis-y">{{range .YTicks}}<span style="top:{{.Pct}}%">{{.Label}}</span>{{end}}</div>
@@ -31,12 +31,12 @@
     <a href="{{queuesURL .Server}}"{{if or .Queues .Jobs}} aria-current="page"{{end}}>Queues</a>
   </nav>
   {{if .Servers}}<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
-    <label>Server <select name="server">{{if .Unconfigured}}<option value="{{.Server}}" selected disabled>{{.Server}}</option>{{end}}{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <label>Server <select name="server" id="pick-server">{{if .Unconfigured}}<option value="{{.Server}}" selected disabled>{{.Server}}</option>{{end}}{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
   </form>{{end}}
   {{if .Pods}}<form class="pick" hx-get="{{pathOf .SelfURL}}" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
     {{template "server_field" .}}
     {{template "range_fields" .}}
-    <label>{{.Noun.Cap}} <select name="{{.Noun.Param}}"><option value=""{{if not .Pod}} selected{{end}}>All {{.Noun.Many}} (merged)</option>{{range .Pods}}<option value="{{.Label}}"{{if eq .Label $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}{{with .Gone}}<option value="{{.}}" selected disabled>{{.}}</option>{{end}}</select></label>
+    <label>{{.Noun.Cap}} <select name="{{.Noun.Param}}" id="pick-unit"><option value=""{{if not .Pod}} selected{{end}}>All {{.Noun.Many}} (merged)</option>{{range .Pods}}<option value="{{.Label}}"{{if eq .Label $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}{{with .Gone}}<option value="{{.}}" selected disabled>{{.}}</option>{{end}}</select></label>
   </form>{{end}}
 </header>
 <div id="status">{{if not .Waiting}}
@@ -46,7 +46,7 @@
   {{if and .Note (not .Stale)}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}
 </div>
 <div id="errors" role="alert"></div>
-<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}</div>
+<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a id="banner-merged" href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}</div>
 <main>
 {{if .Waiting}}<p class="waiting" role="status">{{.Waiting}}</p>{{end}}
 {{template "content" .}}

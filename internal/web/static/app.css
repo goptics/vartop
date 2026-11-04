@@ -1,13 +1,15 @@
 /* vartop web UI. Dark is Tokyo Night, light is Tokyo Night Day, chosen by
    prefers-color-scheme; the accent is varmq's logo teal (#44BF9E), a darker
-   shade of it on light for contrast. */
+   shade of it on light for contrast. Text tokens hold >= 4.5:1 (WCAG AA)
+   on both --bg and --panel; --subtle, and --ok/--warn on light, are pushed
+   past the stock palette for it. */
 :root {
   color-scheme: dark light;
   accent-color: var(--accent); /* the slider and checkboxes too */
   --bg: #1A1B26;
   --panel: #24283B;
   --fg: #C0CAF5;
-  --subtle: #565F89;
+  --subtle: #8A93BD;
   --accent: #44BF9E;
   --ok: #9ECE6A;
   --warn: #E0AF68;
@@ -19,10 +21,10 @@
     --bg: #E1E2E7;
     --panel: #F2F3F8;
     --fg: #343B58;
-    --subtle: #6C6E80;
+    --subtle: #5F6278;
     --accent: #1B6E5A;
-    --ok: #587539;
-    --warn: #8F5E15;
+    --ok: #4A6630;
+    --warn: #7E5212;
     --bad: #8C4351;
     --line: #C4C8DA;
   }
@@ -37,8 +39,8 @@ body {
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 a { color: var(--accent); }
-h2, h3 { margin: 0; }
-h2 { font-size: 1.4rem; overflow-wrap: anywhere; }
+h1, h3 { margin: 0; }
+h1 { font-size: 1.4rem; overflow-wrap: anywhere; }
 h3 { font-size: .85rem; font-weight: 600; color: var(--subtle); letter-spacing: .03em; }
 main { max-width: 1200px; margin: 0 auto; }
 .sr { position: absolute; left: -9999px; }
@@ -125,8 +127,25 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .sel { width: 1%; }
 .name { white-space: normal; overflow-wrap: anywhere; min-width: 8em; font-size: inherit; color: var(--fg); }
 .trend { padding-top: 2px; padding-bottom: 2px; }
-.grid .down, .grid th.down { color: var(--subtle); background: var(--panel); opacity: .7; }
+.grid .down, .grid th.down { color: var(--subtle); background: var(--panel); }
+.split { display: block; color: var(--subtle); font-size: .75rem; white-space: pre; }
+.units { margin: 12px 0; padding: 0; list-style: none; color: var(--subtle); overflow-wrap: anywhere; }
+.units b { color: var(--fg); }
 small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; white-space: normal; max-width: 18em; }
+.grid th small.err { white-space: nowrap; }
+
+/* phone: each worker row stacks, its numbers labelled, none off-screen */
+@media (max-width: 640px) {
+  .workers thead { position: absolute; left: -9999px; }
+  .workers tr { display: grid; grid-template-columns: 2em repeat(3, 1fr); gap: 4px 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .workers tbody tr:last-child { border-bottom: 0; }
+  .workers td { padding: 0; border: 0; white-space: normal; text-align: left; }
+  .workers td.name { grid-column: 2 / 4; min-width: 0; }
+  .workers td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: .75rem; }
+  .workers td:nth-child(4), .workers td:nth-child(7) { grid-column: 2; }
+  .workers td.trend { grid-column: 3 / 5; }
+  .workers td:has(.split) { grid-column: 2 / -1; } /* a mixed status's breakdown gets a line of its own */
+}
 
 /* status colours; mixed, unknown and transitional stay plain foreground */
 .status.active { color: var(--ok); }
