@@ -1,0 +1,24 @@
+{{define "content"}}<p class="back"><a href="{{queuesURL .Server}}">← Queues</a></p>
+{{with .Jobs}}<div class="detail-head">
+  <h2>{{.Queue.ID}}</h2>
+  <span class="sub">on {{range $i, $l := .Queue.On}}{{if $i}}, {{end}}{{$l}}{{end}}</span>
+</div>
+<nav class="seg states" aria-label="Job state">{{range .Tabs}}<a href="{{.URL}}"{{if .Current}} aria-current="page"{{end}}>{{.State}}{{if ge .Count 0}} <span class="count">{{.Count}}</span>{{end}}</a>{{end}}</nav>
+{{if .Jobs}}<ol class="jobs" start="{{(index .Jobs 0).N}}" aria-label="{{.State}} jobs">{{range .Jobs}}
+  <li><details>
+    <summary><span class="name">{{or .ID "(no ID yet)"}}</span> <span class="sub">· {{.Attempts}} attempt{{if ne .Attempts 1}}s{{end}}{{with .Finished}} · finished {{.}}{{else}}{{with .Started}} · started {{.}}{{else}}{{with .Enqueued}} · enqueued {{.}}{{end}}{{end}}{{end}}</span>{{with .LastError}} <span class="err">{{.}}</span>{{end}}</summary>
+    <dl>
+      <dt>Job ID</dt><dd>{{or .ID "—"}}</dd>
+      <dt>Attempts</dt><dd>{{.Attempts}}</dd>
+      <dt>Enqueued</dt><dd>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}—{{end}}</dd>
+      <dt>Started</dt><dd>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}—{{end}}</dd>
+      <dt>Finished</dt><dd>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}—{{end}}</dd>
+      {{with .LastError}}<dt>Last error</dt><dd class="err">{{.}}</dd>{{end}}
+    </dl>
+    <h3>Payload{{if .Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h3>
+    <pre class="payload" tabindex="0">{{or .Payload "null"}}</pre>
+  </details></li>{{end}}
+</ol>{{else if not $.Banner}}<p class="empty">No {{.State}} jobs{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
+{{if or .Prev .Next}}<nav class="pager" aria-label="Pages">{{with .Prev}}<a href="{{.}}" rel="prev">← Previous page</a>{{end}}{{with .Next}}<a href="{{.}}" rel="next">Next page →</a>{{end}}</nav>{{end}}
+{{with .From}}<p class="pods">Read from {{.}}</p>{{end}}
+{{end}}{{end}}

@@ -1,0 +1,35 @@
+{{define "live_body"}}{{with .Queues}}
+{{if .Groups}}<div class="table-wrap">
+<table class="queues">
+  <caption class="sr">Queues, one row per Queue ID; counts are the queue's own, not summed across {{$.Noun.Many}}</caption>
+  <thead><tr>
+    <th scope="col">Queue ID</th>
+    <th scope="col" class="num">Pending</th>
+    <th scope="col" class="num">Processing</th>
+    <th scope="col" class="num">Completed</th>
+    <th scope="col" class="num">Failed</th>
+    <th scope="col" class="num">Submitted (total)</th>
+    <th scope="col">Reported by</th>
+  </tr></thead>
+  <tbody>{{range .Groups}}
+  <tr>
+    <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}">{{.ID}}</a></th>{{with .Counts}}
+    <td class="num">{{.Pending}}</td>
+    <td class="num">{{.Processing}}</td>
+    <td class="num">{{.Completed}}</td>
+    <td class="num failed">{{.Failed}}</td>{{else}}
+    <td colspan="4"><span class="err">{{.Err}}</span></td>{{end}}
+    <td class="num">{{with .Totals}}{{.Submitted}}{{else}}—{{end}}</td>
+    <td class="on">{{range $i, $l := .On}}{{if $i}}, {{end}}{{$l}}{{end}}</td>
+  </tr>{{end}}
+  </tbody>
+</table>
+</div>{{else if and .Units (eq (len .Unsupported) .Units)}}<p class="empty">No queue data: no {{$.Noun.One}} serves the queue routes. They need a varmq whose queue storage reports its jobs (API 1.0.0).</p>
+{{else if not .Failed}}<p class="empty">No inspectable queues reported.</p>{{end}}
+{{if and .Groups .Unsupported}}<p class="note" role="note">No queue routes on: {{range $i, $l := .Unsupported}}{{if $i}}, {{end}}{{$l}}{{end}}</p>{{end}}
+{{range .Failed}}<p class="err">{{.}}</p>{{end}}
+{{end}}{{end}}
+
+{{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
+
+{{define "content"}}{{template "live" .}}{{end}}

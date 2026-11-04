@@ -74,6 +74,8 @@ type Page struct {
 	Dashboard *fleet.DashboardView
 	Grid      *fleet.GridView
 	Detail    *fleet.DetailView
+	Queues    *fleet.QueuesView
+	Jobs      *JobsView
 
 	// Spans are the spans besides the hour the server's charts may show
 	// (spansOf its history); Ranges says which each of Detail's charts
@@ -128,6 +130,8 @@ var funcs = template.FuncMap{
 	"pathEscape":    url.PathEscape,
 	"pageURL":       pageURL,
 	"workerURL":     workerURL,
+	"queuesURL":     queuesURL,
+	"jobsURL":       jobsURL,
 	"pathOf":        pathOf,
 	"sparkline":     sparkline,
 	"history":       history,
@@ -142,16 +146,17 @@ var funcs = template.FuncMap{
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",
-// "detail", "results" and "confirm" (layout.html + <key>.html). Entry points:
+// "detail", "queues", "queue", "results" and "confirm" (layout.html +
+// <key>.html). Entry points:
 //
-//   - dashboard, grid, detail: ExecuteTemplate(w, "layout", Page) renders the
+//   - dashboard, grid, detail, queues, queue: ExecuteTemplate(w, "layout", Page) renders the
 //     full document. The dashboard and detail sets also define "live_oob"
 //     (Page): the #live region as an out-of-band swap, for action responses.
 //   - results: ExecuteTemplate(w, "results", ResultsView).
 //   - confirm: ExecuteTemplate(w, "confirm", ConfirmView).
 func parseTemplates() (map[string]*template.Template, error) {
 	sets := make(map[string]*template.Template)
-	for _, name := range []string{"dashboard", "grid", "detail", "results", "confirm"} {
+	for _, name := range []string{"dashboard", "grid", "detail", "queues", "queue", "results", "confirm"} {
 		t, err := template.New(name).Funcs(funcs).ParseFS(assets, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse %s template: %w", name, err)
