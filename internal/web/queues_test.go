@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +23,8 @@ func tenantQueue() *fleettest.Queue {
 	}
 }
 
-func queueFakes(t *testing.T) (*fleettest.Varmq, []*httptest.Server) {
+// queueFakes returns the two varmqs that share the queue, and all fakes.
+func queueFakes(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server) {
 	t.Helper()
 	varmqs, fakes := threeVarmqs(t)
 	for _, v := range varmqs[:2] { // a and b share the queue; c is an older varmq
@@ -30,7 +32,7 @@ func queueFakes(t *testing.T) (*fleettest.Varmq, []*httptest.Server) {
 		v.Queues = map[string]*fleettest.Queue{tenantID: tenantQueue()}
 		v.Mu.Unlock()
 	}
-	return varmqs[0], fakes
+	return varmqs[:2], fakes
 }
 
 func TestQueuesPage(t *testing.T) {
@@ -63,7 +65,7 @@ func TestQueuesPage(t *testing.T) {
 }
 
 func TestQueueJobsPage(t *testing.T) {
-	a, fakes := queueFakes(t)
+	shared, fakes := queueFakes(t)
 	srv, _ := newTestServer(t, fakes...)
 	page := "/queues/redisq:fifo:%7Btenant%2Forders%7D"
 
@@ -86,9 +88,10 @@ func TestQueueJobsPage(t *testing.T) {
 			t.Errorf("failed page lacks %q", want)
 		}
 	}
-	calls := a.Calls()
-	if got, want := calls[len(calls)-1], "GET /queues/redisq:fifo:%7Btenant%2Forders%7D/jobs"; got != want {
-		t.Errorf("a got %s, want %s", got, want)
+	// either sharer may serve the jobs: unit order is not fixed
+	want := "GET /queues/redisq:fifo:%7Btenant%2Forders%7D/jobs"
+	if !slices.Contains(shared[0].Calls(), want) && !slices.Contains(shared[1].Calls(), want) {
+		t.Errorf("no sharer got %s", want)
 	}
 
 	// pending, one per page: a next link, no previous; the second page the other way.
