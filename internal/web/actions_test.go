@@ -620,7 +620,7 @@ func TestActionResponseReflectsNewState(t *testing.T) {
 	req.Header.Set("HX-Current-URL", srv.URL+"/workers/orders?server=multi")
 	_, body := send(t, srv, req)
 	live := liveOOB(body)
-	if !strings.Contains(live, "<h2>orders</h2>") || !strings.Contains(live, paused) || !strings.Contains(live, ">Paused</span>") {
+	if !strings.Contains(live, "<h1>orders</h1>") || !strings.Contains(live, paused) || !strings.Contains(live, ">Paused</span>") {
 		t.Errorf("response's #live should show orders paused:\n%s", body)
 	}
 	if strings.Index(body, `<ul class="results">`) > strings.Index(body, `id="live"`) {
@@ -639,9 +639,9 @@ func TestActionRefreshesPageItCameFrom(t *testing.T) {
 		form       url.Values
 		want       string // in the oob #live; "" = no oob
 	}{
-		{"/workers/orders/actions/pause", "", multi(), "<h2>orders</h2>"},
-		{"/workers/orders/actions/pause", "/workers/orders?server=multi", multi(), "<h2>orders</h2>"},
-		{"/workers/orders/actions/resume", "/workers/emails", multi(), "<h2>emails</h2>"},
+		{"/workers/orders/actions/pause", "", multi(), "<h1>orders</h1>"},
+		{"/workers/orders/actions/pause", "/workers/orders?server=multi", multi(), "<h1>orders</h1>"},
+		{"/workers/orders/actions/resume", "/workers/emails", multi(), "<h1>emails</h1>"},
 		{"/workers/orders/actions/pause", "/?server=multi", multi(), `<table class="workers">`},
 		{"/workers/orders/concurrency", "/", multi("n", "5"), `<table class="workers">`},
 		{"/bulk/resume", "", multi("names", "orders", "confirm", "1"), `<table class="workers">`},
@@ -1419,7 +1419,7 @@ func TestActionResponseShowsStale(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("pause = %d, want 200:\n%s", resp.StatusCode, body)
 	}
-	if live := liveOOB(body); !strings.Contains(live, `<td class="num">—</td>`) || strings.Contains(live, `<td class="num">3</td>`) {
+	if live := liveOOB(body); !strings.Contains(live, `<td class="num" data-label="Busy">—</td>`) || strings.Contains(live, `">3</td>`) {
 		t.Errorf("the refreshed #live of a stale server shows current values:\n%s", live)
 	}
 }

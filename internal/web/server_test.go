@@ -465,7 +465,7 @@ func TestDetailOfEscapedName(t *testing.T) {
 		t.Fatalf("GET /workers/a%%2Fb%%20c = %d, want 200", status)
 	}
 	// The poller and the unit select must reach the same worker again.
-	for _, want := range []string{`<h2>a/b c</h2>`, `hx-get="/workers/a%2Fb%20c?server=multi"`, `hx-get="/workers/a%2Fb%20c"`} {
+	for _, want := range []string{`<h1>a/b c</h1>`, `hx-get="/workers/a%2Fb%20c?server=multi"`, `hx-get="/workers/a%2Fb%20c"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body lacks %q", want)
 		}
@@ -911,7 +911,7 @@ func TestOtherConfigCollector(t *testing.T) {
 	_, status, _ := strings.Cut(body, `<div id="status">`)
 	status, _, _ = strings.Cut(status, "</div>")
 	if !strings.Contains(status, `<span class="health" title="healthy / total instances">— instances</span>`) ||
-		!strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">3</td>`) {
+		!strings.Contains(body, `<td class="num" data-label="Busy">—</td>`) || strings.Contains(body, `">3</td>`) {
 		t.Errorf("the page shows current values of the other environment's collector:\n%s", body)
 	}
 
@@ -1005,7 +1005,7 @@ func TestOtherConfigHandOff(t *testing.T) {
 		"multi": {Interval: 2, Endpoints: []string{aSrv.URL, bSrv.URL}, Token: testToken},
 	}})
 	f.setEnvCheck(func(l store.Lease) bool { return l.ConfigPath == "/a/vartop/config.json" })
-	current := `<td class="num">5</td>` // the idle workers, shown only while current
+	current := `<td class="num" data-label="Idle">5</td>` // the idle workers, shown only while current
 
 	f.leaseConfig = "/b/vartop/config.json"
 	f.claim()
@@ -1114,7 +1114,7 @@ func TestActionRefusedWhenLeaseUnreadable(t *testing.T) {
 		t.Errorf("POST = %d %q, want 409 saying the lease cannot be read", resp.StatusCode, body)
 	}
 	noPatches(t, fa, fb)
-	if _, body := fetch(t, f.srv, "/?server=multi", false); !strings.Contains(body, `<td class="num">5</td>`) {
+	if _, body := fetch(t, f.srv, "/?server=multi", false); !strings.Contains(body, `<td class="num" data-label="Idle">5</td>`) {
 		t.Errorf("the page no longer shows the fresh snapshot:\n%s", body)
 	}
 }
@@ -1165,7 +1165,7 @@ func TestStaleBanner(t *testing.T) {
 		}
 	}
 	_, body := fetch(t, f.srv, "/?server=multi", false)
-	if !strings.Contains(body, ">orders<") || !strings.Contains(body, `<td class="num">—</td>`) || strings.Contains(body, `<td class="num">1</td>`) {
+	if !strings.Contains(body, ">orders<") || !strings.Contains(body, `<td class="num" data-label="Busy">—</td>`) || strings.Contains(body, `">1</td>`) {
 		t.Errorf("a stale dashboard should list orders with its current values as —:\n%s", body)
 	}
 	// Nor the health of the stale snapshot.
@@ -1223,7 +1223,7 @@ func TestTokenNeverInResponses(t *testing.T) {
 	srv, _ := newTestServer(t, aSrv, bSrv, dead)
 
 	_, grid := fetch(t, srv, "/grid", false)
-	if !strings.Contains(grid, `<small class="err">`) {
+	if !strings.Contains(grid, `<span class="err">`) {
 		t.Fatal("the dead unit's error is not rendered; the test would miss a token in it")
 	}
 

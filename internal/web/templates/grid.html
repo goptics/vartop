@@ -6,7 +6,7 @@
 <table class="grid">
   <thead><tr>
     <th>Worker</th>{{range $pods}}
-    <th{{if and .Err (not $.Stale)}} class="down"{{end}} title="{{.Tip}}">{{.Label}}{{if and .Err (not $.Stale)}}<small class="err">{{.Err}}</small>{{end}}</th>{{end}}
+    <th{{if and .Err (not $.Stale)}} class="down"{{end}} title="{{.Tip}}">{{.Label}}{{if and .Err (not $.Stale)}}<small class="err">unreachable</small>{{end}}</th>{{end}}
   </tr></thead>
   <tbody>{{range .Rows}}
   <tr>
@@ -15,9 +15,11 @@
   </tr>{{end}}
   </tbody>
 </table>
-</div>{{end}}
+</div>
+<ul class="units">{{range $pods}}<li><b>{{.Label}}</b> {{.Tip}}{{if and .Err (not $.Stale)}}: <span class="err">{{.Err}}</span>{{end}}</li>{{end}}</ul>{{end}}
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
 
-{{define "content"}}{{template "live" .}}{{end}}
+{{define "content"}}<h1 class="sr">{{.Noun.Cap}} grid</h1>
+{{template "live" .}}{{end}}

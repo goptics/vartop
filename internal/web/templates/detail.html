@@ -1,7 +1,7 @@
 {{define "live_body"}}{{with .Detail}}
 <div class="detail-head">
-  <h2>{{.Name}}</h2>
-  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{end}}
+  <h1>{{.Name}}</h1>
+  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{end}}
 </div>
 <section class="counters" aria-label="Counters">{{if $.Stale}}
   <div class="card"><h3>Submitted</h3><p class="big">—</p></div>
@@ -23,7 +23,7 @@
   <figcaption>Failed /s <span class="peak">peak {{tickLabel $peak}}/s</span>{{template "range_switch" (rangeSwitch $ "failed")}}</figcaption>
   {{template "history" $c}}
 </figure>
-<p class="pods">{{$.Noun.CapMany}} reporting: {{if $.Stale}}—{{else}}{{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}{{end}}</p>
+<p class="pods">{{$.Noun.CapMany}} reporting: {{if $.Stale}}—{{else}}{{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span> <small>({{$p.Tip}})</small>{{end}}{{end}}</p>
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}

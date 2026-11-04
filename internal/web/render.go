@@ -339,8 +339,8 @@ type sparkView struct {
 	Peak          float64
 }
 
-// sparkDot is a circle: a partial point (hollow) or a solid point that has no
-// neighbour to be joined to by a line.
+// sparkDot is a circle: a partial point (hollow) at either end of a stretch
+// of them, or a solid point that has no neighbour to be joined to by a line.
 type sparkDot struct{ X, Y, Class string }
 
 // sparkHit is an invisible column over one point (or a few, see minHit) whose
@@ -349,9 +349,10 @@ type sparkHit struct{ X, W, Title string }
 
 // sparkline lays pts, a series polled every interval, out in a w×h plot of
 // the window up to its newest point, each at its time (see chartArea): a
-// polyline per run, hollow circles for partial points, dots for isolated
-// ones, and hover targets on top. Points older than the window are not
-// drawn, nor counted in its peak.
+// polyline per run, hollow circles where a stretch of partial points starts
+// and ends (one down unit makes every point partial: a circle each would
+// hide the line), dots for isolated ones, and hover targets on top. Points
+// older than the window are not drawn, nor counted in its peak.
 func sparkline(pts []fleet.Point, window, interval time.Duration, w, h float64) sparkView {
 	a, pts := newChartArea(pts, window, interval, w, h)
 	v := sparkView{
@@ -364,9 +365,9 @@ func sparkline(pts []fleet.Point, window, interval time.Duration, w, h float64) 
 	}
 	for _, run := range a.runsOf(pts, v.Peak) {
 		v.Lines = append(v.Lines, joinRun(run))
-		for _, p := range run {
+		for i, p := range run {
 			switch {
-			case p.p.Partial:
+			case p.p.Partial && (i == 0 || i == len(run)-1 || !run[i-1].p.Partial || !run[i+1].p.Partial):
 				v.Dots = append(v.Dots, sparkDot{num(p.x), num(p.y), "dot partial"})
 			case len(run) == 1:
 				v.Dots = append(v.Dots, sparkDot{num(p.x), num(p.y), "dot"})
