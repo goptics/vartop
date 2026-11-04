@@ -128,6 +128,7 @@ var funcs = template.FuncMap{
 	"pathEscape":    url.PathEscape,
 	"pageURL":       pageURL,
 	"workerURL":     workerURL,
+	"domID":         fleet.DOMID,
 	"pathOf":        pathOf,
 	"sparkline":     sparkline,
 	"history":       history,

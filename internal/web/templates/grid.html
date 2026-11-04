@@ -10,7 +10,7 @@
   </tr></thead>
   <tbody>{{range .Rows}}
   <tr>
-    <th scope="row" class="name"><a href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></th>{{range $i, $c := .Cells}}
+    <th scope="row" class="name"><a id="link-{{domID .Name}}" href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></th>{{range $i, $c := .Cells}}
     <td{{if and (index $pods $i).Err (not $.Stale)}} class="down"{{end}}>{{if $.Stale}}—{{else if $c.Present}}<span class="status {{$c.Class}}">{{$c.Status}}</span> · {{$c.Busy}}/{{$c.Concurrency}} · {{$c.Pending}}{{else if $c.Unreached}}<span class="na">not reached</span>{{else}}—{{end}}</td>{{end}}
   </tr>{{end}}
   </tbody>

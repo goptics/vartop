@@ -1,13 +1,15 @@
 /* vartop web UI. Dark is Tokyo Night, light is Tokyo Night Day, chosen by
    prefers-color-scheme; the accent is varmq's logo teal (#44BF9E), a darker
-   shade of it on light for contrast. */
+   shade of it on light for contrast. Text tokens hold >= 4.5:1 (WCAG AA)
+   on both --bg and --panel; --subtle, and --ok/--warn on light, are pushed
+   past the stock palette for it. */
 :root {
   color-scheme: dark light;
   accent-color: var(--accent); /* the slider and checkboxes too */
   --bg: #1A1B26;
   --panel: #24283B;
   --fg: #C0CAF5;
-  --subtle: #565F89;
+  --subtle: #8A93BD;
   --accent: #44BF9E;
   --ok: #9ECE6A;
   --warn: #E0AF68;
@@ -19,10 +21,10 @@
     --bg: #E1E2E7;
     --panel: #F2F3F8;
     --fg: #343B58;
-    --subtle: #6C6E80;
+    --subtle: #5F6278;
     --accent: #1B6E5A;
-    --ok: #587539;
-    --warn: #8F5E15;
+    --ok: #4A6630;
+    --warn: #7E5212;
     --bad: #8C4351;
     --line: #C4C8DA;
   }

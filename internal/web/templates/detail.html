@@ -35,11 +35,11 @@
 {{if $.OneBalanced}}<p class="note">{{oneBalanced}}</p>
 {{else}}<section class="controls" aria-label="Controls">
   <h3>Concurrency <span class="sub">per {{$.Noun.One}}, on {{$.Scope}}</span></h3>
-  <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+  <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change delay:600ms" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
     {{template "label_field" $}}
     <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}">
-    <span class="sub">1 – {{.ConcurrencyMax}}, applied on release</span>
+    <span class="sub">1 – {{.ConcurrencyMax}}, applied once it stops moving</span>
   </form>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}

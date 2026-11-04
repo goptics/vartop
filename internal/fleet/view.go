@@ -188,6 +188,10 @@ func BalancerNote(latest *Snapshot) string {
 	return strings.Join(parts, " · ")
 }
 
+// DOMID is a worker's name as a DOM id: "w-" + hex(name), safe whatever the
+// name holds, and the same on every page and poll.
+func DOMID(name string) string { return "w-" + hex.EncodeToString([]byte(name)) }
+
 // BuildDashboard aggregates the newest snapshot into one row per worker and the
 // KPI cards, with sparklines over the 10 minutes up to the newest of snaps
 // (oldest first). pod "" merges every pod; otherwise only the one with that
@@ -205,7 +209,7 @@ func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) Dash
 		m := mergeWorker(pods, name)
 		v.Rows = append(v.Rows, RowView{
 			Name:        name,
-			ID:          "w-" + hex.EncodeToString([]byte(name)),
+			ID:          DOMID(name),
 			Status:      m.status,
 			Class:       m.class,
 			StatusTip:   strings.Join(m.statusTips, tipSep),

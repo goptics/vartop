@@ -458,7 +458,8 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 		`hx-post="/bulk/pause"`,
 		`hx-post="/bulk/resume"`,
 		`<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">`,
-		`<select name="server">`,
+		`<select name="server" id="pick-server">`, // ids let htmx keep focus across swaps
+		`<a id="link-w-6f7264657273" href=`,
 		"All pods (merged)",
 	} {
 		if !strings.Contains(body, want) {
@@ -534,7 +535,7 @@ func TestEveryFormCarriesServer(t *testing.T) {
 		for i, f := range forms {
 			f, _, _ = strings.Cut(f, "</form>")
 			// The server picker's select is the server.
-			if !strings.Contains(f, `<input type="hidden" name="server" value="dev">`) && !strings.Contains(f, `<select name="server">`) {
+			if !strings.Contains(f, `<input type="hidden" name="server" value="dev">`) && !strings.Contains(f, `<select name="server"`) {
 				t.Errorf("%s: form %d lacks the server:\n%s", set, i, f)
 			}
 		}
@@ -696,7 +697,7 @@ func TestDetailRenders(t *testing.T) {
 		`hx-confirm="Restart a/b c on all pods (dev)?"`,
 		`hx-post="/workers/a%2Fb%20c/concurrency"`,
 		`type="range"`, `max="64"`, `min="1"`, `name="n"`, `type="number"`,
-		`hx-trigger="change"`,
+		`hx-trigger="change delay:600ms"`, // keys fire change per step: one write per pause
 		`hx-sync="#page:replace"`,
 		`id="results"`,
 		`name="pod" value=""`,
@@ -807,7 +808,7 @@ func TestCopyFollowsNoun(t *testing.T) {
 			p.Noun = n
 			p.Dashboard.Rows[0].Concurrency = "4 ×2 " + many // fixture copy: a view model words this itself
 			check(t, "dashboard", run(t, "dashboard", "layout", p),
-				"<label>"+n.Cap()+` <select name="`+n.Param+`">`,
+				"<label>"+n.Cap()+` <select name="`+n.Param+`"`,
 				"All "+many+" (merged)",
 				">"+n.Cap()+" grid</a>",
 				`title="healthy / total `+many+`"`,

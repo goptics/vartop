@@ -36,7 +36,7 @@
   <tbody>{{range .Rows}}
   <tr id="{{.ID}}">
     <td class="sel"><input type="checkbox" id="sel-{{.ID}}" form="bulk" name="names" value="{{.Name}}" aria-label="Select {{.Name}}" hx-preserve></td>
-    <td class="name"><a href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></td>
+    <td class="name"><a id="link-{{.ID}}" href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></td>
     <td>{{if $.Stale}}—{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}{{end}}</td>
     <td>{{if $.Stale}}—{{else}}{{.Concurrency}}{{end}}</td>
     <td class="num">{{if or .Unknown $.Stale}}—{{else}}{{.Busy}}{{end}}</td>

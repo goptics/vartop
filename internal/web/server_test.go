@@ -202,7 +202,7 @@ func TestPagesRender(t *testing.T) {
 	// The grid shows every unit, so it offers no unit select.
 	t.Run("instance select", func(t *testing.T) {
 		for path, want := range map[string]bool{"/": true, "/workers/orders": true, "/grid": false, "/grid?server=b": false} {
-			if _, body := fetch(t, srv, path, false); strings.Contains(body, `<select name="instance">`) != want {
+			if _, body := fetch(t, srv, path, false); strings.Contains(body, `<select name="instance" id="pick-unit">`) != want {
 				t.Errorf("GET %s: instance select shown = %v, want %v", path, !want, want)
 			}
 		}
@@ -361,13 +361,13 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 	// (merged) there is a change.
 	merged := map[string]string{dash: "/?server=multi", detail: "/workers/orders?server=multi"}
 	for _, path := range []string{dash, detail} {
-		banner := `<p class="banner">Instance ` + label + ` is no longer reported — reload · <a href="` + merged[path] + `">All instances (merged)</a></p>`
+		banner := `<p class="banner">Instance ` + label + ` is no longer reported — reload · <a id="banner-merged" href="` + merged[path] + `">All instances (merged)</a></p>`
 		for _, hx := range []bool{true, false} { // a poll, a full load
 			status, body := fetch(t, srv, path, hx)
 			if status != http.StatusOK || !strings.Contains(body, banner) {
 				t.Errorf("GET %s (hx %v) = %d, want 200 with %q", path, hx, status, banner)
 			}
-			_, picker, _ := strings.Cut(body, `<select name="instance">`)
+			_, picker, _ := strings.Cut(body, `<select name="instance" id="pick-unit">`)
 			picker, _, _ = strings.Cut(picker, `</select>`)
 			if gone := `<option value="` + label + `" selected disabled>` + label + `</option>`; strings.Count(picker, " selected") != 1 || !strings.Contains(picker, gone) {
 				t.Errorf("GET %s (hx %v): picker %q, want only %q selected", path, hx, picker, gone)
@@ -500,7 +500,7 @@ func TestTwoTabsTwoServers(t *testing.T) {
 		}
 	}
 	_, body := fetch(t, f.srv, "/?server=west", false)
-	for _, want := range []string{`<option value="west" selected>`, `<select name="server">`, `name="server" value="west"`} {
+	for _, want := range []string{`<option value="west" selected>`, `<select name="server" id="pick-server">`, `name="server" value="west"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("west's page lacks %q", want)
 		}
@@ -613,7 +613,7 @@ func TestKubernetesPodParam(t *testing.T) {
 		t.Errorf("dashboard of pod b should show orders only:\n%s", body)
 	}
 	for _, want := range []string{
-		`<select name="pod">`,
+		`<select name="pod" id="pick-unit">`,
 		`<option value="b" selected`,
 		`<input type="hidden" name="pod" value="b">`,
 		`href="/workers/orders?pod=b&amp;server=multi"`,
@@ -676,7 +676,7 @@ func TestUnknownAndGoneLabels(t *testing.T) {
 
 		gone := "Instance " + label + " is no longer reported — reload"
 		_, body := fetch(t, f.srv, "/?server=multi&instance="+label, false)
-		if !strings.Contains(body, `<p class="banner">`+gone+` · <a href="/?server=multi">All instances (merged)</a>`) {
+		if !strings.Contains(body, `<p class="banner">`+gone+` · <a id="banner-merged" href="/?server=multi">All instances (merged)</a>`) {
 			t.Errorf("gone unit's page lacks the banner with the merged view:\n%s", body)
 		}
 		for _, c := range []struct {
