@@ -384,7 +384,7 @@ func sampleRows() []fleet.RowView {
 		},
 		{
 			Name: "<script>x</script>", ID: "w-3c7363", Status: "mixed", Class: "mixed",
-			Concurrency: "mixed 3–5", AbsentOn: 2,
+			StatusTip: "a: Running\nb: Paused", Concurrency: "mixed 3–5", AbsentOn: 2,
 		},
 	}
 }
@@ -455,10 +455,14 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 		`class="status active"`,
 		`class="status mixed"`,
 		"title=\"a: Running\nb: Running\"",
+		"<h1 class=\"sr\">Dashboard</h1>",
+		`data-label="Busy"`, // the phone layout's cell labels
+		">mixed</span><small class=\"split\">a: Running\nb: Paused</small>", // a mixed status's breakdown is text, not only a title
 		`hx-post="/bulk/pause"`,
 		`hx-post="/bulk/resume"`,
 		`<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">`,
-		`<select name="server">`,
+		`<select name="server" id="pick-server">`, // ids let htmx keep focus across swaps
+		`<a id="link-w-6f7264657273" href=`,
 		"All pods (merged)",
 	} {
 		if !strings.Contains(body, want) {
@@ -492,10 +496,10 @@ func TestUnknownRowShowsNoValues(t *testing.T) {
 
 	body := run(t, "dashboard", "layout", p)
 
-	if want := `<td>—</td>
-    <td class="num">—</td>
-    <td class="num">—</td>
-    <td class="num">—</td>`; !strings.Contains(body, want) {
+	if want := `">—</td>
+    <td class="num" data-label="Busy">—</td>
+    <td class="num" data-label="Idle">—</td>
+    <td class="num" data-label="Pending (max/pod)">—</td>`; !strings.Contains(body, want) {
 		t.Errorf("row lacks %q:\n%s", want, body)
 	}
 }
@@ -534,7 +538,7 @@ func TestEveryFormCarriesServer(t *testing.T) {
 		for i, f := range forms {
 			f, _, _ = strings.Cut(f, "</form>")
 			// The server picker's select is the server.
-			if !strings.Contains(f, `<input type="hidden" name="server" value="dev">`) && !strings.Contains(f, `<select name="server">`) {
+			if !strings.Contains(f, `<input type="hidden" name="server" value="dev">`) && !strings.Contains(f, `<select name="server"`) {
 				t.Errorf("%s: form %d lacks the server:\n%s", set, i, f)
 			}
 		}
@@ -623,7 +627,10 @@ func gridPage() Page {
 func TestGridRenders(t *testing.T) {
 	body := run(t, "grid", "layout", gridPage())
 	for _, want := range []string{
-		"connection refused", `class="down"`,
+		`class="down"`,
+		`<small class="err">unreachable</small></th>`,                     // the header stays short...
+		`<li><b>b</b> : <span class="err">connection refused</span></li>`, // ...the error is below
+		`<h1 class="sr">Pod grid</h1>`,
 		`class="status active"`, "2/4", `href="/workers/orders?server=dev"`,
 		`id="live"`,
 	} {
@@ -696,7 +703,7 @@ func TestDetailRenders(t *testing.T) {
 		`hx-confirm="Restart a/b c on all pods (dev)?"`,
 		`hx-post="/workers/a%2Fb%20c/concurrency"`,
 		`type="range"`, `max="64"`, `min="1"`, `name="n"`, `type="number"`,
-		`hx-trigger="change"`,
+		`hx-trigger="change delay:600ms"`, // keys fire change per step: one write per pause
 		`hx-sync="#page:replace"`,
 		`id="results"`,
 		`name="pod" value=""`,
@@ -807,7 +814,7 @@ func TestCopyFollowsNoun(t *testing.T) {
 			p.Noun = n
 			p.Dashboard.Rows[0].Concurrency = "4 ×2 " + many // fixture copy: a view model words this itself
 			check(t, "dashboard", run(t, "dashboard", "layout", p),
-				"<label>"+n.Cap()+` <select name="`+n.Param+`">`,
+				"<label>"+n.Cap()+` <select name="`+n.Param+`"`,
 				"All "+many+" (merged)",
 				">"+n.Cap()+" grid</a>",
 				`title="healthy / total `+many+`"`,
@@ -817,7 +824,8 @@ func TestCopyFollowsNoun(t *testing.T) {
 				"absent on 2 "+many+"<",
 				`<p class="sub">`+one+" × worker</p>",
 			)
-			if got := strings.Count(run(t, "dashboard", "layout", p), "Pending (max/"+one+")"); got != 2 {
+			body := run(t, "dashboard", "layout", p)
+			if got := strings.Count(body, "Pending (max/"+one+")") - strings.Count(body, `data-label="Pending (max/`+one+`)"`); got != 2 {
 				t.Errorf("Pending (max/%s) appears %d times, want in the card and the column header", one, got)
 			}
 
@@ -878,6 +886,25 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 		if !strings.Contains(strings.ToUpper(string(css)), strings.ToUpper(want)) {
 			t.Errorf("app.css lacks %q", want)
 		}
+	}
+}
+
+// One unit down for good makes every merged point partial: only the ends of
+// a partial stretch get a circle, so the line stays visible.
+func TestSparklineMarksPartialStretchEnds(t *testing.T) {
+	pts := series(viewT0, 5*time.Second, 10, 1)
+	for i := range pts {
+		pts[i].Partial = i >= 2 && i <= 7 || i == 9
+	}
+	v := sparkline(pts, fleet.TrendWindow, 5*time.Second, 120, 20)
+	var got []string
+	for _, d := range v.Dots {
+		got = append(got, d.X)
+	}
+	line := coords(t, v.Lines[0])
+	want := []string{num(line[2][0]), num(line[7][0]), num(line[9][0])}
+	if !slices.Equal(got, want) {
+		t.Errorf("partial dots at x %v, want %v: the stretch's ends and the lone one", got, want)
 	}
 }
 

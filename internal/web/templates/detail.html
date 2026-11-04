@@ -1,7 +1,7 @@
 {{define "live_body"}}{{with .Detail}}
 <div class="detail-head">
-  <h2>{{.Name}}</h2>
-  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{end}}
+  <h1>{{.Name}}</h1>
+  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{end}}
 </div>
 <section class="counters" aria-label="Counters">{{if $.Stale}}
   <div class="card"><h3>Submitted</h3><p class="big">—</p></div>
@@ -23,7 +23,7 @@
   <figcaption>Failed /s <span class="peak">peak {{tickLabel $peak}}/s</span>{{template "range_switch" (rangeSwitch $ "failed")}}</figcaption>
   {{template "history" $c}}
 </figure>
-<p class="pods">{{$.Noun.CapMany}} reporting: {{if $.Stale}}—{{else}}{{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span>{{end}}{{end}}</p>
+<p class="pods">{{$.Noun.CapMany}} reporting: {{if $.Stale}}—{{else}}{{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span> <small>({{$p.Tip}})</small>{{end}}{{end}}</p>
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
@@ -35,11 +35,11 @@
 {{if $.OneBalanced}}<p class="note">{{oneBalanced}}</p>
 {{else}}<section class="controls" aria-label="Controls">
   <h3>Concurrency <span class="sub">per {{$.Noun.One}}, on {{$.Scope}}</span></h3>
-  <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+  <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change delay:600ms" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
     {{template "label_field" $}}
     <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}">
-    <span class="sub">1 – {{.ConcurrencyMax}}, applied on release</span>
+    <span class="sub">1 – {{.ConcurrencyMax}}, applied once it stops moving</span>
   </form>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}

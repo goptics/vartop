@@ -85,8 +85,8 @@ type DayChart struct {
 
 // switchLink is one choice of a chart's span switch.
 type switchLink struct {
-	Text, URL string
-	Current   bool
+	ID, Text, URL string // ID keeps keyboard focus on the link across polls
+	Current       bool
 }
 
 // rangeSwitch is the 1h | 24h | … switch of the chart named chart
@@ -97,9 +97,10 @@ func rangeSwitch(p Page, chart string) []switchLink {
 	if chart == "failed" {
 		cur = p.Ranges.Failed
 	}
-	links := []switchLink{{Text: "1h", URL: withParam(p.SelfURL, chart, 0), Current: cur == 0}}
+	links := []switchLink{{ID: "span-" + chart + "-1h", Text: "1h", URL: withParam(p.SelfURL, chart, 0), Current: cur == 0}}
 	for _, span := range p.Spans {
-		links = append(links, switchLink{Text: spanParam(span), URL: withParam(p.SelfURL, chart, span), Current: cur == span})
+		text := spanParam(span)
+		links = append(links, switchLink{ID: "span-" + chart + "-" + text, Text: text, URL: withParam(p.SelfURL, chart, span), Current: cur == span})
 	}
 	return links
 }
