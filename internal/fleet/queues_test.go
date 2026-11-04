@@ -16,7 +16,7 @@ import (
 var sharedOrders = &fleettest.Queue{
 	Summary: `{"id":"redisq:ns:fifo:{orders}","counts":{"pending":3,"processing":1,"completed":10,"failed":2},"totals":{"submitted":16,"completed":10,"failed":2}}`,
 	Jobs: map[string][]string{
-		"failed": {`{"id":"order-42","state":"failed","payload":{"sku":"A1"},"finished_at":1762228801900,"attempts":2,"last_error":"out of stock"}`},
+		"failed": {`{"id":"order-42","state":"failed","payload":{"sku":"A1"},"finished_at":1762228801900,"attempts":2,"errors":[{"attempt":2,"at":1762228801900,"error":"out of stock"}]}`},
 	},
 }
 
@@ -93,7 +93,7 @@ func TestFetchJobsFallsBack(t *testing.T) {
 	gone.Mu.Unlock()
 
 	jobs, from, err := FetchJobs(context.Background(), g, "failed", 0, 50)
-	if err != nil || from != "b" || len(jobs) != 1 || jobs[0].LastError != "out of stock" {
+	if err != nil || from != "b" || len(jobs) != 1 || len(jobs[0].Errors) != 1 || jobs[0].Errors[0].Error != "out of stock" {
 		t.Fatalf("FetchJobs = %+v from %q, err %v", jobs, from, err)
 	}
 	calls := fb.Calls()

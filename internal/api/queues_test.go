@@ -12,7 +12,7 @@ import (
 const (
 	queuesBody = `[{"id":"redisq:ns:fifo:{orders}","counts":{"pending":3,"processing":1,"completed":10,"failed":2},"totals":{"submitted":16,"completed":10,"failed":2}},
 		{"id":"redisq:prio:{broken}","error":"redis: connection refused"}]`
-	jobsBody = `[{"id":"order-42","state":"failed","payload":{"sku":"A1","qty":12345678901234567890},"enqueued_at":1762228800000,"started_at":1762228801250,"finished_at":1762228801900,"attempts":2,"last_error":"out of stock"},
+	jobsBody = `[{"id":"order-42","state":"failed","payload":{"sku":"A1","qty":12345678901234567890},"enqueued_at":1762228800000,"started_at":1762228801250,"finished_at":1762228801900,"attempts":2,"errors":[{"attempt":1,"at":1762228801000,"error":"timeout"},{"attempt":2,"at":1762228801900,"error":"out of stock"}]},
 		{"id":"","state":"pending","payload":"plain","attempts":0}]`
 )
 
@@ -61,7 +61,7 @@ func TestListJobsEscapesQueueID(t *testing.T) {
 		t.Errorf("escaped path = %s, want %s", r.EscapedPath, want)
 	}
 	j := jobs[0]
-	if j.ID != "order-42" || j.Attempts != 2 || j.EnqueuedAt != 1762228800000 || j.FinishedAt != 1762228801900 || j.LastError != "out of stock" {
+	if j.ID != "order-42" || j.Attempts != 2 || j.EnqueuedAt != 1762228800000 || j.FinishedAt != 1762228801900 || len(j.Errors) != 2 || j.Errors[1] != (JobError{Attempt: 2, At: 1762228801900, Error: "out of stock"}) {
 		t.Errorf("job = %+v", j)
 	}
 	// The payload is kept as sent: no float64 rounding of big numbers.

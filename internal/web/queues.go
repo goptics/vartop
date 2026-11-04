@@ -55,14 +55,23 @@ type JobTab struct {
 }
 
 // JobRow is one job as the page shows it: times as local clock text and
-// RFC 3339 (empty when absent), the payload indented.
+// RFC 3339 (empty when absent), the payload indented. LastError is the text
+// of the last of Errors.
 type JobRow struct {
 	ID, LastError                      string
-	Attempts, N                        int // N: its position in the state, from 1
+	Errors                             []ErrorRow // oldest first
+	Attempts, N                        int        // N: its position in the state, from 1
 	Enqueued, Started, Finished        string
 	EnqueuedISO, StartedISO, FinishISO string
 	Payload                            string
 	Cut                                bool // Payload holds only its first maxPayload bytes
+}
+
+// ErrorRow is one failed attempt of a job as the page shows it.
+type ErrorRow struct {
+	Attempt   int
+	At, AtISO string
+	Error     string
 }
 
 // queuesURL is the queues page of server.
@@ -217,7 +226,12 @@ func stateCount(c *api.QueueCounts, state string) int {
 }
 
 func jobRow(j api.Job, n int) JobRow {
-	row := JobRow{ID: j.ID, LastError: j.LastError, Attempts: j.Attempts, N: n}
+	row := JobRow{ID: j.ID, Attempts: j.Attempts, N: n}
+	for _, e := range j.Errors {
+		er := ErrorRow{Attempt: e.Attempt, Error: e.Error}
+		er.At, er.AtISO = msTime(e.At)
+		row.Errors, row.LastError = append(row.Errors, er), e.Error
+	}
 	row.Enqueued, row.EnqueuedISO = msTime(j.EnqueuedAt)
 	row.Started, row.StartedISO = msTime(j.StartedAt)
 	row.Finished, row.FinishISO = msTime(j.FinishedAt)

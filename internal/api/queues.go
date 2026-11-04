@@ -49,7 +49,14 @@ type Job struct {
 	StartedAt  int64           `json:"started_at,omitempty"`
 	FinishedAt int64           `json:"finished_at,omitempty"`
 	Attempts   int             `json:"attempts"`
-	LastError  string          `json:"last_error,omitempty"`
+	Errors     []JobError      `json:"errors,omitempty"` // oldest first; the last is the final error
+}
+
+// JobError is one failed attempt of a job (spec JobError).
+type JobError struct {
+	Attempt int    `json:"attempt"`
+	At      int64  `json:"at"` // Unix ms
+	Error   string `json:"error"`
 }
 
 // unsupported reports whether err says the server does not serve the route:

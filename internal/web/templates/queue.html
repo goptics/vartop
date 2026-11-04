@@ -13,7 +13,7 @@
       <dt>Enqueued</dt><dd>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}—{{end}}</dd>
       <dt>Started</dt><dd>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}—{{end}}</dd>
       <dt>Finished</dt><dd>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}—{{end}}</dd>
-      {{with .LastError}}<dt>Last error</dt><dd class="err">{{.}}</dd>{{end}}
+      {{with .Errors}}<dt>Errors</dt><dd><ol class="errors">{{range .}}<li>Attempt {{.Attempt}}{{if .At}} · <time datetime="{{.AtISO}}">{{.At}}</time>{{end}}: <span class="err">{{.Error}}</span></li>{{end}}</ol></dd>{{end}}
     </dl>
     <h3>Payload{{if .Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h3>
     <pre class="payload" tabindex="0">{{or .Payload "null"}}</pre>

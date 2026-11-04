@@ -179,7 +179,9 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .jobs { margin: 12px 0; padding-left: 3em; }
 .jobs li { border-bottom: 1px solid var(--line); }
 .jobs summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
-.jobs summary .err { display: inline; margin: 0; }
+.jobs summary .err, .errors .err { display: inline; margin: 0; }
+.jobs .errors { margin: 0; padding-left: 1.2em; }
+.jobs .errors li { border: 0; }
 .jobs dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0; }
 .jobs dt { color: var(--subtle); }
 .jobs dd { margin: 0; overflow-wrap: anywhere; }

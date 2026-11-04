@@ -17,7 +17,7 @@ func tenantQueue() *fleettest.Queue {
 		Summary: `{"id":"redisq:fifo:{tenant/orders}","counts":{"pending":2,"processing":0,"completed":7,"failed":1},"totals":{"submitted":10,"completed":7,"failed":1}}`,
 		Jobs: map[string][]string{
 			"pending": {`{"id":"","state":"pending","payload":{"n":1},"enqueued_at":1762228800000,"attempts":0}`, `{"id":"","state":"pending","payload":{"n":2},"attempts":0}`},
-			"failed":  {`{"id":"order-42","state":"failed","payload":{"sku":"<A1>"},"enqueued_at":1762228800000,"started_at":1762228801250,"finished_at":1762228801900,"attempts":2,"last_error":"out of stock"}`},
+			"failed":  {`{"id":"order-42","state":"failed","payload":{"sku":"<A1>"},"enqueued_at":1762228800000,"started_at":1762228801250,"finished_at":1762228801900,"attempts":2,"errors":[{"attempt":1,"at":1762228801000,"error":"timeout"},{"attempt":2,"at":1762228801900,"error":"out of stock"}]}`},
 		},
 	}
 }
@@ -73,7 +73,10 @@ func TestQueueJobsPage(t *testing.T) {
 	}
 	for _, want := range []string{
 		"<h2>" + tenantID + "</h2>",
-		"order-42", "out of stock", "2 attempts",
+		"order-42", "2 attempts",
+		`<span class="err">out of stock</span></summary>`,    // summary: the final error
+		`Attempt 1 · <time datetime="2025-11-04T04:00:01Z">`, // errors oldest first
+		`: <span class="err">timeout</span></li><li>Attempt 2 · <time datetime="2025-11-04T04:00:01.9Z">`,
 		"&#34;sku&#34;: &#34;", // indented payload
 		`<time datetime="2025-11-04T04:00:01.9Z">`,
 		`aria-current="page">failed <span class="count">1</span>`,
