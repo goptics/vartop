@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
@@ -76,7 +77,8 @@ func TestQueueJobsPage(t *testing.T) {
 	for _, want := range []string{
 		`<h1 class="qid">` + tenantID + "</h1>",
 		"order-42", "2 attempts",
-		`<span class="err">out of stock</span>`,                                     // summary: the final error
+		`<span class="preview err">out of stock</span>`, // list line: the final error
+		"1–1 of 1", // list range and state count
 		`<span class="what">Attempt 1</span><time datetime="2025-11-04T04:00:01Z">`, // errors oldest first
 		`<code class="err">timeout</code></li><li><span class="what">Attempt 2</span><time datetime="2025-11-04T04:00:01.9Z">`,
 		"&#34;sku&#34;: &#34;", // indented payload
@@ -96,7 +98,7 @@ func TestQueueJobsPage(t *testing.T) {
 
 	// pending (2), one per page: a next link, no previous; the second, last page the other way.
 	_, body = fetch(t, srv, page+"?server=multi&limit=1", false)
-	if !strings.Contains(body, "(no ID yet)") || !strings.Contains(body, `rel="next"`) || strings.Contains(body, `rel="prev"`) {
+	if !strings.Contains(body, "(no ID yet)") || !strings.Contains(body, `<span class="preview">{&#34;n&#34;:1}</span>`) || !strings.Contains(body, `rel="next"`) || strings.Contains(body, `rel="prev"`) {
 		t.Errorf("first pending page:\n%s", body)
 	}
 	_, body = fetch(t, srv, page+"?server=multi&limit=1&offset=1", false)
@@ -118,5 +120,18 @@ func TestQueuesUnsupported(t *testing.T) {
 	}
 	if status, body := fetch(t, srv, "/", false); status != http.StatusOK || !strings.Contains(body, "orders") {
 		t.Errorf("GET / = %d", status)
+	}
+}
+
+func TestShortTime(t *testing.T) {
+	now := time.Date(2026, 11, 5, 15, 0, 0, 0, time.Local)
+	for in, want := range map[time.Time]string{
+		now.Add(-2 * time.Hour):                         "13:00:00",
+		time.Date(2026, 1, 2, 9, 30, 0, 0, time.Local):  "Jan 2 09:30",
+		time.Date(2025, 11, 5, 15, 0, 0, 0, time.Local): "2025-11-05", // same day, last year
+	} {
+		if got := shortTime(in, now); got != want {
+			t.Errorf("shortTime(%v) = %q, want %q", in, got, want)
+		}
 	}
 }

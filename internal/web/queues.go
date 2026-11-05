@@ -24,6 +24,8 @@ const (
 	// maxPayload is the most of a payload a job page shows.
 	// ponytail: cut, not paged; a payload viewer if large ones matter.
 	maxPayload = 64 << 10
+	// maxPreview is the most of a payload or error a job's list line shows.
+	maxPreview = 160
 )
 
 // queueConfigChangedMsg is the notice of a server whose newest snapshot was
@@ -43,9 +45,13 @@ type JobsView struct {
 	From   string
 	Offset int
 	Limit  int
+	Total  int64 // the count of State, -1: not known
 	// Prev and Next are the URLs of the pages around this one, "" at an end.
 	Prev, Next string
 }
+
+// Last is the position of the page's last job, from 1.
+func (v *JobsView) Last() int { return v.Offset + len(v.Jobs) }
 
 // JobTab is the link to one Job State of a queue, with its count now (-1:
 // not known).
@@ -58,9 +64,12 @@ type JobTab struct {
 
 // JobRow is one job as the page shows it: times as local clock text and
 // RFC 3339 (empty when absent), the payload indented. LastError is the text
-// of the last of Errors.
+// of the last of Errors. When is its latest time, short; WhenISO and
+// WhenFull the same time in full; Preview its list line: LastError, else the
+// payload on one line, cut.
 type JobRow struct {
 	ID, LastError                      string
+	When, WhenISO, WhenFull, Preview   string
 	Errors                             []ErrorRow // oldest first
 	Attempts, N                        int        // N: its position in the state, from 1
 	Enqueued, Started, Finished        string
@@ -198,7 +207,7 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 		p.Banner = g.ID + ": " + err.Error()
 		return v
 	}
-	v.From = from
+	v.From, v.Total = from, stateCount(g.Counts, v.State)
 	for i, j := range jobs {
 		v.Jobs = append(v.Jobs, jobRow(j, v.Offset+i+1))
 	}
@@ -239,6 +248,26 @@ func jobRow(j contract.JobRecord, n int) JobRow {
 	row.Enqueued, row.EnqueuedISO = msTime(j.EnqueuedAt)
 	row.Started, row.StartedISO = msTime(j.StartedAt)
 	row.Finished, row.FinishISO = msTime(j.FinishedAt)
+	for _, t := range []struct {
+		what string
+		ms   int64
+	}{{"finished", j.FinishedAt}, {"started", j.StartedAt}, {"enqueued", j.EnqueuedAt}} {
+		if t.ms != 0 {
+			full, iso := msTime(t.ms)
+			row.When, row.WhenISO, row.WhenFull = shortTime(time.UnixMilli(t.ms), time.Now()), iso, t.what+" "+full
+			break
+		}
+	}
+	row.Preview = row.LastError
+	if row.Preview == "" {
+		var one bytes.Buffer
+		if json.Compact(&one, j.Payload) == nil {
+			row.Preview = one.String()
+		}
+	}
+	if r := []rune(row.Preview); len(r) > maxPreview {
+		row.Preview = string(r[:maxPreview]) + "…"
+	}
 	payload := []byte(j.Payload)
 	var buf bytes.Buffer
 	if json.Indent(&buf, payload, "", "  ") == nil {
@@ -249,6 +278,19 @@ func jobRow(j contract.JobRecord, n int) JobRow {
 	}
 	row.Payload = string(payload)
 	return row
+}
+
+// shortTime is t as the list shows it: the clock today, the day and clock
+// this year, else the date.
+func shortTime(t, now time.Time) string {
+	t, now = t.Local(), now.Local()
+	switch {
+	case t.YearDay() == now.YearDay() && t.Year() == now.Year():
+		return t.Format("15:04:05")
+	case t.Year() == now.Year():
+		return t.Format("Jan 2 15:04")
+	}
+	return t.Format("2006-01-02")
 }
 
 // msTime is Unix ms as local clock text and as RFC 3339; both "" for 0

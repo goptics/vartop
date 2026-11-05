@@ -4,15 +4,17 @@
   <p class="sub">Reported by {{range .Queue.On}}<span class="chip">{{.}}</span> {{end}}</p>
 </header>
 <nav class="states" aria-label="Job state">{{range .Tabs}}<a href="{{.URL}}" class="state-{{.State}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.State}}</span>{{if ge .Count 0}}<span class="count">{{.Count}}</span>{{end}}</a>{{end}}</nav>
-{{if .Jobs}}<ol class="jobs" role="list" start="{{(index .Jobs 0).N}}" aria-label="{{.State}} jobs">{{range .Jobs}}
+{{if .Jobs}}<section class="joblist" aria-label="{{.State}} jobs">
+<p class="listhead"><span><span class="st">{{.State}}</span> jobs</span><span>{{(index .Jobs 0).N}}–{{.Last}}{{if ge .Total 0}} of {{.Total}}{{end}}</span></p>
+<ol class="jobs" role="list" start="{{(index .Jobs 0).N}}">{{range .Jobs}}
   <li class="job state-{{$state}}"><details>
     <summary>
       <span class="dot" aria-hidden="true"></span>
       {{with .ID}}<span class="id">{{.}}</span>{{else}}<span class="id none">(no ID yet)</span>{{end}}
-      <span class="pill">{{.Attempts}} attempt{{if ne .Attempts 1}}s{{end}}</span>
-      <span class="when">{{with .Finished}}finished {{.}}{{else}}{{with .Started}}started {{.}}{{else}}{{with .Enqueued}}enqueued {{.}}{{end}}{{end}}{{end}}</span>
-      <span class="n">#{{.N}}</span>
-      {{with .LastError}}<span class="err">{{.}}</span>{{end}}
+      {{if .When}}<time class="when" datetime="{{.WhenISO}}" title="{{.WhenFull}}">{{.When}}</time>{{end}}
+      <span class="chev" aria-hidden="true"></span>
+      {{if .Preview}}<span class="preview{{if .LastError}} err{{end}}">{{.Preview}}</span>{{end}}
+      {{if .Attempts}}<span class="att">{{.Attempts}} attempt{{if ne .Attempts 1}}s{{end}}</span>{{end}}
     </summary>
     <div class="job-body">
       <section aria-label="Times">
@@ -31,7 +33,7 @@
       </section>
     </div>
   </details></li>{{end}}
-</ol>{{else if not $.Banner}}<p class="empty">No {{.State}} jobs{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
+</ol></section>{{else if not $.Banner}}<p class="empty">No {{.State}} jobs{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
 {{if or .Prev .Next}}<nav class="pager" aria-label="Pages">{{with .Prev}}<a href="{{.}}" rel="prev">← Previous</a>{{end}}{{with .Next}}<a href="{{.}}" rel="next">Next →</a>{{end}}</nav>{{end}}
 {{with .From}}<p class="pods">Read from {{.}}</p>{{end}}
 {{end}}{{end}}
