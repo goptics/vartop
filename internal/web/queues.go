@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/goptics/varmq/contract"
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/fleet"
 )
@@ -36,7 +37,7 @@ func queueConfigChangedMsg(server string) string {
 // read from the unit From.
 type JobsView struct {
 	Queue  fleet.QueueGroup
-	State  string
+	State  contract.JobState
 	Tabs   []JobTab
 	Jobs   []JobRow
 	From   string
@@ -49,9 +50,10 @@ type JobsView struct {
 // JobTab is the link to one Job State of a queue, with its count now (-1:
 // not known).
 type JobTab struct {
-	State, URL string
-	Count      int
-	Current    bool
+	State   contract.JobState
+	URL     string
+	Count   int64
+	Current bool
 }
 
 // JobRow is one job as the page shows it: times as local clock text and
@@ -79,13 +81,13 @@ func queuesURL(server string) string { return pageURL("/queues", server, "", "")
 
 // jobsURL is the job page of queue id on server, in state, from offset.
 // The defaults are left out.
-func jobsURL(id, server, state string, offset, limit int) string {
+func jobsURL(id, server string, state contract.JobState, offset, limit int) string {
 	q := url.Values{}
 	if server != "" {
 		q.Set("server", server)
 	}
 	if state != "" && state != api.JobStates[0] {
-		q.Set("state", state)
+		q.Set("state", string(state))
 	}
 	if offset > 0 {
 		q.Set("offset", strconv.Itoa(offset))
@@ -174,7 +176,7 @@ func (h *handler) queue(w http.ResponseWriter, r *http.Request) {
 // bad values give way to the defaults). A read that fails leaves the list
 // empty and puts the error in p's banner.
 func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
-	v := &JobsView{Queue: g, State: r.FormValue("state"), Limit: defaultJobLimit}
+	v := &JobsView{Queue: g, State: contract.JobState(r.FormValue("state")), Limit: defaultJobLimit}
 	if !slices.Contains(api.JobStates, v.State) {
 		v.State = api.JobStates[0]
 	}
@@ -210,22 +212,22 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 }
 
 // stateCount is c's count of state, -1 without counts.
-func stateCount(c *api.QueueCounts, state string) int {
+func stateCount(c *contract.JobCounts, state contract.JobState) int64 {
 	if c == nil {
 		return -1
 	}
 	switch state {
-	case "pending":
+	case contract.JobPending:
 		return c.Pending
-	case "processing":
+	case contract.JobProcessing:
 		return c.Processing
-	case "completed":
+	case contract.JobCompleted:
 		return c.Completed
 	}
 	return c.Failed
 }
 
-func jobRow(j api.Job, n int) JobRow {
+func jobRow(j contract.JobRecord, n int) JobRow {
 	row := JobRow{ID: j.ID, Attempts: j.Attempts, N: n}
 	for _, e := range j.Errors {
 		er := ErrorRow{Attempt: e.Attempt, Error: e.Error}

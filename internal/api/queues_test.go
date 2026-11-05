@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/goptics/varmq/contract"
 )
 
 // Spec-shaped fixtures (varmq spec/openapi.yaml 1.0.0).
@@ -52,7 +54,7 @@ func TestListQueuesUnsupported(t *testing.T) {
 // The Queue ID is one escaped path segment: '{', '}' and '/' escaped, ':' kept.
 func TestListJobsEscapesQueueID(t *testing.T) {
 	srv, reqs := recordingServer(t, http.StatusOK, nil, jobsBody)
-	jobs, ok, err := NewClient(srv.URL, "").ListJobs(context.Background(), "redisq:ns:fifo:{a/b}", "failed", 50, 25)
+	jobs, ok, err := NewClient(srv.URL, "").ListJobs(context.Background(), "redisq:ns:fifo:{a/b}", contract.JobFailed, 50, 25)
 	if err != nil || !ok {
 		t.Fatalf("ListJobs = ok %v, err %v", ok, err)
 	}
@@ -61,7 +63,7 @@ func TestListJobsEscapesQueueID(t *testing.T) {
 		t.Errorf("escaped path = %s, want %s", r.EscapedPath, want)
 	}
 	j := jobs[0]
-	if j.ID != "order-42" || j.Attempts != 2 || j.EnqueuedAt != 1762228800000 || j.FinishedAt != 1762228801900 || len(j.Errors) != 2 || j.Errors[1] != (JobError{Attempt: 2, At: 1762228801900, Error: "out of stock"}) {
+	if j.ID != "order-42" || j.Attempts != 2 || j.EnqueuedAt != 1762228800000 || j.FinishedAt != 1762228801900 || len(j.Errors) != 2 || j.Errors[1] != (contract.JobError{Attempt: 2, At: 1762228801900, Error: "out of stock"}) {
 		t.Errorf("job = %+v", j)
 	}
 	// The payload is kept as sent: no float64 rounding of big numbers.
@@ -80,7 +82,7 @@ func TestListJobsQuery(t *testing.T) {
 		_, _ = w.Write([]byte("[]"))
 	}))
 	t.Cleanup(srv.Close)
-	if _, _, err := NewClient(srv.URL, "").ListJobs(context.Background(), "q", "pending", 0, 50); err != nil {
+	if _, _, err := NewClient(srv.URL, "").ListJobs(context.Background(), "q", contract.JobPending, 0, 50); err != nil {
 		t.Fatal(err)
 	}
 	if got != "limit=50&offset=0&state=pending" {
@@ -91,7 +93,7 @@ func TestListJobsQuery(t *testing.T) {
 // A 404 on jobs is "this instance does not have the queue": not ok, no error.
 func TestListJobsNotFound(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusNotFound, nil, `{"error":"queue not found"}`)
-	jobs, ok, err := NewClient(srv.URL, "").ListJobs(context.Background(), "q", "pending", 0, 50)
+	jobs, ok, err := NewClient(srv.URL, "").ListJobs(context.Background(), "q", contract.JobPending, 0, 50)
 	if err != nil || ok || jobs != nil {
 		t.Errorf("ListJobs = %v, ok %v, err %v", jobs, ok, err)
 	}

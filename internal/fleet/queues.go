@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/goptics/varmq/contract"
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
 )
@@ -104,7 +105,7 @@ func (v QueuesView) Group(id string) (QueueGroup, bool) {
 // units that has it: any one does, all read the same storage. A unit that
 // fails or no longer has the queue gives way to the next. It returns the
 // label of the unit that answered, and the last error when none did.
-func FetchJobs(ctx context.Context, g QueueGroup, state string, offset, limit int) ([]api.Job, string, error) {
+func FetchJobs(ctx context.Context, g QueueGroup, state contract.JobState, offset, limit int) ([]contract.JobRecord, string, error) {
 	var lastErr error
 	for i, c := range g.Clients {
 		jobs, ok, err := c.ListJobs(ctx, g.ID, state, offset, limit)

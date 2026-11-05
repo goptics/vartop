@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goptics/varmq/contract"
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
@@ -61,7 +62,7 @@ func TestGroupQueuesSharedQueue(t *testing.T) {
 // A copy that read the storage wins over an error copy, whichever came first.
 func TestGroupQueuesPrefersReadCopy(t *testing.T) {
 	bad := api.QueueSummary{ID: "q", Err: "connection lost"}
-	good := api.QueueSummary{ID: "q", Counts: &api.QueueCounts{Pending: 1}}
+	good := api.QueueSummary{ID: "q", Counts: &contract.JobCounts{Pending: 1}}
 	v := GroupQueues([]UnitQueues{
 		{Label: "a", Queues: []api.QueueSummary{bad}},
 		{Label: "b", Queues: []api.QueueSummary{good}},
@@ -92,7 +93,7 @@ func TestFetchJobsFallsBack(t *testing.T) {
 	gone.Queues = map[string]*fleettest.Queue{} // a no longer binds it
 	gone.Mu.Unlock()
 
-	jobs, from, err := FetchJobs(context.Background(), g, "failed", 0, 50)
+	jobs, from, err := FetchJobs(context.Background(), g, contract.JobFailed, 0, 50)
 	if err != nil || from != "b" || len(jobs) != 1 || len(jobs[0].Errors) != 1 || jobs[0].Errors[0].Error != "out of stock" {
 		t.Fatalf("FetchJobs = %+v from %q, err %v", jobs, from, err)
 	}
@@ -104,7 +105,7 @@ func TestFetchJobsFallsBack(t *testing.T) {
 	fb.Mu.Lock()
 	fb.Queues = map[string]*fleettest.Queue{}
 	fb.Mu.Unlock()
-	if _, _, err := FetchJobs(context.Background(), g, "failed", 0, 50); err == nil {
+	if _, _, err := FetchJobs(context.Background(), g, contract.JobFailed, 0, 50); err == nil {
 		t.Error("no unit has it: no error")
 	}
 }
