@@ -123,20 +123,20 @@ func FetchJobs(ctx context.Context, g QueueGroup, state contract.JobState, offse
 }
 
 // UnitLabel labels the client of an endpoint of latest for the queue pages:
-// the unit whose instance answered, else the unit at that endpoint, else
-// the endpoint's host.
+// the unit keyed by that endpoint (instances that share a name are keyed so),
+// else the unit whose instance answered, else the endpoint's host.
 func UnitLabel(latest *Snapshot) func(*api.Client, string) string {
 	return func(c *api.Client, instance string) string {
 		ep := c.PrimaryEndpoint()
-		var byKey string
+		var byInstance string
 		for _, p := range latest.Pods {
-			if instance != "" && p.Instance == instance {
+			if p.Key == ep {
 				return p.Label
 			}
-			if p.Key == ep {
-				byKey = p.Label
+			if instance != "" && p.Instance == instance && byInstance == "" {
+				byInstance = p.Label
 			}
 		}
-		return cmp.Or(byKey, config.ShortOrigin(ep))
+		return cmp.Or(byInstance, config.ShortOrigin(ep))
 	}
 }

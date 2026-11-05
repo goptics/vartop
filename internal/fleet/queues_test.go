@@ -109,3 +109,24 @@ func TestFetchJobsFallsBack(t *testing.T) {
 		t.Error("no unit has it: no error")
 	}
 }
+
+// UnitLabel: two direct units whose instances share a name (one host) keep
+// their own labels; a balanced unit is found by the instance that answered.
+func TestUnitLabel(t *testing.T) {
+	latest := &Snapshot{Pods: []PodSnapshot{
+		{Key: "http://h:1/api", Instance: "host", Label: "instance-1"},
+		{Key: "http://h:2/api", Instance: "host", Label: "instance-2"},
+		{Key: "#pod-a", Instance: "pod-a", Label: "instance-3"},
+	}}
+	label := UnitLabel(latest)
+	for _, c := range []struct{ ep, instance, want string }{
+		{"http://h:2/api", "host", "instance-2"},
+		{"http://h:1/api", "host", "instance-1"},
+		{"http://svc/api", "pod-a", "instance-3"},
+		{"http://other:9/api", "", "other"},
+	} {
+		if got := label(api.NewClient(c.ep, ""), c.instance); got != c.want {
+			t.Errorf("UnitLabel(%s, %q) = %q, want %q", c.ep, c.instance, got, c.want)
+		}
+	}
+}
