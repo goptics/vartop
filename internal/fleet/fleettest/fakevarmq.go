@@ -1,7 +1,9 @@
 package fleettest
 
 import (
+	"cmp"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -36,7 +38,10 @@ type Varmq struct {
 	Mu sync.Mutex
 	// Workers by name. A nil entry is listed by GET /workers but answers
 	// 404 everywhere else: a worker removed between list and get.
-	Workers  map[string]*Worker
+	Workers map[string]*Worker
+	// Queues by Queue ID, served by GET /queues and /queues/{id}/jobs. Nil:
+	// those routes answer the router's plain-text 404, as an older varmq.
+	Queues   map[string]*Queue
 	received []string // "METHOD escaped-path" of every request received
 
 	listInFlight, maxListInFlight int // concurrent GET /workers requests
@@ -56,6 +61,8 @@ func NewVarmq(t *testing.T, instance string, workers map[string]*Worker) (*Varmq
 	mux.HandleFunc("GET /workers/{name}", f.get)
 	mux.HandleFunc("PATCH /workers/{name}/actions/{action}", f.action)
 	mux.HandleFunc("PATCH /workers/{name}/config/concurrency/{n}", f.concurrency)
+	mux.HandleFunc("GET /queues", f.queues)
+	mux.HandleFunc("GET /queues/{id}/jobs", f.jobs)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isList := r.Method == http.MethodGet && r.URL.Path == "/workers"
@@ -234,6 +241,55 @@ func (f *Varmq) mutate(w http.ResponseWriter, name string, change func(*Worker) 
 }
 
 // fakeSummary is the GET /workers entry for a worker; a nil worker has only a name.
+// Queue is one queue as a Varmq serves it, as spec-shaped JSON.
+type Queue struct {
+	Summary string              // its GET /queues entry, a QueueSummary object
+	Jobs    map[string][]string // Job objects by Job State, in the order served
+}
+
+func (f *Varmq) queues(w http.ResponseWriter, _ *http.Request) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	if f.Queues == nil {
+		http.NotFound(w, nil)
+		return
+	}
+	ids := slices.Sorted(maps.Keys(f.Queues))
+	out := make([]json.RawMessage, len(ids))
+	for i, id := range ids {
+		out[i] = json.RawMessage(f.Queues[id].Summary)
+	}
+	writeFakeJSON(w, http.StatusOK, out)
+}
+
+func (f *Varmq) jobs(w http.ResponseWriter, r *http.Request) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	if f.Queues == nil {
+		http.NotFound(w, nil)
+		return
+	}
+	q := f.Queues[r.PathValue("id")]
+	if q == nil {
+		writeFakeError(w, http.StatusNotFound, "queue not found")
+		return
+	}
+	state := r.URL.Query().Get("state")
+	offset, err1 := strconv.Atoi(cmp.Or(r.URL.Query().Get("offset"), "0"))
+	limit, err2 := strconv.Atoi(cmp.Or(r.URL.Query().Get("limit"), "50"))
+	if !slices.Contains([]string{"pending", "processing", "completed", "failed"}, state) || err1 != nil || err2 != nil || offset < 0 || limit < 1 || limit > 1000 {
+		writeFakeError(w, http.StatusBadRequest, "invalid state, offset or limit")
+		return
+	}
+	all := q.Jobs[state]
+	page := all[min(offset, len(all)):min(offset+limit, len(all))]
+	out := make([]json.RawMessage, len(page))
+	for i, j := range page {
+		out[i] = json.RawMessage(j)
+	}
+	writeFakeJSON(w, http.StatusOK, out)
+}
+
 func fakeSummary(name string, fw *Worker) map[string]any {
 	if fw == nil {
 		fw = &Worker{}

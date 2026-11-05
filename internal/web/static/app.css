@@ -15,6 +15,7 @@
   --warn: #E0AF68;
   --bad: #F7768E;
   --line: #2F334D;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -189,3 +190,97 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .results .failed { border-color: var(--bad); }
 .results .failed .outcome { color: var(--bad); }
 .results .pod { font-weight: 600; margin-right: 8px; }
+
+/* queues and jobs */
+.queues .on { white-space: normal; color: var(--subtle); }
+.queues .failed { color: var(--bad); }
+.queues .name { overflow-wrap: break-word; } /* break a Queue ID only when it cannot fit whole */
+
+/* phone: each queue row stacks, its numbers labelled, as .workers */
+@media (max-width: 640px) {
+  .queues thead { position: absolute; left: -9999px; }
+  .queues tr { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .queues tbody tr:last-child { border-bottom: 0; }
+  .queues th, .queues td { padding: 0; border: 0; background: none; white-space: normal; text-align: left; }
+  .queues .name, .queues .on, .queues td[colspan] { grid-column: 1 / -1; min-width: 0; }
+  .queues td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: .75rem; }
+}
+
+/* job page: state tabs as count cards, each job a card */
+.qhead { margin: 8px 0 14px; }
+.qid { font-family: var(--mono); font-size: 1.25rem; }
+.qhead .sub { margin: 6px 0 0; }
+.chip { display: inline-block; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--fg); font-size: .8rem; }
+/* the tabs stay in view while the list scrolls */
+.states { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0 0 8px; padding: 8px 0; background: var(--bg); }
+.states a { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--subtle); text-decoration: none; }
+.states a:hover { border-color: var(--subtle); }
+.states a[aria-current] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); color: var(--fg); }
+.states .label { display: flex; align-items: center; gap: 6px; font-size: .8rem; text-transform: capitalize; }
+.states .count { color: var(--fg); font-size: 1.3rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dot, .states .label::before { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); }
+.states .label::before { content: ""; }
+.state-processing .dot, .states .state-processing .label::before { background: var(--warn); }
+.state-completed .dot, .states .state-completed .label::before { background: var(--ok); }
+.state-failed .dot, .states .state-failed .label::before { background: var(--bad); }
+/* phone: one compact row, so the sticky bar stays short; state color as a top edge */
+@media (max-width: 480px) {
+  .states { gap: 6px; }
+  .states a { padding: 5px 8px; border-top-width: 3px; }
+  .states .label { font-size: .72rem; }
+  .states .label::before { display: none; }
+  .states .count { font-size: 1rem; }
+  .states .state-pending { border-top-color: var(--subtle); }
+  .states .state-processing { border-top-color: var(--warn); }
+  .states .state-completed { border-top-color: var(--ok); }
+  .states .state-failed { border-top-color: var(--bad); }
+}
+
+/* job list: one panel, a two-line row per job */
+.joblist { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.listhead { display: flex; justify-content: space-between; gap: 12px; margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--line); color: var(--subtle); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.listhead .st { display: inline-block; text-transform: capitalize; } /* "failed" -> "Failed", "jobs" stays */
+.jobs { margin: 0; padding: 0; list-style: none; }
+.job + .job { border-top: 1px solid var(--line); }
+.job summary { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto 10px; align-items: center; gap: 3px 12px; padding: 9px 14px; cursor: pointer; list-style: none; }
+.job summary::-webkit-details-marker { display: none; }
+.job summary:hover, .job details[open] > summary { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.job summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.job .dot { grid-area: 1 / 1; }
+.job .id { grid-area: 1 / 2; overflow: hidden; font-family: var(--mono); font-size: .9rem; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.job .id.none { font-family: inherit; font-weight: 400; font-style: italic; color: var(--subtle); }
+.job .when { grid-area: 1 / 3; justify-self: end; color: var(--subtle); font-size: .8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.job .chev { grid-area: 1 / 4; color: var(--subtle); transition: transform .15s; }
+.job .chev::before { content: "›"; }
+.job details[open] .chev { transform: rotate(90deg); }
+.job .preview { grid-area: 2 / 2; overflow: hidden; margin: 0; color: var(--subtle); font-family: var(--mono); font-size: .78rem; white-space: nowrap; text-overflow: ellipsis; }
+.job .preview.err { color: color-mix(in srgb, var(--bad) 80%, var(--subtle)); }
+.job details[open] .preview { visibility: hidden; } /* shown in full below */
+.job .att { grid-area: 2 / 3; justify-self: end; color: var(--subtle); font-size: .75rem; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .job .chev { transition: none; } }
+.job-body { display: grid; gap: 16px; padding: 12px 14px 16px 34px; border-top: 1px dashed var(--line); }
+@media (max-width: 480px) { .job-body { padding-left: 14px; } }
+@media (min-width: 760px) { .job-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); } }
+.job-body h3 { margin: 0 0 8px; }
+.job-body h3 ~ h3 { margin-top: 16px; }
+.timeline, .errors { margin: 0; padding: 0; list-style: none; }
+.timeline li { position: relative; display: grid; grid-template-columns: 20px 5.5em minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 0 10px; }
+.timeline li:not(:last-child)::after { content: ""; position: absolute; left: 9.5px; top: 22px; bottom: 0; width: 1px; background: var(--line); }
+/* each step its icon and color; a step not reached is hollow */
+.timeline .ico { box-sizing: border-box; width: 20px; height: 20px; padding: 4px; border-radius: 50%; --c: var(--accent); color: var(--c); background: color-mix(in srgb, var(--c) 18%, transparent); fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.timeline .ico .fill { fill: currentColor; stroke: none; }
+.timeline .step-enqueued .ico { --c: var(--accent); }
+.timeline .step-started .ico { --c: var(--warn); }
+.timeline .step-finished .ico { --c: var(--ok); }
+.timeline .step-failed .ico { --c: var(--bad); }
+.timeline li.none .ico { --c: var(--subtle); background: none; border: 1px dashed var(--subtle); opacity: .6; }
+.timeline li.none .ico * { display: none; }
+.timeline .what, .errors .what { color: var(--subtle); }
+.errors li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0 0 8px; padding: 6px 10px; border-left: 2px solid var(--bad); background: var(--bg); border-radius: 0 6px 6px 0; }
+.errors time { color: var(--subtle); font-size: .8rem; justify-self: end; }
+.errors code.err { grid-column: 1 / -1; margin: 0; font-family: var(--mono); font-size: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.payload { margin: 0; padding: 10px 12px; max-height: 24em; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-family: var(--mono); font-size: .8rem; }
+.pager { display: flex; gap: 8px; margin: 16px 0 8px; }
+.pager a { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); text-decoration: none; }
+.pager a:hover { border-color: var(--accent); }
+.pager a[rel="next"] { margin-left: auto; }
