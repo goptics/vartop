@@ -1,24 +1,37 @@
 {{define "content"}}<p class="back"><a href="{{queuesURL .Server}}">← Queues</a></p>
-{{with .Jobs}}<div class="detail-head">
-  <h1>{{.Queue.ID}}</h1>
-  <span class="sub">on {{range $i, $l := .Queue.On}}{{if $i}}, {{end}}{{$l}}{{end}}</span>
-</div>
-<nav class="seg states" aria-label="Job state">{{range .Tabs}}<a href="{{.URL}}"{{if .Current}} aria-current="page"{{end}}>{{.State}}{{if ge .Count 0}} <span class="count">{{.Count}}</span>{{end}}</a>{{end}}</nav>
-{{if .Jobs}}<ol class="jobs" start="{{(index .Jobs 0).N}}" aria-label="{{.State}} jobs">{{range .Jobs}}
-  <li><details>
-    <summary><span class="name">{{or .ID "(no ID yet)"}}</span> <span class="sub">· {{.Attempts}} attempt{{if ne .Attempts 1}}s{{end}}{{with .Finished}} · finished {{.}}{{else}}{{with .Started}} · started {{.}}{{else}}{{with .Enqueued}} · enqueued {{.}}{{end}}{{end}}{{end}}</span>{{with .LastError}} <span class="err">{{.}}</span>{{end}}</summary>
-    <dl>
-      <dt>Job ID</dt><dd>{{or .ID "—"}}</dd>
-      <dt>Attempts</dt><dd>{{.Attempts}}</dd>
-      <dt>Enqueued</dt><dd>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}—{{end}}</dd>
-      <dt>Started</dt><dd>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}—{{end}}</dd>
-      <dt>Finished</dt><dd>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}—{{end}}</dd>
-      {{with .Errors}}<dt>Errors</dt><dd><ol class="errors">{{range .}}<li>Attempt {{.Attempt}}{{if .At}} · <time datetime="{{.AtISO}}">{{.At}}</time>{{end}}: <span class="err">{{.Error}}</span></li>{{end}}</ol></dd>{{end}}
-    </dl>
-    <h3>Payload{{if .Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h3>
-    <pre class="payload" tabindex="0">{{or .Payload "null"}}</pre>
+{{with .Jobs}}{{$state := .State}}<header class="qhead">
+  <h1 class="qid">{{.Queue.ID}}</h1>
+  <p class="sub">Reported by {{range .Queue.On}}<span class="chip">{{.}}</span> {{end}}</p>
+</header>
+<nav class="states" aria-label="Job state">{{range .Tabs}}<a href="{{.URL}}" class="state-{{.State}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.State}}</span>{{if ge .Count 0}}<span class="count">{{.Count}}</span>{{end}}</a>{{end}}</nav>
+{{if .Jobs}}<ol class="jobs" role="list" start="{{(index .Jobs 0).N}}" aria-label="{{.State}} jobs">{{range .Jobs}}
+  <li class="job state-{{$state}}"><details>
+    <summary>
+      <span class="dot" aria-hidden="true"></span>
+      {{with .ID}}<span class="id">{{.}}</span>{{else}}<span class="id none">(no ID yet)</span>{{end}}
+      <span class="pill">{{.Attempts}} attempt{{if ne .Attempts 1}}s{{end}}</span>
+      <span class="when">{{with .Finished}}finished {{.}}{{else}}{{with .Started}}started {{.}}{{else}}{{with .Enqueued}}enqueued {{.}}{{end}}{{end}}{{end}}</span>
+      <span class="n">#{{.N}}</span>
+      {{with .LastError}}<span class="err">{{.}}</span>{{end}}
+    </summary>
+    <div class="job-body">
+      <section aria-label="Times">
+        <h3>Timeline</h3>
+        <ol class="timeline">
+          <li{{if not .Enqueued}} class="none"{{end}}><span class="what">Enqueued</span>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+          <li{{if not .Started}} class="none"{{end}}><span class="what">Started</span>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+          <li{{if not .Finished}} class="none"{{end}}><span class="what">Finished</span>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+        </ol>
+        {{with .Errors}}<h3>Errors</h3>
+        <ol class="errors">{{range .}}<li><span class="what">Attempt {{.Attempt}}</span>{{if .At}}<time datetime="{{.AtISO}}">{{.At}}</time>{{end}}<code class="err">{{.Error}}</code></li>{{end}}</ol>{{end}}
+      </section>
+      <section aria-label="Payload">
+        <h3>Payload{{if .Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h3>
+        <pre class="payload" tabindex="0">{{or .Payload "null"}}</pre>
+      </section>
+    </div>
   </details></li>{{end}}
 </ol>{{else if not $.Banner}}<p class="empty">No {{.State}} jobs{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
-{{if or .Prev .Next}}<nav class="pager" aria-label="Pages">{{with .Prev}}<a href="{{.}}" rel="prev">← Previous page</a>{{end}}{{with .Next}}<a href="{{.}}" rel="next">Next page →</a>{{end}}</nav>{{end}}
+{{if or .Prev .Next}}<nav class="pager" aria-label="Pages">{{with .Prev}}<a href="{{.}}" rel="prev">← Previous</a>{{end}}{{with .Next}}<a href="{{.}}" rel="next">Next →</a>{{end}}</nav>{{end}}
 {{with .From}}<p class="pods">Read from {{.}}</p>{{end}}
 {{end}}{{end}}

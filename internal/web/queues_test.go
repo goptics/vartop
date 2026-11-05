@@ -74,15 +74,15 @@ func TestQueueJobsPage(t *testing.T) {
 		t.Fatalf("GET %s = %d:\n%s", page, status, body)
 	}
 	for _, want := range []string{
-		"<h1>" + tenantID + "</h1>",
+		`<h1 class="qid">` + tenantID + "</h1>",
 		"order-42", "2 attempts",
-		`<span class="err">out of stock</span></summary>`,    // summary: the final error
-		`Attempt 1 · <time datetime="2025-11-04T04:00:01Z">`, // errors oldest first
-		`: <span class="err">timeout</span></li><li>Attempt 2 · <time datetime="2025-11-04T04:00:01.9Z">`,
+		`<span class="err">out of stock</span>`,                                     // summary: the final error
+		`<span class="what">Attempt 1</span><time datetime="2025-11-04T04:00:01Z">`, // errors oldest first
+		`<code class="err">timeout</code></li><li><span class="what">Attempt 2</span><time datetime="2025-11-04T04:00:01.9Z">`,
 		"&#34;sku&#34;: &#34;", // indented payload
 		`<time datetime="2025-11-04T04:00:01.9Z">`,
-		`aria-current="page">failed <span class="count">1</span>`,
-		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi">pending <span class="count">2</span>`,
+		`class="state-failed" aria-current="page"><span class="label">failed</span><span class="count">1</span>`,
+		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi" class="state-pending"><span class="label">pending</span><span class="count">2</span>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("failed page lacks %q", want)

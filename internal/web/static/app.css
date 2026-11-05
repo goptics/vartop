@@ -15,6 +15,7 @@
   --warn: #E0AF68;
   --bad: #F7768E;
   --line: #2F334D;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -204,16 +205,55 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
   .queues .name, .queues .on, .queues td[colspan] { grid-column: 1 / -1; min-width: 0; }
   .queues td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: .75rem; }
 }
-.states { margin: 12px 0; }
-.states .count { font-variant-numeric: tabular-nums; }
-.jobs { margin: 12px 0; padding-left: 3em; }
-.jobs li { border-bottom: 1px solid var(--line); }
-.jobs summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
-.jobs summary .err, .errors .err { display: inline; margin: 0; }
-.jobs .errors { margin: 0; padding-left: 1.2em; }
-.jobs .errors li { border: 0; }
-.jobs dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0; }
-.jobs dt { color: var(--subtle); }
-.jobs dd { margin: 0; overflow-wrap: anywhere; }
-.payload { margin: 6px 0 12px; padding: 8px 10px; max-height: 24em; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font-size: .8rem; }
-.pager { display: flex; gap: 16px; margin: 12px 0; }
+
+/* job page: state tabs as count cards, each job a card */
+.qhead { margin: 8px 0 14px; }
+.qid { font-family: var(--mono); font-size: 1.25rem; }
+.qhead .sub { margin: 6px 0 0; }
+.chip { display: inline-block; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--fg); font-size: .8rem; }
+.states { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0 0 16px; }
+.states a { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--subtle); text-decoration: none; }
+.states a:hover { border-color: var(--subtle); }
+.states a[aria-current] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); color: var(--fg); }
+.states .label { display: flex; align-items: center; gap: 6px; font-size: .8rem; text-transform: capitalize; }
+.states .count { color: var(--fg); font-size: 1.3rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dot, .states .label::before { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); }
+.states .label::before { content: ""; }
+.state-processing .dot, .states .state-processing .label::before { background: var(--warn); }
+.state-completed .dot, .states .state-completed .label::before { background: var(--ok); }
+.state-failed .dot, .states .state-failed .label::before { background: var(--bad); }
+@media (max-width: 480px) { .states { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.jobs { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.job { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.job summary { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto auto; align-items: center; gap: 2px 10px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.job summary::-webkit-details-marker { display: none; }
+.job summary:hover .id { color: var(--accent); }
+.job .id.none { font-family: inherit; font-weight: 400; font-style: italic; color: var(--subtle); }
+.job .id { font-family: var(--mono); font-weight: 600; overflow-wrap: anywhere; }
+.pill { padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--subtle); font-size: .75rem; white-space: nowrap; }
+.job .n { grid-area: 1 / 4; color: var(--subtle); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.job .n::after { content: "›"; display: inline-block; margin-left: 8px; font-size: 1.1rem; transition: transform .15s; }
+.job details[open] .n::after { transform: rotate(90deg); }
+.job .when, .job summary .err { grid-column: 2 / -1; grid-row: auto; margin: 0; font-size: .8rem; }
+.job .when { color: var(--subtle); }
+.job summary .err { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.job details[open] summary .err { display: none; } /* the Errors list shows it in full */
+.job-body { display: grid; gap: 16px; padding: 12px; border-top: 1px solid var(--line); }
+@media (min-width: 760px) { .job-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); } }
+.job-body h3 { margin: 0 0 8px; }
+.job-body h3 ~ h3 { margin-top: 16px; }
+.timeline, .errors { margin: 0; padding: 0; list-style: none; }
+.timeline li { position: relative; display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 8px; padding: 0 0 10px 18px; }
+.timeline li::before { content: ""; position: absolute; left: 0; top: .45em; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.timeline li:not(:last-child)::after { content: ""; position: absolute; left: 3.5px; top: 1.2em; bottom: 0; width: 1px; background: var(--line); }
+.timeline li.none::before { background: none; border: 1px solid var(--subtle); }
+.timeline .what, .errors .what { color: var(--subtle); }
+.errors li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0 0 8px; padding: 6px 10px; border-left: 2px solid var(--bad); background: var(--bg); border-radius: 0 6px 6px 0; }
+.errors time { color: var(--subtle); font-size: .8rem; justify-self: end; }
+.errors code.err { grid-column: 1 / -1; margin: 0; font-family: var(--mono); font-size: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.payload { margin: 0; padding: 10px 12px; max-height: 24em; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-family: var(--mono); font-size: .8rem; }
+.pager { display: flex; gap: 8px; margin: 16px 0 8px; }
+.pager a { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); text-decoration: none; }
+.pager a:hover { border-color: var(--accent); }
+.pager a[rel="next"] { margin-left: auto; }
