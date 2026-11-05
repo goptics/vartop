@@ -193,6 +193,17 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 /* queues and jobs */
 .queues .on { white-space: normal; color: var(--subtle); }
 .queues .failed { color: var(--bad); }
+.queues .name { overflow-wrap: break-word; } /* break a Queue ID only when it cannot fit whole */
+
+/* phone: each queue row stacks, its numbers labelled, as .workers */
+@media (max-width: 640px) {
+  .queues thead { position: absolute; left: -9999px; }
+  .queues tr { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .queues tbody tr:last-child { border-bottom: 0; }
+  .queues th, .queues td { padding: 0; border: 0; background: none; white-space: normal; text-align: left; }
+  .queues .name, .queues .on, .queues td[colspan] { grid-column: 1 / -1; min-width: 0; }
+  .queues td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: .75rem; }
+}
 .states { margin: 12px 0; }
 .states .count { font-variant-numeric: tabular-nums; }
 .jobs { margin: 12px 0; padding-left: 3em; }

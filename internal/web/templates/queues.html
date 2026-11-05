@@ -14,13 +14,13 @@
   <tbody>{{range .Groups}}
   <tr>
     <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}">{{.ID}}</a></th>{{with .Counts}}
-    <td class="num">{{.Pending}}</td>
-    <td class="num">{{.Processing}}</td>
-    <td class="num">{{.Completed}}</td>
-    <td class="num failed">{{.Failed}}</td>{{else}}
+    <td class="num" data-label="Pending">{{.Pending}}</td>
+    <td class="num" data-label="Processing">{{.Processing}}</td>
+    <td class="num" data-label="Completed">{{.Completed}}</td>
+    <td class="num{{if .Failed}} failed{{end}}" data-label="Failed">{{.Failed}}</td>{{else}}
     <td colspan="4"><span class="err">{{.Err}}</span></td>{{end}}
-    <td class="num">{{with .Totals}}{{.Submitted}}{{else}}—{{end}}</td>
-    <td class="on">{{range $i, $l := .On}}{{if $i}}, {{end}}{{$l}}{{end}}</td>
+    <td class="num" data-label="Submitted (total)">{{with .Totals}}{{.Submitted}}{{else}}—{{end}}</td>
+    <td class="on" data-label="Reported by">{{range $i, $l := .On}}{{if $i}}, {{end}}{{$l}}{{end}}</td>
   </tr>{{end}}
   </tbody>
 </table>
