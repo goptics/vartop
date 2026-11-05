@@ -205,7 +205,9 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 	if v.Offset > 0 {
 		v.Prev = jobsURL(g.ID, p.Server, v.State, max(0, v.Offset-v.Limit), v.Limit)
 	}
-	if len(jobs) == v.Limit {
+	// The answer has no total: a full page has a next one unless the state's
+	// count, read just before, says this page ends it.
+	if n := stateCount(g.Counts, v.State); len(jobs) == v.Limit && (n < 0 || int64(v.Offset+len(jobs)) < n) {
 		v.Next = jobsURL(g.ID, p.Server, v.State, v.Offset+v.Limit, v.Limit)
 	}
 	return v

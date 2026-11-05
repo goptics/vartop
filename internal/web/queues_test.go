@@ -94,13 +94,13 @@ func TestQueueJobsPage(t *testing.T) {
 		t.Errorf("no sharer got %s", want)
 	}
 
-	// pending, one per page: a next link, no previous; the second page the other way.
+	// pending (2), one per page: a next link, no previous; the second, last page the other way.
 	_, body = fetch(t, srv, page+"?server=multi&limit=1", false)
 	if !strings.Contains(body, "(no ID yet)") || !strings.Contains(body, `rel="next"`) || strings.Contains(body, `rel="prev"`) {
 		t.Errorf("first pending page:\n%s", body)
 	}
 	_, body = fetch(t, srv, page+"?server=multi&limit=1&offset=1", false)
-	if !strings.Contains(body, `start="2"`) || !strings.Contains(body, `rel="prev"`) || !strings.Contains(body, `rel="next"`) {
+	if !strings.Contains(body, `start="2"`) || !strings.Contains(body, `rel="prev"`) || strings.Contains(body, `rel="next"`) {
 		t.Errorf("second pending page:\n%s", body)
 	}
 
