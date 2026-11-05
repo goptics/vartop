@@ -211,7 +211,8 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .qid { font-family: var(--mono); font-size: 1.25rem; }
 .qhead .sub { margin: 6px 0 0; }
 .chip { display: inline-block; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--fg); font-size: .8rem; }
-.states { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0 0 16px; }
+/* the tabs stay in view while the list scrolls */
+.states { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0 0 8px; padding: 8px 0; background: var(--bg); }
 .states a { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--subtle); text-decoration: none; }
 .states a:hover { border-color: var(--subtle); }
 .states a[aria-current] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); color: var(--fg); }
@@ -222,7 +223,18 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .state-processing .dot, .states .state-processing .label::before { background: var(--warn); }
 .state-completed .dot, .states .state-completed .label::before { background: var(--ok); }
 .state-failed .dot, .states .state-failed .label::before { background: var(--bad); }
-@media (max-width: 480px) { .states { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* phone: one compact row, so the sticky bar stays short; state color as a top edge */
+@media (max-width: 480px) {
+  .states { gap: 6px; }
+  .states a { padding: 5px 8px; border-top-width: 3px; }
+  .states .label { font-size: .72rem; }
+  .states .label::before { display: none; }
+  .states .count { font-size: 1rem; }
+  .states .state-pending { border-top-color: var(--subtle); }
+  .states .state-processing { border-top-color: var(--warn); }
+  .states .state-completed { border-top-color: var(--ok); }
+  .states .state-failed { border-top-color: var(--bad); }
+}
 
 /* job list: one panel, a two-line row per job */
 .joblist { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
@@ -252,10 +264,17 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .job-body h3 { margin: 0 0 8px; }
 .job-body h3 ~ h3 { margin-top: 16px; }
 .timeline, .errors { margin: 0; padding: 0; list-style: none; }
-.timeline li { position: relative; display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 8px; padding: 0 0 10px 18px; }
-.timeline li::before { content: ""; position: absolute; left: 0; top: .45em; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-.timeline li:not(:last-child)::after { content: ""; position: absolute; left: 3.5px; top: 1.2em; bottom: 0; width: 1px; background: var(--line); }
-.timeline li.none::before { background: none; border: 1px solid var(--subtle); }
+.timeline li { position: relative; display: grid; grid-template-columns: 20px 5.5em minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 0 10px; }
+.timeline li:not(:last-child)::after { content: ""; position: absolute; left: 9.5px; top: 22px; bottom: 0; width: 1px; background: var(--line); }
+/* each step its icon and color; a step not reached is hollow */
+.timeline .ico { box-sizing: border-box; width: 20px; height: 20px; padding: 4px; border-radius: 50%; --c: var(--accent); color: var(--c); background: color-mix(in srgb, var(--c) 18%, transparent); fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.timeline .ico .fill { fill: currentColor; stroke: none; }
+.timeline .step-enqueued .ico { --c: var(--accent); }
+.timeline .step-started .ico { --c: var(--warn); }
+.timeline .step-finished .ico { --c: var(--ok); }
+.timeline .step-failed .ico { --c: var(--bad); }
+.timeline li.none .ico { --c: var(--subtle); background: none; border: 1px dashed var(--subtle); opacity: .6; }
+.timeline li.none .ico * { display: none; }
 .timeline .what, .errors .what { color: var(--subtle); }
 .errors li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0 0 8px; padding: 6px 10px; border-left: 2px solid var(--bad); background: var(--bg); border-radius: 0 6px 6px 0; }
 .errors time { color: var(--subtle); font-size: .8rem; justify-self: end; }

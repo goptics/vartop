@@ -1,3 +1,5 @@
+{{/* step_icon: the timeline icon of a job step: enqueued, started, finished or failed */}}
+{{define "step_icon"}}<svg class="ico" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false">{{if eq . "enqueued"}}<path d="M12 3v10M8 9l4 4 4-4M4 15v4h16v-4"/>{{else if eq . "started"}}<path class="fill" d="M8 5v14l11-7z"/>{{else if eq . "failed"}}<path d="M6 6l12 12M18 6 6 18"/>{{else}}<path d="M5 12.5 10 17 19 7"/>{{end}}</svg>{{end}}
 {{define "content"}}<p class="back"><a href="{{queuesURL .Server}}">← Queues</a></p>
 {{with .Jobs}}{{$state := .State}}<header class="qhead">
   <h1 class="qid">{{.Queue.ID}}</h1>
@@ -20,9 +22,9 @@
       <section aria-label="Times">
         <h3>Timeline</h3>
         <ol class="timeline">
-          <li{{if not .Enqueued}} class="none"{{end}}><span class="what">Enqueued</span>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
-          <li{{if not .Started}} class="none"{{end}}><span class="what">Started</span>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
-          <li{{if not .Finished}} class="none"{{end}}><span class="what">Finished</span>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+          <li class="step-enqueued{{if not .Enqueued}} none{{end}}">{{template "step_icon" "enqueued"}}<span class="what">Enqueued</span>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+          <li class="step-started{{if not .Started}} none{{end}}">{{template "step_icon" "started"}}<span class="what">Started</span>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+          <li class="step-{{if eq $state "failed"}}failed{{else}}finished{{end}}{{if not .Finished}} none{{end}}">{{template "step_icon" (or (and (eq $state "failed") "failed") "finished")}}<span class="what">Finished</span>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
         </ol>
         {{with .Errors}}<h3>Errors</h3>
         <ol class="errors">{{range .}}<li><span class="what">Attempt {{.Attempt}}</span>{{if .At}}<time datetime="{{.AtISO}}">{{.At}}</time>{{end}}<code class="err">{{.Error}}</code></li>{{end}}</ol>{{end}}
