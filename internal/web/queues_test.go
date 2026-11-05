@@ -79,7 +79,7 @@ func TestQueueJobsPage(t *testing.T) {
 		"order-42", "2 attempts",
 		`<span class="preview err">out of stock</span>`, // list line: the final error
 		"1–1 of 1",
-		`<li class="step-failed"><svg class="ico"`, // a failed job's last step // list range and state count
+		`<li class="step-failed"><svg class="ico"`,                                  // a failed job's last step // list range and state count
 		`<span class="what">Attempt 1</span><time datetime="2025-11-04T04:00:01Z">`, // errors oldest first
 		`<code class="err">timeout</code></li><li><span class="what">Attempt 2</span><time datetime="2025-11-04T04:00:01.9Z">`,
 		"&#34;sku&#34;: &#34;", // indented payload
