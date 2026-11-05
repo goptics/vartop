@@ -1,6 +1,6 @@
 # vartop web redesign: plan
 
-Status: plan, not started. No code written. Product truth: `PRODUCT.md`.
+Status: done (phases 0–7 on `redesign/web`). Product truth: `PRODUCT.md`. Design system as built: `DESIGN.md`.
 
 ## 1. Direction
 

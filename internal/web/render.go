@@ -138,6 +138,7 @@ var funcs = template.FuncMap{
 	"history":       history,
 	"tickLabel":     tickLabel,
 	"noData":        noData,
+	"onset":         onset,
 	"trendWindow":   func() time.Duration { return fleet.TrendWindow },
 	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
 	"spanParam":     spanParam,
@@ -200,6 +201,23 @@ func pathOf(uri string) string {
 
 // noData reports whether a series has nothing to show as its current value:
 // it is empty, or its newest point is a gap.
+// onset says when the trailing run of nonzero points began: "since 15:04",
+// "for 10+ min" when the run fills the window, "" when the last point is
+// zero or a gap.
+func onset(pts []fleet.Point) string {
+	i := len(pts)
+	for i > 0 && !pts[i-1].Gap && pts[i-1].V > 0 {
+		i--
+	}
+	switch {
+	case i == len(pts):
+		return ""
+	case i == 0:
+		return fmt.Sprintf("for %d+ min", int(fleet.TrendWindow.Minutes()))
+	}
+	return "since " + pts[i].At.Format("15:04")
+}
+
 func noData(pts []fleet.Point) bool {
 	return len(pts) == 0 || pts[len(pts)-1].Gap
 }

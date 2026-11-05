@@ -17,11 +17,13 @@ Constraints: one Go binary, html/template + vendored htmx + plain CSS/JS, no bui
 
 THESIS: vartop is the category standard played straight, a calm dark ops console at Linear and Temporal UI craft; it refuses card soup, gradients, soft shadows and the terminal costume. Precision, density and quiet chrome carry the brand.
 
-OWN-WORLD: neutral cool greys, dark ground first and an equal light theme; 1px low-contrast borders, small radii, no shadows except dialogs; one accent for selection, focus and current nav; ok, warn, bad, paused colours only on state; system UI type on a six-step scale, tabular numerals, mono only for IDs, payloads, errors, endpoints.
+OWN-WORLD: neutral cool greys, dark ground first and an equal light theme; 1px low-contrast borders, small radii, no shadows except dialogs; one accent for selection, focus, current nav and the completed series (failed series in bad, grid load fill neutral, so the accent never sits next to ok green with a second meaning); ok, warn, bad, paused colours only on state; system UI type on a six-step scale, tabular numerals, mono only for IDs, payloads, errors, endpoints.
 
 STORY: the user opens vartop, reads fleet health in one glance (rates, failures with onset, backlog), sees which worker or instance is off, opens it, acts (pause, resume, restart, stop, resize) and sees the outcome per instance.
 
-FIRST VIEWPORT: left rail (brand, Dashboard, Instance grid, Queues, server picker, freshness at foot); page header with title, instance scope picker; four stat tiles with sparklines, failed/min marking its onset; dense sortable worker table below, bulk bar appearing on selection.
+FIRST VIEWPORT: left rail (brand, Dashboard, Instance grid, Queues, server and instance scope pickers together, freshness at foot); page header with title and scope line; four stat tiles with sparklines, failed/min marking its onset ("since 15:04"); dense worker table below, bulk bar appearing on selection.
+
+AMENDED at finish (2026-11-05): instance picker stays in the rail with the server picker, because scope is one decision and the rail is the top bar under 1024px anyway; column sorting deferred (needs a server-side sort param, no new JS); Restart/Stop keep the native hx-confirm box, only bulk actions use the confirm panel.
 
 FORM: category standard (canon card), chosen by the user over the dealt hand; craft bar Linear + Temporal UI. seed:ec3c55f78ed31bb2
 

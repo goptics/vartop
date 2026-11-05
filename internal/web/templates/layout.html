@@ -43,7 +43,7 @@
   </form>{{end}}
   </div>
 <div id="status">{{if not .Waiting}}
-  <span class="health" title="healthy / total {{.Noun.Many}}">{{if .Stale}}—{{else}}{{.Health.Dot}} {{.Health.Healthy}}/{{.Health.Total}}{{end}} {{.Noun.Many}}</span>
+  <span class="health{{if not .Stale}}{{if eq .Health.Healthy .Health.Total}} h-ok{{else if .Health.Healthy}} h-warn{{else}} h-bad{{end}}{{end}}" title="healthy / total {{.Noun.Many}}">{{if .Stale}}—{{else}}{{.Health.Healthy}}/{{.Health.Total}}{{end}} {{.Noun.Many}}</span>
   {{if gt .IntervalSec 0}}<span class="interval">refresh every {{.IntervalSec}}s</span>{{end}}
   {{with .Updated}}<span class="updated{{if $.Stale}} stale{{end}}">updated {{.}}</span>{{end}}
   {{if and .Note (not .Stale)}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}

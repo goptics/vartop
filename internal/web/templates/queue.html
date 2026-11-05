@@ -22,17 +22,17 @@
     </summary>
     <div class="job-body">
       <section aria-label="Times">
-        <h3>Timeline</h3>
+        <h2>Timeline</h2>
         <ol class="timeline">
           <li class="step-enqueued{{if not .Enqueued}} none{{end}}">{{template "step_icon" "enqueued"}}<span class="what">Enqueued</span>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
           <li class="step-started{{if not .Started}} none{{end}}">{{template "step_icon" "started"}}<span class="what">Started</span>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
           <li class="step-{{if eq $state "failed"}}failed{{else}}finished{{end}}{{if not .Finished}} none{{end}}">{{template "step_icon" (or (and (eq $state "failed") "failed") "finished")}}<span class="what">Finished</span>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
         </ol>
-        {{with .Errors}}<h3>Errors</h3>
+        {{with .Errors}}<h2>Errors</h2>
         <ol class="errors">{{range .}}<li><span class="what">Attempt {{.Attempt}}</span>{{if .At}}<time datetime="{{.AtISO}}">{{.At}}</time>{{end}}<code class="err">{{.Error}}</code></li>{{end}}</ol>{{end}}
       </section>
       <section aria-label="Payload">
-        <h3>Payload{{if .Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h3>
+        <h2>Payload{{if .Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h2>
         <pre class="payload" tabindex="0">{{or .Payload "null"}}</pre>
       </section>
     </div>

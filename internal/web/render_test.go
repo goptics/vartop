@@ -423,7 +423,7 @@ func TestDashboardRenders(t *testing.T) {
 		"4 ×2 pods",
 		"mixed 3–5",
 		"absent on 2 pods",
-		"●", "2/2 pods",
+		`class="health h-ok"`, "2/2 pods",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body lacks %q", want)
@@ -818,7 +818,7 @@ func TestCopyFollowsNoun(t *testing.T) {
 				"All "+many+" (merged)",
 				">"+n.Cap()+" grid</a>",
 				`title="healthy / total `+many+`"`,
-				"● 2/2 "+many+"</span>",
+				">2/2 "+many+"</span>",
 				"Pending (max/"+one+")",
 				"Concurrency (per "+one+")",
 				"absent on 2 "+many+"<",
@@ -1063,5 +1063,26 @@ func TestFeedCacheEvicts(t *testing.T) {
 	}
 	if c.get("a", time.Second, t0.Add(time.Minute+feedIdle+time.Second)) == a {
 		t.Error("a's idle feed was kept")
+	}
+}
+
+func TestOnset(t *testing.T) {
+	at := time.Date(2026, 11, 5, 15, 4, 0, 0, time.Local)
+	p := func(min int, v float64) fleet.Point {
+		return fleet.Point{At: at.Add(time.Duration(min) * time.Minute), V: v}
+	}
+	for _, c := range []struct {
+		pts  []fleet.Point
+		want string
+	}{
+		{nil, ""},
+		{[]fleet.Point{p(0, 1), p(1, 0)}, ""},
+		{[]fleet.Point{p(0, 0), p(1, 2), p(2, 1)}, "since 15:05"},
+		{[]fleet.Point{p(0, 1), {Gap: true}, p(2, 1)}, "since 15:06"},
+		{[]fleet.Point{p(0, 1), p(1, 1)}, "for 10+ min"},
+	} {
+		if got := onset(c.pts); got != c.want {
+			t.Errorf("onset(%v) = %q, want %q", c.pts, got, c.want)
+		}
 	}
 }
