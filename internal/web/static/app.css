@@ -143,15 +143,25 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 }
 .waiting { padding: 24px 0; color: var(--accent); font-size: var(--fs-4); }
 
-/* cards */
+/* page header */
+.pagehead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 16px; }
+.pagehead .sub { margin: 0; }
+
+/* stat strip: one panel, tiles split by hairlines */
 .kpis, .counters {
-  display: grid; gap: 12px; margin: 16px 0;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  display: grid; gap: 1px; margin: 0 0 16px; overflow: hidden;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  background: var(--line); border: 1px solid var(--line); border-radius: var(--r-3);
 }
-.card { padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
-.card .sub { margin: 0; }
-.big { margin: 2px 0 4px; font-size: 1.7rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-.chips { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 0; padding: 0; list-style: none; }
+.card { padding: 12px 14px; background: var(--panel); min-width: 0; }
+.kpis .card { display: flex; flex-direction: column; gap: 4px; }
+.card h3 { color: var(--subtle); font-size: var(--fs-2); font-weight: 500; }
+.card .sub { margin: 0; font-size: var(--fs-1); }
+.big { margin: 0; font-size: var(--fs-6); font-weight: 600; letter-spacing: -.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.card.hot .big { color: var(--bad); }
+.kpis .spark { margin-top: auto; }
+@media (max-width: 640px) { .card { padding: 10px 12px; } .big { font-size: var(--fs-5); } }
+.chips { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 0; padding: 0; list-style: none; font-size: var(--fs-3); }
 
 /* sparklines */
 .spark { display: block; max-width: 100%; height: auto; }
@@ -180,12 +190,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .na { color: var(--subtle); font-size: .85rem; }
 
 /* tables: scroll inside the wrapper, never the page */
-.table-wrap { overflow-x: auto; margin: 12px 0; border: 1px solid var(--line); border-radius: 6px; }
+.table-wrap { overflow-x: auto; margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-3); }
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 6px 10px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { color: var(--subtle); font-size: .8rem; font-weight: 600; letter-spacing: .02em; background: var(--panel); }
+th, td { padding: 8px 12px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--subtle); font-size: var(--fs-1); font-weight: 500; background: var(--raised); }
 tbody tr:last-child > * { border-bottom: 0; }
+tbody tr:hover > td { background: color-mix(in srgb, var(--raised) 60%, transparent); }
+tbody tr:has(.sel input:checked) > td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td .name a, td.name a { color: var(--fg); font-weight: 500; text-decoration: none; }
+td.name a:hover { color: var(--accent); text-decoration: underline; }
 .sel { width: 1%; }
 .name { white-space: normal; overflow-wrap: anywhere; min-width: 8em; font-size: inherit; color: var(--fg); }
 .trend { padding-top: 2px; padding-bottom: 2px; }
@@ -209,12 +223,16 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
   .workers td:has(.split) { grid-column: 2 / -1; } /* a mixed status's breakdown gets a line of its own */
 }
 
-/* status colours; mixed, unknown and transitional stay plain foreground */
-.status.active { color: var(--ok); }
-.status.paused { color: var(--paused); }
-.status.stopped { color: var(--bad); }
-.status.transitional, .status.unknown, .status.mixed { color: var(--fg); }
-.badge { padding: 0 6px; border: 1px solid var(--warn); border-radius: 8px; color: var(--warn); font-size: .75rem; }
+/* status: a coloured dot, the label in foreground; mixed, unknown and
+   transitional get a hollow dot */
+.status { --c: var(--subtle); display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
+.status::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.status.active { --c: var(--ok); }
+.status.paused { --c: var(--paused); }
+.status.stopped { --c: var(--bad); }
+.status.transitional, .status.unknown, .status.mixed { --c: var(--subtle); }
+.status.transitional::before, .status.unknown::before, .status.mixed::before { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
+.badge { display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 999px; background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); font-size: var(--fs-1); font-weight: 500; }
 
 /* detail */
 .back { margin: 12px 0 0; }
@@ -236,9 +254,12 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .controls h3:first-child { margin-top: 0; }
 .conc, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 6px 0; }
 .bulk {
-  position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
-  margin: 12px 0 0; padding: 10px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-3);
+  position: sticky; bottom: 16px; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; width: fit-content;
+  margin: 12px 0 0; padding: 8px 8px 8px 14px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-3);
 }
+.bulk .what { color: var(--subtle); font-size: var(--fs-2); }
+/* the bar shows once a worker is selected (always, without :has) */
+@supports selector(:has(*)) { body:not(:has(.workers .sel input:checked)) .bulk { display: none; } }
 .confirm { margin: 12px 0; padding: 12px; background: var(--panel); border: 1px solid var(--warn); border-radius: 6px; }
 .confirm p { margin: 6px 0; }
 .confirm form { margin-top: 8px; }

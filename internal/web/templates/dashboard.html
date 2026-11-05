@@ -5,7 +5,7 @@
     <p class="big">{{if or $.Stale (noData $k.Completed)}}—{{else}}{{printf "%.1f" $k.CompletedPerSec}}{{end}}</p>
     {{template "spark" (sparkline $k.Completed trendWindow $.Interval 160 32)}}
   </div>
-  <div class="card failed">
+  <div class="card failed{{if and (not $.Stale) (not (noData $k.Failed)) (gt $k.FailedPerMin 0.0)}} hot{{end}}">
     <h3>Failed /min</h3>
     <p class="big">{{if or $.Stale (noData $k.Failed)}}—{{else}}{{printf "%.1f" $k.FailedPerMin}}{{end}}</p>
     {{template "spark" (sparkline $k.Failed trendWindow $.Interval 160 32)}}
@@ -52,14 +52,14 @@
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
 {{define "live_oob"}}<div id="live" hx-swap-oob="outerHTML">{{template "live_body" .}}</div>{{end}}
 
-{{define "content"}}<h1 class="sr">Dashboard</h1>
+{{define "content"}}<header class="pagehead"><h1>Dashboard</h1><p class="sub">Workers on {{.Scope}}</p></header>
 {{template "live" .}}
 <div id="results" aria-live="polite"></div>
 {{if .Dashboard}}{{if .OneBalanced}}<p class="note">{{oneBalanced}}</p>
 {{else}}<form id="bulk" class="bulk" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
   {{template "server_field" .}}
   {{template "label_field" .}}
-  <span>Selected workers on {{.Scope}}:</span>
+  <span class="what">Selected workers on {{.Scope}}:</span>
   <button type="button" hx-post="/bulk/pause">Pause selected</button>
   <button type="button" hx-post="/bulk/resume">Resume selected</button>
 </form>{{end}}{{end}}

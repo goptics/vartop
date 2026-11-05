@@ -455,7 +455,7 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 		`class="status active"`,
 		`class="status mixed"`,
 		"title=\"a: Running\nb: Running\"",
-		"<h1 class=\"sr\">Dashboard</h1>",
+		"<h1>Dashboard</h1>",
 		`data-label="Busy"`, // the phone layout's cell labels
 		">mixed</span><small class=\"split\">a: Running\nb: Paused</small>", // a mixed status's breakdown is text, not only a title
 		`hx-post="/bulk/pause"`,
