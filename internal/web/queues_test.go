@@ -49,7 +49,7 @@ func TestQueuesPage(t *testing.T) {
 	}
 	text := visibleText(body)
 	// One copy of the shared queue's numbers: 10 submitted, not 20.
-	for _, want := range []string{"10", "No queue routes on: instance-", `aria-current="page">Queues`} {
+	for _, want := range []string{"10", "No queue routes on: instance-", `href="/queues?server=multi" aria-current="page">`} {
 		if !strings.Contains(text, want) && !strings.Contains(body, want) {
 			t.Errorf("GET /queues lacks %q", want)
 		}

@@ -882,7 +882,7 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 	}
 	// The primary colour is varmq's logo teal, which the native controls
 	// (the concurrency slider, checkboxes) take too.
-	for _, want := range []string{"#1A1B26", "#C0CAF5", "prefers-color-scheme: light", ".mixed", "--accent: #44BF9E", "accent-color: var(--accent)"} {
+	for _, want := range []string{"#0D0F14", "#E3E6ED", "prefers-color-scheme: light", ".mixed", "--accent: #44BF9E", "accent-color: var(--accent)"} {
 		if !strings.Contains(strings.ToUpper(string(css)), strings.ToUpper(want)) {
 			t.Errorf("app.css lacks %q", want)
 		}
