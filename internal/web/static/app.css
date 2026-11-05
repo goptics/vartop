@@ -63,7 +63,8 @@ h3 { font-size: var(--fs-2); font-weight: 600; color: var(--subtle); }
 main { max-width: 1280px; }
 .sr { position: absolute; left: -9999px; }
 .sub, .legend, .empty { color: var(--subtle); font-size: var(--fs-2); }
-.empty { padding: 24px 0; }
+.legend { margin: 0 0 8px; }
+.empty { margin: 0 0 16px; padding: 32px 16px; text-align: center; border: 1px dashed var(--line-strong); border-radius: var(--r-3); }
 * { scrollbar-color: var(--line-strong) transparent; scrollbar-width: thin; }
 
 /* shell: rail left on wide screens, a top bar under 1024px */
@@ -141,7 +142,10 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   margin: 0 0 16px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
   border-radius: var(--r-3); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); color: var(--warn); font-weight: 500;
 }
-.waiting { padding: 24px 0; color: var(--accent); font-size: var(--fs-4); }
+.waiting { display: flex; align-items: center; gap: 10px; margin: 0; padding: 32px 0; color: var(--fg); font-size: var(--fs-4); }
+.waiting::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-out infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); } 100% { box-shadow: 0 0 0 10px transparent; } }
+@media (prefers-reduced-motion: reduce) { .waiting::before, .job .chev { animation: none; transition: none; } }
 
 /* page header */
 .pagehead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 16px; }
@@ -299,18 +303,27 @@ small.err { display: block; margin: 0; font-size: .75rem; font-weight: 400; whit
 .bulk .what { color: var(--subtle); font-size: var(--fs-2); }
 /* the bar shows once a worker is selected (always, without :has) */
 @supports selector(:has(*)) { body:not(:has(.workers .sel input:checked)) .bulk { display: none; } }
-.confirm { margin: 12px 0; padding: 12px; background: var(--panel); border: 1px solid var(--warn); border-radius: 6px; }
-.confirm p { margin: 6px 0; }
-.confirm form { margin-top: 8px; }
-.results { margin: 12px 0; padding: 0; list-style: none; }
-.results li { padding: 4px 10px; border-left: 3px solid var(--line); }
-.results .ok { border-color: var(--ok); }
-.results .ok .outcome { color: var(--ok); }
-.results .nochange { border-color: var(--warn); }
-.results .nochange .outcome { color: var(--warn); }
-.results .failed { border-color: var(--bad); }
-.results .failed .outcome { color: var(--bad); }
-.results .pod { font-weight: 600; margin-right: 8px; }
+/* bulk confirm: one panel, warn-edged, the table of what will happen */
+.confirm { margin: 16px 0; padding: 14px; background: var(--panel); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); border-radius: var(--r-3); }
+.confirm h2 { margin: 0 0 4px; font-size: var(--fs-4); font-weight: 600; }
+.confirm p { margin: 0 0 12px; color: var(--subtle); }
+.confirm .table-wrap { margin-bottom: 12px; }
+.confirm form { display: flex; justify-content: flex-end; }
+.confirm button.danger { background: var(--bad); border-color: var(--bad); color: var(--panel); }
+/* action results: one line per instance, an icon per outcome */
+.results { margin: 16px 0; padding: 4px 0; list-style: none; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-3); }
+.results li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 6px 14px; }
+.results li + li { border-top: 1px solid var(--line); }
+.results .ico { --c: var(--subtle); color: var(--c); }
+.results .ok .ico, .results .ok .outcome { --c: var(--ok); color: var(--ok); }
+.results .nochange .ico, .results .nochange .outcome { --c: var(--warn); color: var(--warn); }
+.results .failed .ico, .results .failed .outcome { --c: var(--bad); color: var(--bad); }
+.results .worker { font-weight: 500; }
+.results .pod { font-weight: 600; margin-right: 6px; }
+.results .outcome { margin-left: auto; font-size: var(--fs-2); }
+/* errors htmx swaps in, and empty states */
+#errors { margin: 0 0 16px; padding: 4px 14px; border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius: var(--r-3); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
+#errors .err { margin: 6px 0; }
 
 /* queues and jobs */
 .queues .on { white-space: normal; color: var(--subtle); }
