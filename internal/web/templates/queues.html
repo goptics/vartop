@@ -20,7 +20,7 @@
     <td class="num{{if .Failed}} failed{{end}}" data-label="Failed">{{.Failed}}</td>{{else}}
     <td colspan="4"><span class="err">{{.Err}}</span></td>{{end}}
     <td class="num" data-label="Submitted (total)">{{with .Totals}}{{.Submitted}}{{else}}—{{end}}</td>
-    <td class="on" data-label="Reported by">{{range $i, $l := .On}}{{if $i}}, {{end}}{{$l}}{{end}}</td>
+    <td class="on" data-label="Reported by">{{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span>{{end}}</td>
   </tr>{{end}}
   </tbody>
 </table>
@@ -32,5 +32,5 @@
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
 
-{{define "content"}}<h1 class="sr">Queues</h1>
+{{define "content"}}<header class="pagehead"><h1>Queues</h1><p class="sub">One row per Queue ID; counts are the queue's own, never summed</p></header>
 {{template "live" .}}{{end}}

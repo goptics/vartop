@@ -48,6 +48,37 @@ type JobsView struct {
 	Total  int64 // the count of State, -1: not known
 	// Prev and Next are the URLs of the pages around this one, "" at an end.
 	Prev, Next string
+	// Pages are the numbered page links, when Total is known; a zero N is a gap.
+	Pages []PageLink
+}
+
+// PageLink is one numbered link of the pager.
+type PageLink struct {
+	N       int // from 1; 0: a gap ("…")
+	URL     string
+	Current bool
+}
+
+// pageLinks numbers the pages of total items, limit a page, around the page
+// at offset: the first, the last and two either side of it, gaps between.
+// Nil for one page or an unknown total.
+func pageLinks(total int64, offset, limit int, url func(offset int) string) []PageLink {
+	if total <= int64(limit) || limit <= 0 {
+		return nil
+	}
+	last := int((total + int64(limit) - 1) / int64(limit))
+	cur := offset/limit + 1
+	var out []PageLink
+	for n := 1; n <= last; n++ {
+		if n != 1 && n != last && (n < cur-2 || n > cur+2) {
+			if len(out) > 0 && out[len(out)-1].N != 0 {
+				out = append(out, PageLink{})
+			}
+			continue
+		}
+		out = append(out, PageLink{N: n, URL: url((n - 1) * limit), Current: n == cur})
+	}
+	return out
 }
 
 // Last is the position of the page's last job, from 1.
@@ -219,6 +250,7 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 	if n := stateCount(g.Counts, v.State); len(jobs) == v.Limit && (n < 0 || int64(v.Offset+len(jobs)) < n) {
 		v.Next = jobsURL(g.ID, p.Server, v.State, v.Offset+v.Limit, v.Limit)
 	}
+	v.Pages = pageLinks(v.Total, v.Offset, v.Limit, func(off int) string { return jobsURL(g.ID, p.Server, v.State, off, v.Limit) })
 	return v
 }
 
