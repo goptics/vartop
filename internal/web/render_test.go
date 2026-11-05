@@ -630,7 +630,7 @@ func TestGridRenders(t *testing.T) {
 		`class="down"`,
 		`<small class="err">unreachable</small></th>`,                     // the header stays short...
 		`<li><b>b</b> : <span class="err">connection refused</span></li>`, // ...the error is below
-		`<h1 class="sr">Pod grid</h1>`,
+		`<h1>Pod grid</h1>`,
 		`class="status active"`, "2/4", `href="/workers/orders?server=dev"`,
 		`id="live"`,
 	} {
