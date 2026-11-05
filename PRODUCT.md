@@ -1,0 +1,65 @@
+# Product
+
+<!-- impeccable:product-schema 1 -->
+
+## Platform
+
+web
+
+## Users
+
+Go developers and operators who run services built on varmq (typed worker pool + message queue). One user, one machine: vartop runs on their laptop or a box inside the network, never as a shared deployment. Three moments, equal weight:
+
+- **Incident triage:** backlog grows or jobs fail; find which worker, instance or queue, then pause, resume, restart, stop or resize it.
+- **Daily monitoring:** page left open on a second screen; glanced at for throughput, backlog and failure trends.
+- **Dev / debugging:** while building a varmq service locally; watch workers, queues, job payloads and errors as code changes.
+
+## Product Purpose
+
+Live dashboard and control panel for varmq worker fleets. Talks to varmq's REST API (`varmq.Handler`) on every instance of a service and shows the whole fleet in one place: workers, instances, queues and jobs, with history from the last hour to 30 days. Success: the user sees the fleet's real state at a glance and acts on the right worker without leaving the page.
+
+## Positioning
+
+- No agent, no database to run: one binary on the user's machine; collects only while `vartop web` runs.
+- Finds instances from static URLs, Kubernetes EndpointSlices or DNS, followed live; detects one URL answered by several instances behind a load balancer.
+- Merges every instance, or shows one; queue data grouped by Queue ID, never summed across instances.
+
+## Operating Context
+
+- `vartop web` serves the dashboard on a loopback address; browser on the same machine.
+- `vartop action` / `vartop concurrency`: same actions from a terminal, fanned out to every endpoint.
+- Config: servers with endpoints or discovery; switch server in the page.
+- History in a local SQLite store (24h of polls, up to 30 days of per-worker rates).
+
+## Capabilities and Constraints
+
+- Pages: Dashboard (fleet totals + per-worker rows with 10-min trend), Instance grid (every worker on every instance), Worker page (totals, success rate, completed/failed charts with 1h | 24h | 7d | 30d), Queues list, Queue job page (jobs by state, paged, payload, per-attempt errors). Confirm dialogs and action results.
+- Actions: pause, resume, restart, stop, concurrency; bulk pause/resume. Queue views are read-only.
+- **Stack (binding):** one Go binary. Server-rendered `html/template` + vendored htmx + plain CSS/JS, embedded with `go:embed`. No Node toolchain, no build step, no front-end framework.
+- Safety behavior (product function, not styling): loopback only; bearer token never reaches the browser; actions refused and nothing sent while data is stale or from another configuration; stale data called out with its age and reason.
+- Pages refresh live at each poll via htmx (job page does not, so an open job stays open).
+- varmq spec has no single-job route: a job has no permalink.
+
+## Brand Commitments
+
+- Name: vartop (lowercase). Companion to varmq.
+- No color, font or logo commitment confirmed; current look is replaceable.
+- Standing visual preference (chosen 2026-11-05 over three dealt directions): the category standard, a clean dark ops dashboard, played straight. Craft bar: Linear (calm dark UI, tight type, subtle borders, keyboard-friendly) and Temporal UI (job/execution lists, per-run timeline and event history).
+- Dark first; light theme built to the same craft; follows the OS setting.
+
+## Evidence on Hand
+
+- README screenshots: `docs/images/` (dashboard light/dark etc.).
+- Real fleet available locally for checks: fake varmq fixtures (`internal/fleet/fleettest`) and a real varmq + Redis demo.
+- No users, testimonials or metrics to cite.
+
+## Product Principles
+
+1. Truth over polish: never show old or merged data as if current and exact; say how old and why.
+2. Find, then act: every view leads to the worker, instance or queue at fault and the action on it.
+3. One fleet, many instances: merge by default, one instance on demand; never double count.
+4. Zero setup: nothing to deploy, build or sign in to.
+
+## Accessibility & Inclusion
+
+Best effort, no formal standard. Keep what goptics/vartop#7 fixed: page `h1`, labelled controls, `aria-current`, `<time datetime>`, focusable scroll regions, tables that stack on phones.
