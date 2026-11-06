@@ -232,7 +232,7 @@ th.name a:hover { color: var(--accent); text-decoration: underline; }
 .cell .status { align-self: center; }
 .cell .load { font-weight: 600; }
 .cell { position: relative; padding-bottom: 6px; }
-.cell::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 2px; background: linear-gradient(90deg, var(--subtle) calc(var(--busy) / var(--conc) * 100%), var(--line) 0); }
+.cell::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 2px; background: linear-gradient(90deg, var(--subtle) calc(var(--busy) / max(var(--conc), 1) * 100%), var(--line) 0); }
 .cell .pend { justify-self: end; color: var(--subtle); font-size: var(--fs-1); }
 .grid .down, .grid th.down { color: var(--subtle); background: color-mix(in srgb, var(--bad) 6%, var(--panel)); }
 .split { display: block; color: var(--subtle); font-size: var(--fs-1); white-space: pre; }
@@ -271,7 +271,6 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 
 /* worker page: main column (head, counters, charts) and a side column
    (controls, results) from 1200px */
-.back { margin: 0 0 12px; }
 .crumbs { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; color: var(--subtle); font-size: var(--fs-2); }
 .crumbs a { color: var(--subtle); text-decoration: none; }
 .crumbs a:hover { color: var(--fg); text-decoration: underline; }

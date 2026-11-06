@@ -481,18 +481,18 @@ func TestKPIGapsWithoutRates(t *testing.T) {
 	}
 }
 
-func TestHealthDots(t *testing.T) {
+func TestHealth(t *testing.T) {
 	bad := func(ep string) PodSnapshot { return PodSnapshot{Key: ep, Err: "down"} }
 	cases := []struct {
 		name string
 		s    *Snapshot
 		want HealthView
 	}{
-		{"all", snap(atTick(0), okPod("p0", nil), okPod("p1", nil), okPod("p2", nil)), HealthView{3, 3, "●"}},
-		{"some", snap(atTick(0), okPod("p0", nil), okPod("p1", nil), bad("p2")), HealthView{2, 3, "◐"}},
-		{"none", snap(atTick(0), bad("p0"), bad("p1"), bad("p2")), HealthView{0, 3, "○"}},
-		{"no pods", snap(atTick(0)), HealthView{0, 0, "○"}},
-		{"nil", nil, HealthView{0, 0, "○"}},
+		{"all", snap(atTick(0), okPod("p0", nil), okPod("p1", nil), okPod("p2", nil)), HealthView{3, 3}},
+		{"some", snap(atTick(0), okPod("p0", nil), okPod("p1", nil), bad("p2")), HealthView{2, 3}},
+		{"none", snap(atTick(0), bad("p0"), bad("p1"), bad("p2")), HealthView{0, 3}},
+		{"no pods", snap(atTick(0)), HealthView{0, 0}},
+		{"nil", nil, HealthView{0, 0}},
 	}
 	for _, tc := range cases {
 		if got := Health(tc.s); got != tc.want {
@@ -853,7 +853,7 @@ func TestEmptyInputs(t *testing.T) {
 	if g := BuildGrid(nil); len(g.Pods) != 0 || len(g.Rows) != 0 {
 		t.Errorf("BuildGrid(nil) = %+v", g)
 	}
-	if h := Health(nil); h != (HealthView{Dot: "○"}) {
+	if h := Health(nil); h != (HealthView{}) {
 		t.Errorf("Health(nil) = %+v", h)
 	}
 	if w := BalancerNote(nil); w != "" {

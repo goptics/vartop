@@ -167,6 +167,8 @@ func TestPageLinks(t *testing.T) {
 		{10000, 0, 50, "[1] 2 3 … 200"},
 		{10000, 5000, 50, "1 … 99 100 [101] 102 103 … 200"},
 		{10000, 9950, 50, "1 … 198 199 [200]"},
+		{100, 900, 50, "1 2"},                            // offset past the end: no current page
+		{1 << 62, 0, 1, "[1] 2 3 … 4611686018427387904"}, // a huge remote count stays O(1)
 	} {
 		if got := show(pageLinks(c.total, c.offset, c.limit, url)); got != c.want {
 			t.Errorf("pageLinks(%d, %d, %d) = %q, want %q", c.total, c.offset, c.limit, got, c.want)

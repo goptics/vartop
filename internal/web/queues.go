@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -61,23 +62,27 @@ type PageLink struct {
 
 // pageLinks numbers the pages of total items, limit a page, around the page
 // at offset: the first, the last and two either side of it, gaps between.
-// Nil for one page or an unknown total.
+// Nil for one page or an unknown total. Cost does not grow with total: a
+// remote instance reports it, so it can be any int64.
 func pageLinks(total int64, offset, limit int, url func(offset int) string) []PageLink {
 	if total <= int64(limit) || limit <= 0 {
 		return nil
 	}
-	last := int((total + int64(limit) - 1) / int64(limit))
+	// capped so (last-1)*limit stays an int offset
+	last := int(min((total-1)/int64(limit)+1, int64(math.MaxInt/limit)))
 	cur := offset/limit + 1
 	var out []PageLink
-	for n := 1; n <= last; n++ {
-		if n != 1 && n != last && (n < cur-2 || n > cur+2) {
-			if len(out) > 0 && out[len(out)-1].N != 0 {
-				out = append(out, PageLink{})
-			}
-			continue
+	add := func(n int) {
+		if len(out) > 0 && out[len(out)-1].N < n-1 {
+			out = append(out, PageLink{}) // gap
 		}
 		out = append(out, PageLink{N: n, URL: url((n - 1) * limit), Current: n == cur})
 	}
+	add(1)
+	for n := max(2, cur-2); n <= min(last-1, cur+2); n++ {
+		add(n)
+	}
+	add(last)
 	return out
 }
 

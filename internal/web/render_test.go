@@ -395,7 +395,7 @@ func dashboardPage() Page {
 		Noun:    podNoun,
 		Servers: []string{"dev", "prod"},
 		Pods:    []PodOption{{Label: "a"}, {Label: "b"}},
-		Health:  fleet.HealthView{Healthy: 2, Total: 2, Dot: "●"},
+		Health:  fleet.HealthView{Healthy: 2, Total: 2},
 		Dashboard: &fleet.DashboardView{
 			KPIs: fleet.KPIView{
 				CompletedPerSec: 12.5, FailedPerMin: 3, PendingMax: 9,
@@ -1079,7 +1079,9 @@ func TestOnset(t *testing.T) {
 		{[]fleet.Point{p(0, 1), p(1, 0)}, ""},
 		{[]fleet.Point{p(0, 0), p(1, 2), p(2, 1)}, "since 15:05"},
 		{[]fleet.Point{p(0, 1), {Gap: true}, p(2, 1)}, "since 15:06"},
-		{[]fleet.Point{p(0, 1), p(1, 1)}, "for 10+ min"},
+		{[]fleet.Point{p(0, 1), p(1, 1)}, "for 1+ min"},                    // run fills the series: start not seen
+		{[]fleet.Point{p(0, 1), p(10, 1)}, "for 10+ min"},                  // a full window
+		{[]fleet.Point{p(0, 1), {At: at.Add(20 * time.Second), V: 1}}, ""}, // just started: too short to say
 	} {
 		if got := onset(c.pts); got != c.want {
 			t.Errorf("onset(%v) = %q, want %q", c.pts, got, c.want)
