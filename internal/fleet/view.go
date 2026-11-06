@@ -57,7 +57,6 @@ type Point struct {
 // HealthView summarises pod health for the header.
 type HealthView struct {
 	Healthy, Total int
-	Dot            string // ● all healthy, ◐ some, ○ none
 }
 
 // KPIView is the card row above the dashboard table.
@@ -139,7 +138,7 @@ func StatusClass(status string) string {
 // Health counts healthy pods in the latest snapshot. nil (no poll yet) is
 // zero pods.
 func Health(latest *Snapshot) HealthView {
-	h := HealthView{Dot: "○"}
+	var h HealthView
 	if latest == nil {
 		return h
 	}
@@ -148,13 +147,6 @@ func Health(latest *Snapshot) HealthView {
 		if p.Err == "" {
 			h.Healthy++
 		}
-	}
-	switch {
-	case h.Healthy == 0:
-	case h.Healthy == h.Total:
-		h.Dot = "●"
-	default:
-		h.Dot = "◐"
 	}
 	return h
 }

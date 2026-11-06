@@ -2,7 +2,7 @@
 {{if not $pods}}<p class="empty">No {{$.Noun.Many}} to show.</p>
 {{else if not .Rows}}<p class="empty">No workers reported yet.</p>
 {{else}}<p class="legend">Each cell: status · busy/concurrency · pending</p>
-<div class="table-wrap">
+<div class="table-wrap grid-wrap" tabindex="0" aria-label="Workers by {{$.Noun.One}}">
 <table class="grid">
   <thead><tr>
     <th>Worker</th>{{range $pods}}
@@ -11,7 +11,7 @@
   <tbody>{{range .Rows}}
   <tr>
     <th scope="row" class="name"><a id="link-{{domID .Name}}" href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></th>{{range $i, $c := .Cells}}
-    <td{{if and (index $pods $i).Err (not $.Stale)}} class="down"{{end}}>{{if $.Stale}}—{{else if $c.Present}}<span class="status {{$c.Class}}">{{$c.Status}}</span> · {{$c.Busy}}/{{$c.Concurrency}} · {{$c.Pending}}{{else if $c.Unreached}}<span class="na">not reached</span>{{else}}—{{end}}</td>{{end}}
+    <td{{if and (index $pods $i).Err (not $.Stale)}} class="down"{{end}}>{{if $.Stale}}—{{else if $c.Present}}<span class="cell" style="--busy: {{$c.Busy}}; --conc: {{$c.Concurrency}}"><span class="status {{$c.Class}}">{{$c.Status}}</span><span class="load">{{$c.Busy}}/{{$c.Concurrency}}</span><span class="pend" title="pending">{{$c.Pending}}</span></span>{{else if $c.Unreached}}<span class="na">not reached</span>{{else}}<span class="na">—</span>{{end}}</td>{{end}}
   </tr>{{end}}
   </tbody>
 </table>
@@ -21,5 +21,5 @@
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
 
-{{define "content"}}<h1 class="sr">{{.Noun.Cap}} grid</h1>
+{{define "content"}}<header class="pagehead"><h1>{{.Noun.Cap}} grid</h1><p class="sub">Every worker on every {{.Noun.One}}</p></header>
 {{template "live" .}}{{end}}

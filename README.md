@@ -26,7 +26,7 @@ and pause, resume, restart, stop or resize it, from your browser or the command 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
-  <img alt="The vartop dashboard: completed/s, failed/min, pending and workers by status for a server of three instances behind a load balancer, with a row and a 10-minute trend per worker" src="docs/images/dashboard-light.png">
+  <img alt="The vartop dashboard: completed/s, failed/min, pending and workers by status for a server of three instances, with a row and a 10-minute trend per worker" src="docs/images/dashboard-light.png">
 </picture>
 
 ## What is vartop?
@@ -131,7 +131,7 @@ Click a worker for its totals and success rate, its two charts, and its controls
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/chart-hover-dark.png">
-  <img alt="Hovering the 7-day chart: Sat 24 Oct 03:00–03:15 · avg 27.4/s · peak 31.1/s · 3/3 instances" src="docs/images/chart-hover-light.png">
+  <img alt="Hovering the 7-day chart: Sun 1 Nov 17:00–17:15 · avg 38.3/s · peak 39.3/s · 3/3 instances" src="docs/images/chart-hover-light.png">
 </picture>
 
 The concurrency slider sets the pool size per instance, applied when you let go; **Pause**, **Resume**, **Restart** and **Stop** act on every instance shown.

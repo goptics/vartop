@@ -1,5 +1,5 @@
-{{define "confirm"}}<section class="confirm">
-  <h3>Confirm {{.Action}} on {{.Server}}</h3>
+{{define "confirm"}}<section class="confirm" aria-labelledby="confirm-head">
+  <h2 id="confirm-head">Confirm {{.Action}} on {{.Server}}</h2>
   <p>{{.Action}} each worker on each {{.Noun.One}} below:</p>
   <div class="table-wrap">
   <table>
@@ -14,6 +14,6 @@
     {{template "label_field" .}}
     <input type="hidden" name="confirm" value="1">
     {{range .Rows}}<input type="hidden" name="names" value="{{.Name}}">
-    {{end}}<button type="submit" class="danger">Confirm {{.Action}}</button>
+    {{end}}<button type="submit" class="primary">Confirm {{.Action}}</button>
   </form>
 </section>{{end}}

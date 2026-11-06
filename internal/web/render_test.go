@@ -395,7 +395,7 @@ func dashboardPage() Page {
 		Noun:    podNoun,
 		Servers: []string{"dev", "prod"},
 		Pods:    []PodOption{{Label: "a"}, {Label: "b"}},
-		Health:  fleet.HealthView{Healthy: 2, Total: 2, Dot: "●"},
+		Health:  fleet.HealthView{Healthy: 2, Total: 2},
 		Dashboard: &fleet.DashboardView{
 			KPIs: fleet.KPIView{
 				CompletedPerSec: 12.5, FailedPerMin: 3, PendingMax: 9,
@@ -423,7 +423,7 @@ func TestDashboardRenders(t *testing.T) {
 		"4 ×2 pods",
 		"mixed 3–5",
 		"absent on 2 pods",
-		"●", "2/2 pods",
+		`class="health h-ok"`, "2/2 pods",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body lacks %q", want)
@@ -455,7 +455,7 @@ func TestDashboardRowsAndKPIs(t *testing.T) {
 		`class="status active"`,
 		`class="status mixed"`,
 		"title=\"a: Running\nb: Running\"",
-		"<h1 class=\"sr\">Dashboard</h1>",
+		"<h1>Dashboard</h1>",
 		`data-label="Busy"`, // the phone layout's cell labels
 		">mixed</span><small class=\"split\">a: Running\nb: Paused</small>", // a mixed status's breakdown is text, not only a title
 		`hx-post="/bulk/pause"`,
@@ -630,7 +630,7 @@ func TestGridRenders(t *testing.T) {
 		`class="down"`,
 		`<small class="err">unreachable</small></th>`,                     // the header stays short...
 		`<li><b>b</b> : <span class="err">connection refused</span></li>`, // ...the error is below
-		`<h1 class="sr">Pod grid</h1>`,
+		`<h1>Pod grid</h1>`,
 		`class="status active"`, "2/4", `href="/workers/orders?server=dev"`,
 		`id="live"`,
 	} {
@@ -818,7 +818,7 @@ func TestCopyFollowsNoun(t *testing.T) {
 				"All "+many+" (merged)",
 				">"+n.Cap()+" grid</a>",
 				`title="healthy / total `+many+`"`,
-				"● 2/2 "+many+"</span>",
+				">2/2 "+many+"</span>",
 				"Pending (max/"+one+")",
 				"Concurrency (per "+one+")",
 				"absent on 2 "+many+"<",
@@ -882,7 +882,7 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 	}
 	// The primary colour is varmq's logo teal, which the native controls
 	// (the concurrency slider, checkboxes) take too.
-	for _, want := range []string{"#1A1B26", "#C0CAF5", "prefers-color-scheme: light", ".mixed", "--accent: #44BF9E", "accent-color: var(--accent)"} {
+	for _, want := range []string{"#0D0F14", "#E3E6ED", "prefers-color-scheme: light", ".mixed", "--accent: #44BF9E", "accent-color: var(--accent)"} {
 		if !strings.Contains(strings.ToUpper(string(css)), strings.ToUpper(want)) {
 			t.Errorf("app.css lacks %q", want)
 		}
@@ -1063,5 +1063,28 @@ func TestFeedCacheEvicts(t *testing.T) {
 	}
 	if c.get("a", time.Second, t0.Add(time.Minute+feedIdle+time.Second)) == a {
 		t.Error("a's idle feed was kept")
+	}
+}
+
+func TestOnset(t *testing.T) {
+	at := time.Date(2026, 11, 5, 15, 4, 0, 0, time.Local)
+	p := func(min int, v float64) fleet.Point {
+		return fleet.Point{At: at.Add(time.Duration(min) * time.Minute), V: v}
+	}
+	for _, c := range []struct {
+		pts  []fleet.Point
+		want string
+	}{
+		{nil, ""},
+		{[]fleet.Point{p(0, 1), p(1, 0)}, ""},
+		{[]fleet.Point{p(0, 0), p(1, 2), p(2, 1)}, "since 15:05"},
+		{[]fleet.Point{p(0, 1), {Gap: true}, p(2, 1)}, "since 15:06"},
+		{[]fleet.Point{p(0, 1), p(1, 1)}, "for 1+ min"},                    // run fills the series: start not seen
+		{[]fleet.Point{p(0, 1), p(10, 1)}, "for 10+ min"},                  // a full window
+		{[]fleet.Point{p(0, 1), {At: at.Add(20 * time.Second), V: 1}}, ""}, // just started: too short to say
+	} {
+		if got := onset(c.pts); got != c.want {
+			t.Errorf("onset(%v) = %q, want %q", c.pts, got, c.want)
+		}
 	}
 }

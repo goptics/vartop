@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,12 +50,13 @@ func TestQueuesPage(t *testing.T) {
 	}
 	text := visibleText(body)
 	// One copy of the shared queue's numbers: 10 submitted, not 20.
-	for _, want := range []string{"10", "No queue routes on: instance-", `aria-current="page">Queues`} {
+	for _, want := range []string{"10", "No queue routes on: instance-", `href="/queues?server=multi" aria-current="page">`} {
 		if !strings.Contains(text, want) && !strings.Contains(body, want) {
 			t.Errorf("GET /queues lacks %q", want)
 		}
 	}
-	if strings.Contains(text, "20") {
+	// the cell, not the page text: the page's clock may hold a "20"
+	if !strings.Contains(body, `data-label="Submitted (total)">10</td>`) {
 		t.Errorf("GET /queues summed the shared queue:\n%s", text)
 	}
 	if !strings.Contains(body, `href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"`) {
@@ -99,7 +101,8 @@ func TestQueueJobsPage(t *testing.T) {
 
 	// pending (2), one per page: a next link, no previous; the second, last page the other way.
 	_, body = fetch(t, srv, page+"?server=multi&limit=1", false)
-	if !strings.Contains(body, "(no ID yet)") || !strings.Contains(body, `<span class="preview">{&#34;n&#34;:1}</span>`) || !strings.Contains(body, `rel="next"`) || strings.Contains(body, `rel="prev"`) {
+	if !strings.Contains(body, "(no ID yet)") || !strings.Contains(body, `<span class="preview">{&#34;n&#34;:1}</span>`) || !strings.Contains(body, `rel="next"`) || strings.Contains(body, `rel="prev"`) ||
+		!strings.Contains(body, `aria-current="true">1</a>`) || !strings.Contains(body, `aria-label="Page 2">2</a>`) {
 		t.Errorf("first pending page:\n%s", body)
 	}
 	_, body = fetch(t, srv, page+"?server=multi&limit=1&offset=1", false)
@@ -134,5 +137,44 @@ func TestShortTime(t *testing.T) {
 		if got := shortTime(in, now); got != want {
 			t.Errorf("shortTime(%v) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestPageLinks(t *testing.T) {
+	url := func(off int) string { return strconv.Itoa(off) }
+	show := func(ps []PageLink) string {
+		var b strings.Builder
+		for _, p := range ps {
+			switch {
+			case p.N == 0:
+				b.WriteString("… ")
+			case p.Current:
+				b.WriteString("[" + strconv.Itoa(p.N) + "] ")
+			default:
+				b.WriteString(strconv.Itoa(p.N) + " ")
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+	for _, c := range []struct {
+		total         int64
+		offset, limit int
+		want          string
+	}{
+		{50, 0, 50, ""}, // one page
+		{-1, 0, 50, ""}, // total unknown
+		{120, 0, 50, "[1] 2 3"},
+		{10000, 0, 50, "[1] 2 3 … 200"},
+		{10000, 5000, 50, "1 … 99 100 [101] 102 103 … 200"},
+		{10000, 9950, 50, "1 … 198 199 [200]"},
+		{100, 900, 50, "1 2"},                            // offset past the end: no current page
+		{1 << 62, 0, 1, "[1] 2 3 … 4611686018427387904"}, // a huge remote count stays O(1)
+	} {
+		if got := show(pageLinks(c.total, c.offset, c.limit, url)); got != c.want {
+			t.Errorf("pageLinks(%d, %d, %d) = %q, want %q", c.total, c.offset, c.limit, got, c.want)
+		}
+	}
+	if ps := pageLinks(120, 50, 50, url); ps[0].URL != "0" || ps[2].URL != "100" {
+		t.Errorf("page URLs = %q, %q, want offsets 0, 100", ps[0].URL, ps[2].URL)
 	}
 }
