@@ -3,7 +3,9 @@ package fleet
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 
@@ -24,12 +26,30 @@ type UnitQueues struct {
 
 // QueueGroup is one Queue ID across the fleet: one copy of its summary, not
 // a sum — every instance reads the same storage — and the units that
-// report it, in the order fetched.
+// report it, in the order fetched. Its Paused is the first copy's that
+// reports one (nil: no unit serves the pause route).
 type QueueGroup struct {
 	api.QueueSummary
-	On      []string      // labels of the units reporting it, each once
-	Clients []*api.Client // the clients that reported it, for the jobs routes
-	labels  []string      // the label of each of Clients
+	On       []string      // labels of the units reporting it, each once
+	Clients  []*api.Client // the clients that reported it, for the jobs and action routes
+	labels   []string      // the label of each of Clients
+	pausable []bool        // whether each of Clients is sent a queue action: it reported paused, or only an error
+}
+
+// QueueUnit is one unit that reports a queue: its label and endpoint, and
+// whether a queue action is sent to it (see QueueAct).
+type QueueUnit struct {
+	Label, Endpoint string
+	Pausable        bool
+}
+
+// Units are the units that report g, in g's order.
+func (g QueueGroup) Units() []QueueUnit {
+	out := make([]QueueUnit, len(g.Clients))
+	for i, c := range g.Clients {
+		out[i] = QueueUnit{Label: g.labels[i], Endpoint: c.PrimaryEndpoint(), Pausable: g.pausable[i]}
+	}
+	return out
 }
 
 // QueuesView is the queues of a server: Groups sorted by ID. Unsupported
@@ -82,10 +102,16 @@ func GroupQueues(units []UnitQueues) QueuesView {
 				v.Groups[i].QueueSummary = q // a copy that read the storage beats an error
 			}
 			g := &v.Groups[i]
+			if g.Paused == nil && q.Paused != nil {
+				g.Paused, g.PausedAt = q.Paused, q.PausedAt // an older unit's copy says nothing of it
+			}
 			if !slices.Contains(g.On, u.Label) {
 				g.On = append(g.On, u.Label)
 			}
 			g.Clients, g.labels = append(g.Clients, u.Client), append(g.labels, u.Label)
+			// An error entry has no paused (spec): its unit may serve the
+			// route; sending finds out, and an older one answers 404.
+			g.pausable = append(g.pausable, q.CanPause() || q.Err != "")
 		}
 	}
 	slices.SortFunc(v.Groups, func(a, b QueueGroup) int { return cmp.Compare(a.ID, b.ID) })
@@ -120,6 +146,55 @@ func FetchJobs(ctx context.Context, g QueueGroup, state contract.JobState, offse
 		lastErr = fmt.Errorf("no unit has queue %s now", g.ID)
 	}
 	return nil, "", lastErr
+}
+
+// QueueAct sends action (pause or resume) on queue g to every unit that
+// reported it, at once, and returns one result per unit in g's order, and
+// the queue's entry as the first unit that did it answered (nil if none
+// did). The pause flag lives in the queue's storage, so one unit would do;
+// each is sent it anyway (the route is idempotent) so the results say what
+// every unit answered. A unit whose copy did not report paused (varmq
+// before API 1.2.0) is sent nothing: no change, not supported. A unit that
+// answers it cannot (see api.QueueActionUnsupported) is failed, not
+// supported; one that no longer binds the queue (JSON 404) is no change.
+// units label the results' tips (see UnitsOf); n words their messages.
+func QueueAct(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, n Noun, action string) ([]ActionResult, *api.QueueSummary) {
+	results := make([]ActionResult, len(g.Clients))
+	answers := make([]*api.QueueSummary, len(g.Clients))
+	var pg panicGroup
+	for i, c := range g.Clients {
+		key := c.PrimaryEndpoint()
+		u := units[key]
+		u.Key = key
+		results[i] = ActionResult{Pod: g.labels[i], Key: key, Tip: u.Tip(), Outcome: "ok"}
+		if !g.pausable[i] {
+			results[i].Outcome, results[i].Msg = "no change", "not supported by this "+n.One
+			continue
+		}
+		pg.Go(func() {
+			q, err := c.QueueAction(ctx, g.ID, action)
+			var apiErr *api.APIError
+			switch r := &results[i]; {
+			case err == nil:
+				answers[i] = &q
+			case api.QueueActionUnsupported(err):
+				r.Outcome, r.Msg = "failed", "not supported by this "+n.One
+			case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound:
+				r.Outcome, r.Msg = "no change", "queue not on this "+n.One+" now"
+			case errors.As(err, &apiErr):
+				r.Outcome, r.Msg = "failed", apiErr.Message
+			default:
+				r.Outcome, r.Msg = "failed", err.Error()
+			}
+		})
+	}
+	pg.Wait()
+	for _, q := range answers {
+		if q != nil {
+			return results, q
+		}
+	}
+	return results, nil
 }
 
 // UnitLabel labels the client of an endpoint of latest for the queue pages:
