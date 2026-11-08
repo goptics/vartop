@@ -228,20 +228,18 @@ func (h *handler) workflows(w http.ResponseWriter, r *http.Request) {
 			v.NoRoutes = m.Units > 0 && len(m.Unsupported) == m.Units
 			now := time.Now()
 			for _, g := range m.Groups {
-				row := WorkflowRow{ID: g.ID, URL: workflowURL(g.ID, p.Server, 0), State: stateView(string(g.State)), Progress: progressOf(g.WorkflowRecord), On: g.On}
+				// another row with this ID on the page: link each to its own
+				var at int64
+				if slices.ContainsFunc(m.Groups, func(o fleet.WorkflowGroup) bool { return o.ID == g.ID && o.CreatedAt != g.CreatedAt }) {
+					at = g.CreatedAt
+				}
+				row := WorkflowRow{ID: g.ID, URL: workflowURL(g.ID, p.Server, at), State: stateView(string(g.State)), Progress: progressOf(g.WorkflowRecord), On: g.On}
 				if g.CreatedAt > 0 {
 					row.Created = shortTime(time.UnixMilli(g.CreatedAt), now)
 					row.CreFull, row.CreatedISO = msTime(g.CreatedAt)
 				}
 				row.Duration, row.Running = runSpan(g.WorkflowRecord, now)
 				v.Rows = append(v.Rows, row)
-			}
-			// Another row with this ID on the page: link each to its own.
-			for i := range v.Rows {
-				g := m.Groups[i]
-				if slices.ContainsFunc(m.Groups, func(o fleet.WorkflowGroup) bool { return o.ID == g.ID && o.CreatedAt != g.CreatedAt }) {
-					v.Rows[i].URL = workflowURL(g.ID, p.Server, g.CreatedAt)
-				}
 			}
 			if v.Offset > 0 {
 				v.Prev = workflowsURL(p.Server, v.State, max(0, v.Offset-defaultWorkflowLimit))
