@@ -312,7 +312,7 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Task panel** (`.wf-panel`): over the graph's right side (340px, `panel`, `line-strong`, 8px, no shadow), as tall as the well at most, scrolls; under the graph below 760px. Facts as `dl.kv` (6.5em terms, 13px), reason in mono `bad`, "Undo job" block under a hairline; close button top-right. Opening it moves the view so the task (or the whole graph) sits clear of it.
 - **Task table** (`table.tasks`): the accessible fallback, row `id="task-N"` (`:target` accent 8%): name (mono 13px, `always` chip), state + reason (12px `subtle`), deps, queue link (to its job page), job ID, result size, undo state. Stacks under 640px.
 - **Motion:** pulse ring 1.8s ease-out, flowing edge .9s linear, box stroke .12s. All off under `prefers-reduced-motion` (ring shown static at 50%).
-- **Live:** `#live` polls itself (`hx-trigger="every Ns"`, `hx-disinherit="*"`) while the workflow runs; the first answer of an ended (or missing, or ambiguous) workflow has no trigger, so polling stops. workflow.js keeps the view, open panel and focused task across each swap.
+- **Live:** `#live` polls itself (`hx-trigger="every Ns"`, `hx-disinherit="*"`) while the workflow runs; the first answer of an ended (or missing, or ambiguous) workflow has no trigger, so polling stops. workflow.js keeps the view, open panel, focused task and focused control across each swap. Unlike the dashboard and worker page (`TestLiveRegionHoldsNoControls`), the cancel buttons, zoom buttons and panel live inside `#live`: their state follows the record (no cancel once it ended), and the script hands focus back.
 
 ## Do's and Don'ts
 
