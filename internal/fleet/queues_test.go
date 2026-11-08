@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -308,5 +309,157 @@ func TestQueueActTransportError(t *testing.T) {
 	}
 	if now.IsPaused() || !now.CanPause() || now.paused[0] == nil || *now.paused[0] {
 		t.Errorf("a failure changed the group: paused %v, can %v", now.IsPaused(), now.CanPause())
+	}
+}
+
+// workflowFake is a fake varmq serving wfs on its workflow routes.
+func workflowFake(t *testing.T, instance string, wfs ...*fleettest.Workflow) (*fleettest.Varmq, *httptest.Server) {
+	t.Helper()
+	f, srv := fleettest.NewVarmq(t, instance, nil)
+	f.Mu.Lock()
+	f.Workflows = append([]*fleettest.Workflow{}, wfs...)
+	f.Mu.Unlock()
+	return f, srv
+}
+
+// A durable workflow two units share is one row reported by both; an
+// in-memory one of the same ID created at another time is its own row;
+// rows go newest first; an older varmq is named, not failed.
+func TestMergeWorkflows(t *testing.T) {
+	const now = int64(1762228800000)
+	shared := fleettest.SampleWorkflows(now)
+	clash := fleettest.NewWorkflow(contract.WorkflowRecord{ID: fleettest.DiamondID, State: contract.WorkflowRunning, CreatedAt: now - 1000})
+	_, a := workflowFake(t, "a", shared...)
+	_, b := workflowFake(t, "b", append([]*fleettest.Workflow{clash}, shared[:3]...)...)
+	_, old := fleettest.NewVarmq(t, "old", nil)
+	clients := []*api.Client{api.NewClient(a.URL, ""), api.NewClient(b.URL, ""), api.NewClient(old.URL, "")}
+
+	v := MergeWorkflows(FetchWorkflows(context.Background(), clients, byInstance, "", 50), 0, 50)
+	var got []string
+	for _, g := range v.Groups {
+		got = append(got, g.ID+"@"+strings.Join(g.On, "+"))
+	}
+	want := []string{fleettest.DiamondID + "@b", fleettest.RunningID + "@a+b", fleettest.DiamondID + "@a+b", fleettest.SagaID + "@a+b", fleettest.CancelID + "@a"}
+	if !slices.Equal(got, want) || v.More || v.Units != 3 || !slices.Equal(v.Unsupported, []string{"old"}) || v.Failed != nil {
+		t.Errorf("merged = %v (more %v, unsupported %v, failed %v), want %v", got, v.More, v.Unsupported, v.Failed, want)
+	}
+	if g := v.Groups[1]; len(g.Clients) != 2 || g.Final() || len(g.Tasks) != 7 {
+		t.Errorf("running group = %+v", g)
+	}
+
+	// a page from offset 1, two long: one more after it
+	v = MergeWorkflows(FetchWorkflows(context.Background(), clients, byInstance, "", 1+2+1), 1, 2)
+	if len(v.Groups) != 2 || v.Groups[0].ID != fleettest.RunningID || !v.More {
+		t.Errorf("page 2 = %+v, more %v", v.Groups, v.More)
+	}
+	// a state filter goes to every unit
+	v = MergeWorkflows(FetchWorkflows(context.Background(), clients, byInstance, contract.WorkflowCompensated, 50), 0, 50)
+	if len(v.Groups) != 1 || v.Groups[0].ID != fleettest.SagaID {
+		t.Errorf("compensated = %+v", v.Groups)
+	}
+}
+
+// Copies of one workflow read at different moments: the one further on
+// wins, ended over running.
+func TestMergeWorkflowsKeepsMostAdvanced(t *testing.T) {
+	rec := contract.WorkflowRecord{ID: "w", State: contract.WorkflowRunning, CreatedAt: 5, Tasks: []contract.TaskRecord{{Name: "t", State: contract.JobPending}}}
+	done := rec
+	done.State, done.FinishedAt, done.Tasks = contract.WorkflowCompleted, 9, []contract.TaskRecord{{Name: "t", State: contract.JobCompleted}}
+	_, a := workflowFake(t, "a", fleettest.NewWorkflow(rec))
+	_, b := workflowFake(t, "b", fleettest.NewWorkflow(done))
+	for _, order := range [][]*api.Client{
+		{api.NewClient(a.URL, ""), api.NewClient(b.URL, "")},
+		{api.NewClient(b.URL, ""), api.NewClient(a.URL, "")},
+	} {
+		v := MergeWorkflows(FetchWorkflows(context.Background(), order, byInstance, "", 10), 0, 10)
+		if len(v.Groups) != 1 || v.Groups[0].State != contract.WorkflowCompleted || len(v.Groups[0].On) != 2 {
+			t.Errorf("merged = %+v", v.Groups)
+		}
+	}
+}
+
+// A unit's first offset+limit+1 workflows past the route's page cap are
+// read in pages.
+func TestFetchWorkflowsPages(t *testing.T) {
+	var wfs []*fleettest.Workflow
+	for i := range api.MaxWorkflowLimit + 300 {
+		wfs = append(wfs, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fmt.Sprintf("w%04d", i), State: contract.WorkflowCompleted, CreatedAt: int64(i + 1)}))
+	}
+	f, s := workflowFake(t, "a", wfs...)
+	units := FetchWorkflows(context.Background(), []*api.Client{api.NewClient(s.URL, "")}, byInstance, "", api.MaxWorkflowLimit+101)
+	if u := units[0]; u.Err != nil || len(u.Workflows) != api.MaxWorkflowLimit+101 || u.Workflows[0].ID != fmt.Sprintf("w%04d", api.MaxWorkflowLimit+299) {
+		t.Fatalf("unit = %d workflows, err %v", len(u.Workflows), u.Err)
+	}
+	var lists int
+	for _, c := range f.Calls() {
+		if c == "GET /workflows" {
+			lists++
+		}
+	}
+	if lists != 2 {
+		t.Errorf("%d list requests, want 2 pages", lists)
+	}
+}
+
+// FetchWorkflow groups the copies by created_at and names the units that
+// hold the ID twice (409), lack the route, or fail.
+func TestFetchWorkflow(t *testing.T) {
+	const now = int64(1762228800000)
+	wfs := fleettest.SampleWorkflows(now)
+	_, a := workflowFake(t, "a", wfs...)
+	_, b := workflowFake(t, "b", wfs[0], fleettest.NewWorkflow(contract.WorkflowRecord{ID: fleettest.DiamondID, CreatedAt: 1})) // two stores hold it
+	_, c := workflowFake(t, "c", wfs[0])
+	_, old := fleettest.NewVarmq(t, "old", nil)
+	clients := []*api.Client{api.NewClient(a.URL, ""), api.NewClient(b.URL, ""), api.NewClient(c.URL, ""), api.NewClient(old.URL, "")}
+
+	r := FetchWorkflow(context.Background(), clients, byInstance, fleettest.DiamondID)
+	if len(r.Groups) != 1 || !slices.Equal(r.Groups[0].On, []string{"a", "c"}) || !slices.Equal(r.Ambiguous, []string{"b"}) || !slices.Equal(r.Unsupported, []string{"old"}) || r.Failed != nil {
+		t.Errorf("read = %+v", r)
+	}
+	if g, ok := r.Group(now - 12*60_000); !ok || g.ID != fleettest.DiamondID || !g.Final() {
+		t.Errorf("Group(created_at) = %+v, %v", g, ok)
+	}
+	if _, ok := r.Group(1); ok {
+		t.Error("Group of another created_at found")
+	}
+	if r := FetchWorkflow(context.Background(), clients, byInstance, "nope"); r.Groups != nil || r.Ambiguous != nil || len(r.Unsupported) != 1 {
+		t.Errorf("unknown ID read = %+v", r)
+	}
+}
+
+// CancelWorkflow goes to the first unit that takes it: one that fails, or
+// lost the workflow, gives way to the next; undo=false turns the undo jobs
+// off.
+func TestCancelWorkflow(t *testing.T) {
+	wfs := fleettest.SampleWorkflows(1762228800000)
+	running := wfs[1]
+	_, empty := workflowFake(t, "gone")
+	fb, b := workflowFake(t, "b", running)
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	g := WorkflowGroup{WorkflowRecord: running.Record(),
+		Clients: []*api.Client{api.NewClient(dead.URL, ""), api.NewClient(empty.URL, ""), api.NewClient(b.URL, "")},
+		labels:  []string{"dead", "gone", "b"}}
+
+	res, after := CancelWorkflow(context.Background(), g, nil, instanceNoun, true)
+	if after == nil || after.State != contract.WorkflowCancelled || after.UndoOnCancel || running.Record().State != contract.WorkflowCancelled {
+		t.Fatalf("after = %+v", after)
+	}
+	if len(res) != 3 || res[0].Outcome != "failed" || res[1].Outcome != "no change" || res[1].Msg != "workflow not on this instance now" ||
+		res[2] != (ActionResult{Pod: "b", Key: b.URL, Tip: b.URL, Outcome: "ok", Msg: "now cancelled"}) {
+		t.Errorf("results = %+v", res)
+	}
+	if want := "PATCH /workflows/" + fleettest.RunningID + "/actions/cancel"; !slices.Contains(fb.Calls(), want) {
+		t.Errorf("b calls %v, want %s", fb.Calls(), want)
+	}
+
+	// the saga's undo jobs run on a plain cancel of a running copy
+	saga := fleettest.NewWorkflow(contract.WorkflowRecord{ID: "s", State: contract.WorkflowRunning, CreatedAt: 1, UndoOnCancel: true,
+		Tasks: []contract.TaskRecord{{Name: "a", State: contract.JobCompleted, Undo: &contract.TaskRecord{Name: "a", State: contract.JobWaiting}}, {Name: "b", State: contract.JobWaiting, Deps: []string{"a"}}}})
+	_, s := workflowFake(t, "s", saga)
+	g = WorkflowGroup{WorkflowRecord: saga.Record(), Clients: []*api.Client{api.NewClient(s.URL, "")}, labels: []string{"s"}}
+	if res, after := CancelWorkflow(context.Background(), g, nil, instanceNoun, false); after == nil || after.State != contract.WorkflowCompensating ||
+		after.Tasks[0].Undo.State != contract.JobPending || after.Tasks[1].State != contract.JobCancelled || res[0].Msg != "now compensating" {
+		t.Errorf("plain cancel = %+v, %+v", after, res)
 	}
 }
