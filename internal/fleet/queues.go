@@ -166,9 +166,11 @@ func FetchJobs(ctx context.Context, g QueueGroup, state contract.JobState, offse
 // QueueAct sends action (pause or resume) on queue g to every unit that
 // reported it, at once, and returns one result per unit in g's order, and
 // g as the units answered: each answering unit's paused from its answer,
-// the entry's paused from the first answer that has one (g's own where
-// none has: an error entry has no paused). The pause flag lives in the
-// queue's storage, so one unit would do;
+// the entry's paused from the first answer that has one. An answer with no
+// paused (an error entry: the flag was stored, then reading the queue back
+// failed) counts as the action's target; so does the entry when no answer
+// has paused. A unit that did not answer 200 keeps what it said before.
+// The pause flag lives in the queue's storage, so one unit would do;
 // each is sent it anyway (the route is idempotent) so the results say what
 // every unit answered. A unit whose copy did not report paused (varmq
 // before API 1.2.0) is sent nothing: no change, not supported. A unit that
@@ -206,16 +208,28 @@ func QueueAct(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, n
 		})
 	}
 	pg.Wait()
-	after, first := g, true
+	target := action == "pause"
+	after, read, stored := g, false, false
 	after.paused = slices.Clone(g.paused)
 	for i, q := range answers {
-		if q == nil || q.Paused == nil {
-			continue // none, or an error entry: flag stored, not read back
+		switch {
+		case q == nil: // not 200: keeps what it said
+		case q.Paused == nil: // error entry: flag stored, not read back
+			after.paused[i], stored = &target, true
+		default:
+			after.paused[i] = q.Paused
+			if !read {
+				after.Paused, after.PausedAt, read = q.Paused, q.PausedAt, true
+			}
 		}
-		after.paused[i] = q.Paused
-		if first {
-			after.Paused, after.PausedAt, first = q.Paused, q.PausedAt, false
+	}
+	if stored && !read {
+		// paused_at unknown: varmq keeps it on a repeat pause, so g's
+		// holds then; a fresh pause has none to show, resume clears it.
+		if !target || !g.IsPaused() {
+			after.PausedAt = 0
 		}
+		after.Paused = &target
 	}
 	return results, after
 }

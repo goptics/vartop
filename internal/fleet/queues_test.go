@@ -228,8 +228,9 @@ func TestQueueActUnsupported(t *testing.T) {
 }
 
 // A unit whose entry is an error may serve the route: it is sent the
-// action. One that stores the flag but answers an error entry (200) leaves
-// its paused as it was; the group's paused comes from an answer that has it.
+// action. One that answers an error entry (200: flag stored) is taken at
+// the action's word; the group's paused comes from an answer that has it,
+// else the same word.
 func TestQueueActErrorEntries(t *testing.T) {
 	const id = "q"
 	bad := &fleettest.Queue{Summary: `{"id":"q","error":"redis down"}`, ActionErr: "redis down"}
@@ -248,8 +249,11 @@ func TestQueueActErrorEntries(t *testing.T) {
 	if !now.CanPause() || !now.IsPaused() || now.PausedAt == 0 {
 		t.Errorf("answered group: can %v paused %v at %d, want a's answer", now.CanPause(), now.IsPaused(), now.PausedAt)
 	}
-	if now.paused[0] != nil || now.paused[1] == nil || !*now.paused[1] {
-		t.Errorf("unit paused = %v, %v, want e's kept (nil), a's from its answer", now.paused[0], now.paused[1])
+	if now.paused[0] == nil || !*now.paused[0] || now.paused[1] == nil || !*now.paused[1] {
+		t.Errorf("unit paused = %v, %v, want both paused", now.paused[0], now.paused[1])
+	}
+	if all, _ := now.PauseState(); !all {
+		t.Error("PauseState: want all paused (Resume alone)")
 	}
 	if len(res) != 2 || res[0].Outcome != "ok" || res[1].Outcome != "ok" {
 		t.Errorf("results = %+v", res)
@@ -257,6 +261,38 @@ func TestQueueActErrorEntries(t *testing.T) {
 	want := "PATCH /queues/q/actions/pause"
 	if !slices.Contains(fe.Calls(), want) || !slices.Contains(fa.Calls(), want) {
 		t.Errorf("calls e %v, a %v, want %s on both", fe.Calls(), fa.Calls(), want)
+	}
+
+	// Every answer an error entry: the group takes the action's word too.
+	// paused_at: unknown on a fresh pause, kept on a repeat one, gone on resume.
+	q1, q2 := pausableQueue(id), pausableQueue(id)
+	q1.ActionErr, q2.ActionErr = "redis down", "redis down"
+	_, s1 := queueFake(t, "s1", map[string]*fleettest.Queue{id: q1})
+	_, s2 := queueFake(t, "s2", map[string]*fleettest.Queue{id: q2})
+	clients = []*api.Client{api.NewClient(s1.URL, ""), api.NewClient(s2.URL, "")}
+	read := func() QueueGroup {
+		g, _ := GroupQueues(FetchQueues(context.Background(), clients, byInstance)).Group(id)
+		return g
+	}
+	for _, c := range []struct {
+		action string
+		paused bool
+		keepAt bool // PausedAt is g's
+	}{{"pause", true, false}, {"pause", true, true}, {"resume", false, false}} {
+		g := read()
+		_, now := QueueAct(context.Background(), g, nil, instanceNoun, c.action)
+		wantAt := int64(0)
+		if c.keepAt {
+			wantAt = g.PausedAt
+			if wantAt == 0 {
+				t.Fatalf("%s: repeat pause read no paused_at", c.action)
+			}
+		}
+		all, none := now.PauseState()
+		if !now.CanPause() || now.IsPaused() != c.paused || now.PausedAt != wantAt || all != c.paused || none == c.paused {
+			t.Errorf("%s (keep at %v): can %v paused %v at %d, state %v %v; want paused %v at %d",
+				c.action, c.keepAt, now.CanPause(), now.IsPaused(), now.PausedAt, all, none, c.paused, wantAt)
+		}
 	}
 }
 
@@ -270,7 +306,7 @@ func TestQueueActTransportError(t *testing.T) {
 	if len(res) != 1 || res[0].Outcome != "failed" || res[0].Msg == "" {
 		t.Errorf("results = %+v, want failed with the error", res)
 	}
-	if now.IsPaused() {
-		t.Error("a failure changed the group")
+	if now.IsPaused() || !now.CanPause() || now.paused[0] == nil || *now.paused[0] {
+		t.Errorf("a failure changed the group: paused %v, can %v", now.IsPaused(), now.CanPause())
 	}
 }
