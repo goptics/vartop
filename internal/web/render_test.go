@@ -1387,6 +1387,13 @@ func TestWorkflowRenders(t *testing.T) {
 	if body := run(t, "workflow", "wfctl", WorkflowCtl{Server: "dev", ID: "w", At: 1}); !strings.Contains(body, "Cancel workflow") || strings.Contains(body, "without undo") {
 		t.Errorf("wfctl without undo_on_cancel:\n%s", body)
 	}
+	rec := wfs[1].Record()
+	rec.UndoOnCancel = false
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{"a"}}, "dev", time.Now())
+	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
+	if !strings.Contains(body, `<dt>On cancel</dt><dd>no undo jobs</dd>`) || !strings.Contains(body, "Cancel workflow") || strings.Contains(body, "without undo") {
+		t.Errorf("running page without undo_on_cancel:\n%s", body)
+	}
 
 	// over the edge cap: no graph, a note, every task in the table
 	var tasks []contract.TaskRecord
