@@ -108,7 +108,7 @@
 </table>
 </div>
 {{else}}<header class="qhead"><h1 class="qid">{{.ID}}</h1></header>
-{{if .Others}}<p class="note" role="note">Several workflows have this ID (in-memory ones, each on its own {{$.Noun.One}}). Pick one:</p>
+{{if .Others}}<p class="note" role="note">{{if .Gone}}The workflow of this ID created at that time is no longer reported. Other workflows have this ID:{{else}}Several workflows have this ID (in-memory ones, each on its own {{$.Noun.One}}). Pick one:{{end}}</p>
 <ul class="units">{{range .Others}}<li><a href="{{.URL}}">created {{.Created}}</a> · {{.State}} · {{range $i, $l := .On}}{{if $i}}, {{end}}{{$l}}{{end}}</li>{{end}}</ul>{{end}}
 {{if .Ambiguous}}<p class="note" role="note">More than one storage on {{range $i, $l := .Ambiguous}}{{if $i}}, {{end}}{{$l}}{{end}} holds a workflow with this ID (409).</p>{{end}}
 {{range .Failed}}<p class="err">{{.}}</p>{{end}}

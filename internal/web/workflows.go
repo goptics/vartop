@@ -271,9 +271,10 @@ type WorkflowView struct {
 	Tasks      []TaskView
 	Graph      GraphView
 	Ctl        WorkflowCtl
-	// Pick: no workflow is shown, only Others to pick from (several
-	// workflows have the ID, and the URL names none of them).
-	Pick bool
+	// Pick: no workflow is shown, only Others to pick from: several
+	// workflows have the ID and the URL names none of them, or (Gone) the
+	// one it names (by at) is no longer reported.
+	Pick, Gone bool
 	// Others are the other workflows of this ID (in-memory ones of other
 	// processes); Ambiguous the units holding the ID in several storages
 	// (409); Failed those whose read failed.
@@ -351,9 +352,11 @@ func (h *handler) workflow(w http.ResponseWriter, r *http.Request) {
 					stop()
 				}
 				p.Workflow = v
-			case len(read.Groups) > 1:
+			case len(read.Groups) > 1 || at != 0 && len(read.Groups) > 0:
+				// several of the ID, or the one the URL names is gone
+				// and others are left: pick one
 				stop()
-				p.Workflow = &WorkflowView{ID: id, Pick: true, Ambiguous: read.Ambiguous, Failed: read.Failed}
+				p.Workflow = &WorkflowView{ID: id, Pick: true, Gone: at != 0, Ambiguous: read.Ambiguous, Failed: read.Failed}
 				for _, o := range read.Groups {
 					p.Workflow.Others = append(p.Workflow.Others, choiceOf(o, p.Server))
 				}
