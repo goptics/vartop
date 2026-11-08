@@ -145,6 +145,7 @@ var funcs = template.FuncMap{
 	"rangeSwitch":   rangeSwitch,
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
 	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
+	"fullMs":        func(ms int64) string { full, _ := msTime(ms); return full },
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",
@@ -154,8 +155,11 @@ var funcs = template.FuncMap{
 //   - dashboard, grid, detail, queues, queue: ExecuteTemplate(w, "layout", Page) renders the
 //     full document. The dashboard and detail sets also define "live_oob"
 //     (Page): the #live region as an out-of-band swap, for action responses.
+//   - queue also defines "qstate" (QueueCtl): the paused badge and
+//     pause/resume buttons, out of band with OOB set, for action responses.
 //   - results: ExecuteTemplate(w, "results", ResultsView).
-//   - confirm: ExecuteTemplate(w, "confirm", ConfirmView).
+//   - confirm: ExecuteTemplate(w, "confirm", ConfirmView), and
+//     "queue_confirm" (QueueConfirmView) for a queue action.
 func parseTemplates() (map[string]*template.Template, error) {
 	sets := make(map[string]*template.Template)
 	for _, name := range []string{"dashboard", "grid", "detail", "queues", "queue", "results", "confirm"} {

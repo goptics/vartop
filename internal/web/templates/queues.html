@@ -13,7 +13,7 @@
   </tr></thead>
   <tbody>{{range .Groups}}
   <tr>
-    <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}">{{.ID}}</a></th>{{with .Counts}}
+    <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}">{{.ID}}</a>{{if .IsPaused}} <span class="status paused"{{with .PausedAt}} title="paused at {{fullMs .}}"{{end}}>paused</span>{{end}}</th>{{with .Counts}}
     <td class="num" data-label="Pending">{{.Pending}}</td>
     <td class="num" data-label="Processing">{{.Processing}}</td>
     <td class="num" data-label="Completed">{{.Completed}}</td>
