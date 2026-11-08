@@ -6,13 +6,12 @@
 // graph scrolls and each task links to its table row.
 //
 // While the workflow runs #live polls and is swapped whole: the view, the
-// open task and the focused task are kept across each swap.
+// open task and whatever had focus in it are kept across each swap.
 (() => {
   const MIN = 0.2, MAX = 2.5;
   let view = null; // {k, x, y}: the pan and zoom of the graph shown
   let shown = ""; // the page the view is of
   let open = null; // the index of the task whose panel is open
-  let focused = null; // the index of the task focused before a swap
   let height = ""; // the graph well's height, kept across swaps
   let drag = null; // the pointer drag under way
   const pointers = new Map(); // pointers down on the graph: pinch
@@ -62,7 +61,10 @@
   // swap, the view, panel and focus it had.
   function init() {
     const p = parts();
-    if (!p) return;
+    // htmx fires afterSwap for the oob parts of a poll too: a graph taken
+    // over already is left as it is (its panel, and the focus in it)
+    if (!p || p.svg.dataset.taken) return;
+    p.svg.dataset.taken = "1";
     p.port.classList.add("pz");
     p.svg.removeAttribute("viewBox"); // user units are px; .view pans and zooms
     p.box.querySelector(".dag-tools").hidden = false;
@@ -79,11 +81,6 @@
     }
     height = p.port.style.height;
     if (open !== null) select(open, false);
-    if (focused !== null) {
-      const n = node(focused);
-      if (n) n.focus({ preventScroll: true });
-      focused = null;
-    }
   }
 
   const node = (i) => document.querySelector(`.dag .node[data-i="${i}"]`);
@@ -334,26 +331,26 @@
     if (n && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest(".dag .node"))) trace(null);
   });
 
-  // keyOf names a control of #live that a swap replaces, so the same one
-  // of the new #live can take focus back: the zoom buttons, the panel's
-  // close, the cancel buttons, the graph well.
+  // keyOf names what had focus in #live, which a swap replaces, so the
+  // same of the new #live can take focus back: a task, the zoom buttons,
+  // the panel, its close and its links, the cancel buttons, the graph well.
   function keyOf(el) {
     if (!el || !el.closest || !el.closest("#live")) return null;
+    if (el.matches(".dag .node")) return `.dag .node[data-i="${el.dataset.i}"]`;
     if (el.matches("[data-zoom]")) return `[data-zoom="${el.dataset.zoom}"]`;
     if (el.matches(".wf-panel .close")) return ".wf-panel .close";
+    if (el.matches(".wf-panel a[href]")) return `.wf-panel .body a[href="${CSS.escape(el.getAttribute("href"))}"]`;
+    if (el.closest(".wf-panel")) return ".wf-panel";
     if (el.matches("#wfctl button")) return el.name ? "#wfctl button[name]" : "#wfctl button:not([name])";
     if (el.matches(".dag-port")) return ".dag-port";
     return null;
   }
   let control = null;
 
-  // the poll swaps #live: keep the focused task or control, take the new
-  // graph over
+  // the poll swaps #live: keep what had focus, take the new graph over
+  // (init reopens the panel first, so its parts can take focus back)
   document.addEventListener("htmx:beforeSwap", () => {
-    const a = document.activeElement;
-    const f = a && a.closest && a.closest(".dag .node");
-    focused = f ? f.dataset.i : null;
-    control = keyOf(a);
+    control = keyOf(document.activeElement);
   });
   document.addEventListener("htmx:afterSwap", () => {
     init();
