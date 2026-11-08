@@ -26,6 +26,7 @@ type recordedRequest struct {
 	EscapedPath string
 	Auth        string
 	HasAuth     bool
+	Query       string // raw
 }
 
 // recordingServer answers every request with the given status, headers and body
@@ -43,6 +44,7 @@ func recordingServer(t *testing.T, status int, header map[string]string, body st
 			EscapedPath: r.URL.EscapedPath(),
 			Auth:        r.Header.Get("Authorization"),
 			HasAuth:     has,
+			Query:       r.URL.RawQuery,
 		})
 		mu.Unlock()
 		for k, v := range header {

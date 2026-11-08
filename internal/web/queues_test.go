@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goptics/varmq/contract"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
@@ -398,5 +399,174 @@ func TestPageLinks(t *testing.T) {
 	}
 	if ps := pageLinks(120, 50, 50, url); ps[0].URL != "0" || ps[2].URL != "100" {
 		t.Errorf("page URLs = %q, %q, want offsets 0, 100", ps[0].URL, ps[2].URL)
+	}
+}
+
+// workflowFakes returns three varmqs: a and b share the sample workflows
+// but the cancelled one (in-memory on a); c is an older varmq. wfs are the
+// samples, in SampleWorkflows' order.
+func workflowFakes(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server, []*fleettest.Workflow) {
+	t.Helper()
+	varmqs, fakes := threeVarmqs(t)
+	wfs := fleettest.SampleWorkflows(time.Now().UnixMilli())
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workflows = slices.Clone(wfs)
+	varmqs[0].Mu.Unlock()
+	varmqs[1].Mu.Lock()
+	varmqs[1].Workflows = slices.Clone(wfs[:3]) // own array: tests append
+	varmqs[1].Mu.Unlock()
+	return varmqs, fakes, wfs
+}
+
+// The list: one row per workflow however many units report it, newest
+// first, a state filter the poller keeps, and the older varmq named.
+func TestWorkflowsPage(t *testing.T) {
+	_, fakes, _ := workflowFakes(t)
+	srv, _ := newTestServer(t, fakes...)
+
+	status, body := fetch(t, srv, "/workflows?server=multi", false)
+	if status != http.StatusOK {
+		t.Fatalf("GET /workflows = %d:\n%s", status, body)
+	}
+	ids := []string{fleettest.RunningID, fleettest.DiamondID, fleettest.SagaID, fleettest.CancelID}
+	last := -1
+	for _, id := range ids {
+		link := `<a href="/workflows/` + id + `?server=multi">` + id + `</a>`
+		if n := strings.Count(body, link); n != 1 {
+			t.Errorf("%s listed %d times, want once", id, n)
+		}
+		if i := strings.Index(body, link); i < last {
+			t.Errorf("%s out of order: newest first", id)
+		} else {
+			last = i
+		}
+	}
+	for _, want := range []string{
+		`<span class="n">3/7</span>`, `<span class="sub">so far</span>`, `<span class="wst s-compensated">compensated</span>`,
+		"No workflow routes on: instance-", `href="/workflows?server=multi" aria-current="page"><svg`,
+		`<a href="/workflows?server=multi" class="s-all" aria-current="page">`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("list lacks %q", want)
+		}
+	}
+	if strings.Contains(body, testToken) {
+		t.Error("the page carries the token")
+	}
+
+	_, body = fetch(t, srv, "/workflows?server=multi&state=compensated", false)
+	if strings.Contains(body, ">"+fleettest.RunningID+"</a>") || !strings.Contains(body, ">"+fleettest.SagaID+"</a>") ||
+		!strings.Contains(body, `hx-get="/workflows?server=multi&amp;state=compensated"`) {
+		t.Errorf("compensated list, or its poller:\n%s", body)
+	}
+	_, body = fetch(t, srv, "/workflows?server=multi&state=compensation_failed", false)
+	if !strings.Contains(body, "No compensation failed workflows.") {
+		t.Errorf("empty state list:\n%s", visibleText(body))
+	}
+	if _, body = fetch(t, srv, "/workflows?server=multi&offset=2", false); strings.Contains(body, `id="poller"`) || !strings.Contains(body, `rel="prev"`) || !strings.Contains(body, "<span class=\"gap\">3–4</span>") {
+		t.Errorf("a later page: browsed, not polled:\n%s", body)
+	}
+	if _, body = fetch(t, srv, "/workflows?server=multi&state=bogus", false); !strings.Contains(body, `class="s-all" aria-current="page"`) {
+		t.Error("an unknown state is not all")
+	}
+}
+
+// A fleet of older varmqs has no workflow data, said so on both pages.
+func TestWorkflowsUnsupported(t *testing.T) {
+	srv, _ := newTestServer(t, threeFakes(t)...)
+	if status, body := fetch(t, srv, "/workflows", false); status != http.StatusOK || !strings.Contains(body, "No workflow data: no instance serves the workflow routes") {
+		t.Errorf("GET /workflows = %d:\n%s", status, body)
+	}
+	if status, body := fetch(t, srv, "/workflows/x", false); status != http.StatusOK || !strings.Contains(body, "No workflow data") || strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("GET /workflows/x = %d:\n%s", status, body)
+	}
+}
+
+// One workflow: the graph and table; polled while it runs, not once it
+// ended; 404 when no unit has it (200 to a poll, the notice in the banner).
+func TestWorkflowPage(t *testing.T) {
+	_, fakes, _ := workflowFakes(t)
+	srv, _ := newTestServer(t, fakes...)
+
+	status, body := fetch(t, srv, "/workflows/"+fleettest.RunningID+"?server=multi", false)
+	if status != http.StatusOK {
+		t.Fatalf("running = %d:\n%s", status, body)
+	}
+	for _, want := range []string{
+		`hx-get="/workflows/` + fleettest.RunningID + `?server=multi" hx-trigger="every 1s"`,
+		`<h1 class="qid">` + fleettest.RunningID + `</h1>`, "Running for", "refresh every 1s",
+		`<a class="node t-pending live" href="#task-4"`, "Cancel without undo",
+		`<a class="mono" href="/queues/redisq:shop:fifo:%7Betl%7D?server=multi">redisq:shop:fifo:{etl}</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("running page lacks %q", want)
+		}
+	}
+	if strings.Count(body, `<span class="chip">instance-`) != 2 { // a and b, the sharers
+		t.Errorf("running workflow reported by %d units", strings.Count(body, `<span class="chip">instance-`))
+	}
+	if strings.Count(body, `<a class="node `) != 7 || strings.Count(body, `<path class="edge`) != 8 {
+		t.Errorf("graph: %d nodes, %d edges", strings.Count(body, `<a class="node `), strings.Count(body, `<path class="edge`))
+	}
+	if strings.Contains(body, testToken) || strings.Contains(body, `id="poller"`) {
+		t.Error("token on the page, or the layout poller")
+	}
+
+	_, body = fetch(t, srv, "/workflows/"+fleettest.SagaID+"?server=multi", false)
+	if strings.Contains(body, `hx-trigger="every`) || strings.Contains(body, "Cancel workflow") || !strings.Contains(body, "Took") || !strings.Contains(body, `<g class="undo t-completed"`) {
+		t.Errorf("ended workflow polls or offers cancel:\n%s", body)
+	}
+
+	// the in-memory one: on its unit only
+	if _, body = fetch(t, srv, "/workflows/"+fleettest.CancelID+"?server=multi", false); strings.Count(body, `<span class="chip">instance-`) != 1 {
+		t.Errorf("in-memory workflow reported by:\n%s", body)
+	}
+
+	if status, body := fetch(t, srv, "/workflows/nope?server=multi", false); status != http.StatusNotFound || !strings.Contains(body, `Workflow &#34;nope&#34; not found on any instance`) {
+		t.Errorf("unknown = %d:\n%s", status, body)
+	}
+	if status, body := fetch(t, srv, "/workflows/nope?server=multi", true); status != http.StatusOK || !strings.Contains(body, "not found on any instance") || strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("unknown to a poll = %d", status)
+	}
+}
+
+// Several storages on a unit hold the ID (409 there): the other units'
+// copy shows, with a note; when every unit says 409, the banner says why.
+// Two in-memory workflows of one ID: pick one.
+func TestWorkflowPageAmbiguous(t *testing.T) {
+	varmqs, fakes, wfs := workflowFakes(t)
+	srv, _ := newTestServer(t, fakes...)
+	page := "/workflows/" + fleettest.DiamondID + "?server=multi"
+	varmqs[1].Mu.Lock()
+	varmqs[1].Workflows = append(varmqs[1].Workflows, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fleettest.DiamondID, CreatedAt: 1}))
+	varmqs[1].Mu.Unlock()
+	if _, body := fetch(t, srv, page, false); !strings.Contains(body, "holds a workflow with this ID (409)") || !strings.Contains(body, `<a class="node `) {
+		t.Errorf("one unit 409:\n%s", visibleText(body))
+	}
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workflows = append(varmqs[0].Workflows, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fleettest.DiamondID, CreatedAt: 2}))
+	varmqs[0].Mu.Unlock()
+	if _, body := fetch(t, srv, page, false); !strings.Contains(body, "is held by more than one storage on instance-") || strings.Contains(body, `<a class="node `) {
+		t.Errorf("every unit 409:\n%s", visibleText(body))
+	}
+
+	// a and b each hold their own in-memory "twin"
+	twin := func(at int64) *fleettest.Workflow {
+		return fleettest.NewWorkflow(contract.WorkflowRecord{ID: "twin", State: contract.WorkflowCompleted, CreatedAt: at, FinishedAt: at + 1, Tasks: wfs[0].Record().Tasks})
+	}
+	for i, v := range varmqs[:2] {
+		v.Mu.Lock()
+		v.Workflows = []*fleettest.Workflow{twin(int64(1000 + i))}
+		v.Mu.Unlock()
+	}
+	_, body := fetch(t, srv, "/workflows/twin?server=multi", false)
+	if !strings.Contains(body, "Pick one") || !strings.Contains(body, `href="/workflows/twin?at=1000&amp;server=multi"`) || strings.Contains(body, `<a class="node `) {
+		t.Errorf("twins without at:\n%s", body)
+	}
+	if _, body := fetch(t, srv, "/workflows/twin?server=multi&at=1001", false); !strings.Contains(body, `<a class="node `) || !strings.Contains(body, "Other workflows share this ID") {
+		t.Errorf("twin at 1001:\n%s", visibleText(body))
+	}
+	if _, body := fetch(t, srv, "/workflows?server=multi", false); !strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) {
+		t.Errorf("list links twins to their own pages:\n%s", body)
 	}
 }
