@@ -139,7 +139,9 @@ func FetchWorkflows(ctx context.Context, clients []*api.Client, label func(*api.
 					break
 				}
 				u.Workflows = append(u.Workflows, page...)
-				if len(page) < ask || len(u.Workflows) >= api.MaxWorkflowOffset {
+				// a next request from past the route's largest offset
+				// would be refused: stop there, with up to a page past it
+				if len(page) < ask || len(u.Workflows) > api.MaxWorkflowOffset {
 					break
 				}
 			}
