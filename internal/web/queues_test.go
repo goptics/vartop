@@ -262,6 +262,20 @@ func TestQueuePauseResume(t *testing.T) {
 	}
 	noPatches(t, varmqs[2])
 
+	// Stored, then the read back failed (200 error entry): paused, Resume alone.
+	varmqs[2].Mu.Lock()
+	varmqs[2].Queues = nil
+	varmqs[2].Mu.Unlock()
+	stored := pausableTenant()
+	stored.ActionErr = "redis down"
+	setQueues(varmqs[0], stored)
+	setQueues(varmqs[1], stored)
+	_, body = post(t, srv, esc+"/actions/pause", multi("confirm", "1"), true)
+	if _, oob, ok := strings.Cut(body, `<div id="qstate" class="qctl" hx-swap-oob="outerHTML">`); !ok || !strings.Contains(oob, `<span class="status paused">paused</span>`) ||
+		!strings.Contains(oob, resumeBtn) || strings.Contains(oob, pauseBtn) {
+		t.Errorf("error-entry answers: want paused, Resume alone:\n%s", body)
+	}
+
 	for _, c := range []struct {
 		path   string
 		status int
