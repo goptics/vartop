@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -421,7 +422,7 @@ func workflowFakes(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server, []*fle
 // The list: one row per workflow however many units report it, newest
 // first, a state filter the poller keeps, and the older varmq named.
 func TestWorkflowsPage(t *testing.T) {
-	_, fakes, _ := workflowFakes(t)
+	varmqs, fakes, _ := workflowFakes(t)
 	srv, _ := newTestServer(t, fakes...)
 
 	status, body := fetch(t, srv, "/workflows?server=multi", false)
@@ -468,6 +469,33 @@ func TestWorkflowsPage(t *testing.T) {
 	}
 	if _, body = fetch(t, srv, "/workflows?server=multi&state=bogus", false); !strings.Contains(body, `class="s-all" aria-current="page"`) {
 		t.Error("an unknown state is not all")
+	}
+
+	// one unit's list fails: named, the other's rows still listed
+	varmqs[0].Mu.Lock()
+	varmqs[0].WorkflowStatus = http.StatusServiceUnavailable
+	varmqs[0].Mu.Unlock()
+	if _, body = fetch(t, srv, "/workflows?server=multi", false); !strings.Contains(body, `<p class="err">instance-`) || !strings.Contains(body, "Service Unavailable") ||
+		!strings.Contains(body, ">"+fleettest.RunningID+"</a>") {
+		t.Errorf("one unit failing:\n%s", visibleText(body))
+	}
+	varmqs[0].Mu.Lock()
+	varmqs[0].WorkflowStatus = 0
+	varmqs[0].Mu.Unlock()
+
+	// 34 in all: page 1 links to page 2, page 2 to none
+	var more []*fleettest.Workflow
+	for i := range 30 {
+		more = append(more, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fmt.Sprintf("w%02d", i), State: contract.WorkflowCompleted, CreatedAt: int64(i + 1)}))
+	}
+	varmqs[2].Mu.Lock()
+	varmqs[2].Workflows = more
+	varmqs[2].Mu.Unlock()
+	if _, body = fetch(t, srv, "/workflows?server=multi", false); !strings.Contains(body, `<a href="/workflows?offset=25&amp;server=multi" rel="next">`) {
+		t.Errorf("page 1 has no next link:\n%s", visibleText(body))
+	}
+	if _, body = fetch(t, srv, "/workflows?server=multi&offset=25", false); strings.Contains(body, `rel="next"`) || !strings.Contains(body, `<span class="gap">26–34</span>`) {
+		t.Errorf("page 2, the last, links on:\n%s", visibleText(body))
 	}
 }
 
