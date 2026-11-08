@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -112,6 +113,144 @@ func TestQueueJobsPage(t *testing.T) {
 
 	if status, _ := fetch(t, srv, "/queues/nope?server=multi", false); status != http.StatusNotFound {
 		t.Errorf("unknown queue = %d, want 404", status)
+	}
+}
+
+// The cancelled tab: no count (spec counts have none, so never failed's),
+// and a varmq that refuses the state (400) is a note, not an error.
+func TestQueueCancelledTab(t *testing.T) {
+	_, fakes := queueFakes(t)
+	srv, _ := newTestServer(t, fakes...)
+	page := "/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"
+	_, body := fetch(t, srv, page, false)
+	if want := `class="state-cancelled"><span class="label">cancelled</span><span class="count none" title="not counted by this varmq">—</span>`; !strings.Contains(body, want) {
+		t.Errorf("pending page lacks the cancelled tab %q:\n%s", want, body)
+	}
+	status, body := fetch(t, srv, page+"&state=cancelled", false)
+	if status != http.StatusOK || !strings.Contains(body, "This varmq does not list cancelled jobs") ||
+		strings.Contains(body, `<p class="banner">`) || !strings.Contains(body, `class="state-cancelled" aria-current="page"`) {
+		t.Errorf("cancelled page = %d:\n%s", status, body)
+	}
+}
+
+// pausableTenant is tenantQueue on varmq API 1.2.0+: it reports paused.
+func pausableTenant() *fleettest.Queue {
+	q := tenantQueue()
+	q.Summary = strings.Replace(q.Summary, `"totals"`, `"paused":false,"totals"`, 1)
+	return q
+}
+
+// Pause and resume: a confirmation panel first, nothing sent; then the
+// action on both sharers (one storage), results, and #qstate out of band.
+func TestQueuePauseResume(t *testing.T) {
+	varmqs, fakes := threeVarmqs(t)
+	shared := pausableTenant()
+	for _, v := range varmqs[:2] {
+		v.Mu.Lock()
+		v.Queues = map[string]*fleettest.Queue{tenantID: shared}
+		v.Mu.Unlock()
+	}
+	srv, _ := newTestServer(t, fakes...)
+	esc := "/queues/redisq:fifo:%7Btenant%2Forders%7D"
+
+	_, body := fetch(t, srv, esc+"?server=multi", false)
+	if !strings.Contains(body, `hx-post="`+esc+`/actions/pause"`) || !strings.Contains(body, `hx-post="`+esc+`/actions/resume"`) ||
+		strings.Contains(body, "status paused") || !strings.Contains(body, `<div id="results" aria-live="polite">`) {
+		t.Errorf("queue page lacks its controls:\n%s", body)
+	}
+
+	resp, body := post(t, srv, esc+"/actions/pause", multi(), true)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Confirm pause of queue") ||
+		!strings.Contains(body, "also ones that serve no API") || !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) {
+		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
+	}
+	noPatches(t, varmqs...)
+
+	resp, body = post(t, srv, esc+"/actions/pause", multi("confirm", "1"), true)
+	if resp.StatusCode != http.StatusOK || strings.Count(body, `<li class="ok">`) != 2 {
+		t.Errorf("pause = %d:\n%s", resp.StatusCode, body)
+	}
+	want := "PATCH " + esc + "/actions/pause"
+	wantPatches(t, varmqs[0], want)
+	wantPatches(t, varmqs[1], want)
+	noPatches(t, varmqs[2])
+	if !shared.Paused() {
+		t.Error("queue not paused")
+	}
+	if _, oob, ok := strings.Cut(body, `<div id="qstate" class="qctl" hx-swap-oob="outerHTML">`); !ok || !strings.Contains(oob, `<span class="status paused" title="paused at `) || !strings.Contains(oob, `since <time datetime="20`) {
+		t.Errorf("no paused #qstate out of band:\n%s", body)
+	}
+	if strings.Contains(body, testToken) {
+		t.Error("the response carries the token")
+	}
+	_, body = fetch(t, srv, "/queues?server=multi", false)
+	if !strings.Contains(body, `</a> <span class="status paused" title="paused at `) {
+		t.Errorf("queue list lacks the paused badge:\n%s", body)
+	}
+
+	_, body = post(t, srv, esc+"/actions/resume", multi("confirm", "1"), true)
+	if shared.Paused() || strings.Contains(body, "status paused") {
+		t.Errorf("resume left it paused:\n%s", body)
+	}
+
+	for _, c := range []struct {
+		path   string
+		status int
+	}{
+		{esc + "/actions/purge", http.StatusBadRequest},
+		{"/queues/nope/actions/pause", http.StatusConflict},
+	} {
+		if resp, body := post(t, srv, c.path, multi("confirm", "1"), true); resp.StatusCode != c.status {
+			t.Errorf("POST %s = %d, want %d:\n%s", c.path, resp.StatusCode, c.status, body)
+		}
+	}
+}
+
+// An older varmq (no paused in GET /queues) gets no buttons and is sent
+// nothing; storage that cannot pause (501) is a failed result saying so.
+func TestQueuePauseUnsupported(t *testing.T) {
+	varmqs, fakes := queueFakes(t) // tenantQueue: no paused, an older varmq
+	srv, _ := newTestServer(t, fakes...)
+	esc := "/queues/redisq:fifo:%7Btenant%2Forders%7D"
+	_, body := fetch(t, srv, esc+"?server=multi", false)
+	if strings.Contains(body, "/actions/pause") || !strings.Contains(body, "Pause and resume need varmq API 1.2.0") {
+		t.Errorf("older varmq: controls shown:\n%s", body)
+	}
+	resp, body := post(t, srv, esc+"/actions/pause", multi("confirm", "1"), true)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "supports pause and resume") {
+		t.Errorf("POST on older varmq = %d:\n%s", resp.StatusCode, body)
+	}
+	noPatches(t, varmqs...)
+
+	q := pausableTenant()
+	q.ActionStatus = http.StatusNotImplemented
+	for _, v := range varmqs {
+		v.Mu.Lock()
+		v.Queues = map[string]*fleettest.Queue{tenantID: q}
+		v.Mu.Unlock()
+	}
+	resp, body = post(t, srv, esc+"/actions/pause", url.Values{"server": {"multi"}, "confirm": {"1"}}, true)
+	if resp.StatusCode != http.StatusOK || strings.Count(body, `<span class="outcome">failed (not supported by this instance)</span>`) != 2 {
+		t.Errorf("501 = %d:\n%s", resp.StatusCode, body)
+	}
+
+	// Storage unreadable everywhere: no paused to go by; said so, not "older varmq".
+	for _, v := range varmqs {
+		v.Mu.Lock()
+		v.Queues = map[string]*fleettest.Queue{tenantID: {Summary: `{"id":"` + tenantID + `","error":"redis down"}`}}
+		v.Mu.Unlock()
+	}
+	_, body = fetch(t, srv, esc+"?server=multi", false)
+	if strings.Contains(body, "need varmq API 1.2.0") || !strings.Contains(body, "redis down") {
+		t.Errorf("unreadable queue page:\n%s", body)
+	}
+	sent := len(patches(varmqs[0])) + len(patches(varmqs[1]))
+	resp, body = post(t, srv, esc+"/actions/pause", multi("confirm", "1"), true)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "cannot read queue") {
+		t.Errorf("POST on unreadable queue = %d:\n%s", resp.StatusCode, body)
+	}
+	if n := len(patches(varmqs[0])) + len(patches(varmqs[1])); n != sent {
+		t.Errorf("unreadable queue: %d PATCHes sent", n-sent)
 	}
 }
 

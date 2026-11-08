@@ -102,3 +102,60 @@ func TestListJobsNotFound(t *testing.T) {
 		t.Error("400: no error")
 	}
 }
+
+// paused is read as sent: absent (varmq before 1.2.0) is nil, not false.
+func TestListQueuesPaused(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK, nil, `[{"id":"a","counts":{},"totals":{},"paused":true,"paused_at":1762228800000},
+		{"id":"b","counts":{},"totals":{},"paused":false},{"id":"c","counts":{},"totals":{}}]`)
+	qs, _, err := NewClient(srv.URL, "").ListQueues(context.Background())
+	if err != nil || len(qs) != 3 {
+		t.Fatalf("ListQueues = %+v, %v", qs, err)
+	}
+	for i, want := range []struct{ paused, can bool }{{true, true}, {false, true}, {false, false}} {
+		if qs[i].IsPaused() != want.paused || qs[i].CanPause() != want.can {
+			t.Errorf("%s: paused %v can %v, want %+v", qs[i].ID, qs[i].IsPaused(), qs[i].CanPause(), want)
+		}
+	}
+	if qs[0].PausedAt != 1762228800000 {
+		t.Errorf("paused_at = %d", qs[0].PausedAt)
+	}
+}
+
+// QueueAction PATCHes one escaped path segment and returns the entry sent back.
+func TestQueueAction(t *testing.T) {
+	srv, reqs := recordingServer(t, http.StatusOK, nil, `{"id":"redisq:ns:fifo:{a/b}","counts":{"pending":1,"processing":0,"completed":0,"failed":0},"totals":{"submitted":1,"completed":0,"failed":0},"paused":true,"paused_at":5}`)
+	q, err := NewClient(srv.URL, "tok").QueueAction(context.Background(), "redisq:ns:fifo:{a/b}", "pause")
+	if err != nil || !q.IsPaused() || q.PausedAt != 5 || q.Counts.Pending != 1 {
+		t.Fatalf("QueueAction = %+v, %v", q, err)
+	}
+	r := reqs()[0]
+	if r.Method != http.MethodPatch || r.EscapedPath != "/queues/redisq:ns:fifo:%7Ba%2Fb%7D/actions/pause" || r.Auth != "Bearer tok" {
+		t.Errorf("request = %+v", r)
+	}
+}
+
+// An older varmq (router 404 or 405) and storage that cannot pause (501)
+// are unsupported; a queue the server lacks (JSON 404) and a storage error
+// (503) are not.
+func TestQueueActionUnsupported(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{http.StatusNotFound, "404 page not found\n", true},
+		{http.StatusMethodNotAllowed, "Method Not Allowed\n", true},
+		{http.StatusNotImplemented, `{"error":"varmq: storage does not support pause"}`, true},
+		{http.StatusNotFound, `{"error":"queue not found"}`, false},
+		{http.StatusServiceUnavailable, `{"error":"redis down"}`, false},
+	} {
+		srv, _ := recordingServer(t, c.status, nil, c.body)
+		_, err := NewClient(srv.URL, "").QueueAction(context.Background(), "q", "resume")
+		if err == nil || QueueActionUnsupported(err) != c.want {
+			t.Errorf("%d %s: err %v, unsupported %v, want %v", c.status, c.body, err, QueueActionUnsupported(err), c.want)
+		}
+	}
+	if QueueActionUnsupported(context.Canceled) {
+		t.Error("a transport error is not unsupported")
+	}
+}
