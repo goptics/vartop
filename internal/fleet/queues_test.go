@@ -488,21 +488,31 @@ func TestCancelWorkflow(t *testing.T) {
 	down.Mu.Lock()
 	down.WorkflowStatus = http.StatusServiceUnavailable
 	down.Mu.Unlock()
+	// twice holds the ID in two storages (409); old serves no workflow route
+	_, twice := workflowFake(t, "twice", running, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fleettest.RunningID, CreatedAt: 1}))
+	_, old := fleettest.NewVarmq(t, "old", nil)
 	fb, b := workflowFake(t, "b", running)
 	dead := httptest.NewServer(http.NotFoundHandler())
 	dead.Close()
 	g := WorkflowGroup{WorkflowRecord: running.Record(),
-		Clients: []*api.Client{api.NewClient(dead.URL, ""), api.NewClient(dn.URL, ""), api.NewClient(empty.URL, ""), api.NewClient(b.URL, "")},
-		labels:  []string{"dead", "down", "gone", "b"}}
+		Clients: []*api.Client{api.NewClient(dead.URL, ""), api.NewClient(dn.URL, ""), api.NewClient(empty.URL, ""),
+			api.NewClient(twice.URL, ""), api.NewClient(old.URL, ""), api.NewClient(b.URL, "")},
+		labels: []string{"dead", "down", "gone", "twice", "old", "b"}}
 
 	res, after := CancelWorkflow(context.Background(), g, nil, instanceNoun, true)
-	if len(res) != 4 {
+	if len(res) != 6 {
 		t.Fatalf("results = %+v, want one per unit asked", res)
 	}
 	if res[1].Outcome != "failed" || res[1].Msg != "Service Unavailable" {
 		t.Errorf("503 unit = %+v, want failed with the API message", res[1])
 	}
-	res = append(res[:1], res[2:]...) // the rest as before
+	if res[3].Outcome != "failed" || res[3].Msg != "several storages on this instance hold this workflow ID" {
+		t.Errorf("409 unit = %+v", res[3])
+	}
+	if res[4].Outcome != "failed" || res[4].Msg != "not supported by this instance" {
+		t.Errorf("unit without the route = %+v", res[4])
+	}
+	res = []ActionResult{res[0], res[2], res[5]} // the rest as before
 	if after == nil || after.State != contract.WorkflowCancelled || after.UndoOnCancel || running.Record().State != contract.WorkflowCancelled {
 		t.Fatalf("after = %+v", after)
 	}
