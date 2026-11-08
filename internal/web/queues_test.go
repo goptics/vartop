@@ -129,7 +129,7 @@ func TestQueueJobsPage(t *testing.T) {
 // The cancelled tab: no count (spec counts have none, so never failed's),
 // and a varmq that refuses the state (400) is a note, not an error.
 func TestQueueCancelledTab(t *testing.T) {
-	_, fakes := queueFakes(t)
+	shared, fakes := queueFakes(t)
 	srv, _ := newTestServer(t, fakes...)
 	page := "/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"
 	_, body := fetch(t, srv, page, false)
@@ -140,6 +140,36 @@ func TestQueueCancelledTab(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(body, "This varmq does not list cancelled jobs") ||
 		strings.Contains(body, `<p class="banner">`) || !strings.Contains(body, `class="state-cancelled" aria-current="page"`) {
 		t.Errorf("cancelled page = %d:\n%s", status, body)
+	}
+
+	// Only a 400 on the cancelled tab is the note; any other failure is the banner.
+	edit := func(change func(q *fleettest.Queue)) {
+		for _, v := range shared {
+			v.Mu.Lock()
+			change(v.Queues[tenantID])
+			v.Mu.Unlock()
+		}
+	}
+	for _, c := range []struct {
+		state  string
+		status int
+	}{{"cancelled", http.StatusServiceUnavailable}, {"pending", http.StatusBadRequest}} {
+		edit(func(q *fleettest.Queue) { q.JobsStatus = c.status })
+		_, body := fetch(t, srv, page+"&state="+c.state, false)
+		if !strings.Contains(body, `<p class="banner">`) || strings.Contains(body, "does not list") {
+			t.Errorf("%s answering %d: want the banner, not the note:\n%s", c.state, c.status, body)
+		}
+	}
+
+	// A varmq that lists cancelled jobs: the timeline ends Cancelled.
+	edit(func(q *fleettest.Queue) {
+		q.JobsStatus = 0
+		q.Jobs["cancelled"] = []string{`{"id":"order-7","state":"cancelled","payload":{},"enqueued_at":1762228800000,"finished_at":1762228801000,"attempts":0}`}
+	})
+	_, body = fetch(t, srv, page+"&state=cancelled", false)
+	if !strings.Contains(body, `<li class="step-cancelled">`) || !strings.Contains(body, `<span class="what">Cancelled</span>`) ||
+		strings.Contains(body, "does not list") || !strings.Contains(body, "order-7") {
+		t.Errorf("listed cancelled job:\n%s", body)
 	}
 }
 
