@@ -1,6 +1,7 @@
 package web
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 )
@@ -21,8 +22,9 @@ const (
 	dagDummyH = 10 // the slot of an edge passing through a column
 	dagPad    = 20 // around the graph; the bottom one holds a last undo badge
 	dagSweeps = 4  // ordering sweeps: down, up, down, up
-	// dagMaxSlots bounds tasks plus dummies: a graph past it is not drawn
-	// (the table lists the tasks), so a huge record cannot eat the server.
+	// dagMaxSlots bounds tasks, edges and dummies together: a graph past
+	// it is not drawn (the table lists the tasks), so a huge record (many
+	// tasks, a dense fan-in, long edges) cannot eat the server or the page.
 	dagMaxSlots = 5000
 )
 
@@ -36,18 +38,25 @@ type dagLayout struct {
 	chains [][]int   // per drawn edge: ids from its parent, through dummies, to its child
 	width  float64
 	height float64
+
+	heights []float64 // per layer: its column's height, fixed by its slots
+	tallest float64
 }
 
 // layoutDAG lays out n tasks; deps[i] are the indexes of task i's
 // dependencies. Out-of-range and self deps are ignored, so is a dep that
 // closes a cycle (varmq refuses cyclic plans; this only keeps a bad
 // record from looping): it gets no edge. ok is false, and nothing laid
-// out, when tasks and dummy slots would pass dagMaxSlots.
+// out, when tasks, edges and dummy slots would pass dagMaxSlots.
 func layoutDAG(n int, deps [][]int) (l dagLayout, ok bool) {
 	if n > dagMaxSlots {
 		return dagLayout{}, false
 	}
 	l = dagLayout{n: n, layer: make([]int, n)}
+	valid := make([][]int, n) // deps, each filtered once
+	for i := range n {
+		valid[i] = validDeps(i, n, deps)
+	}
 
 	// Layers: the longest path from a root. state 1: on the DFS stack.
 	state := make([]int8, n)
@@ -61,7 +70,7 @@ func layoutDAG(n int, deps [][]int) (l dagLayout, ok bool) {
 		}
 		state[i] = 1
 		d := 0
-		for _, p := range validDeps(i, n, deps) {
+		for _, p := range valid[i] {
 			if pd := depth(p); pd >= 0 {
 				d = max(d, pd+1)
 			}
@@ -81,15 +90,15 @@ func layoutDAG(n int, deps [][]int) (l dagLayout, ok bool) {
 	// Edges, with a dummy in each layer a long one crosses.
 	slots := n
 	for i := range n {
-		for _, p := range validDeps(i, n, deps) {
-			slots += max(l.layer[i]-l.layer[p]-1, 0)
+		for _, p := range valid[i] {
+			slots += 1 + max(l.layer[i]-l.layer[p]-1, 0) // the edge, its dummies
 		}
 	}
 	if slots > dagMaxSlots {
 		return dagLayout{}, false
 	}
 	for i := range n {
-		for _, p := range validDeps(i, n, deps) {
+		for _, p := range valid[i] {
 			if l.layer[p] >= l.layer[i] {
 				continue // closes a cycle
 			}
@@ -148,31 +157,36 @@ func (l *dagLayout) slotH(id int) float64 {
 // place sets every id's centre from the order: each column stacked, centred
 // on the tallest. It sets the height too.
 func (l *dagLayout) place() {
-	heights := make([]float64, len(l.order))
-	tallest := 0.0
+	l.heights, l.tallest = make([]float64, len(l.order)), 0
 	for ly, ids := range l.order {
 		for k, id := range ids {
-			heights[ly] += l.slotH(id)
+			l.heights[ly] += l.slotH(id)
 			if k > 0 {
-				heights[ly] += dagGapY
+				l.heights[ly] += dagGapY
 			}
 		}
-		tallest = max(tallest, heights[ly])
+		l.tallest = max(l.tallest, l.heights[ly])
 	}
-	for ly, ids := range l.order {
-		y := dagPad + (tallest-heights[ly])/2
-		for _, id := range ids {
-			h := l.slotH(id)
-			l.y[id] = y + h/2
-			y += h + dagGapY
-		}
+	for ly := range l.order {
+		l.placeLayer(ly)
 	}
-	l.height = 2*dagPad + tallest
+	l.height = 2*dagPad + l.tallest
+}
+
+// placeLayer sets the centres of layer ly's ids from its order. A reorder
+// changes no column's height, so it needs no other layer placed again.
+func (l *dagLayout) placeLayer(ly int) {
+	y := dagPad + (l.tallest-l.heights[ly])/2
+	for _, id := range l.order[ly] {
+		h := l.slotH(id)
+		l.y[id] = y + h/2
+		y += h + dagGapY
+	}
 }
 
 // sortLayer orders layer ly by the mean centre of each id's near
 // neighbours (its parents sweeping down, its children sweeping up), then
-// places the graph again. An id with none keeps its own centre; ties keep
+// places that layer again. An id with none keeps its own centre; ties keep
 // their order.
 func (l *dagLayout) sortLayer(ly int, near [][]int) {
 	ids := l.order[ly]
@@ -188,16 +202,8 @@ func (l *dagLayout) sortLayer(ly int, near [][]int) {
 		}
 		bary[id] = sum / float64(len(near[id]))
 	}
-	slices.SortStableFunc(ids, func(a, b int) int {
-		switch {
-		case bary[a] < bary[b]:
-			return -1
-		case bary[a] > bary[b]:
-			return 1
-		}
-		return 0
-	})
-	l.place()
+	slices.SortStableFunc(ids, func(a, b int) int { return cmp.Compare(bary[a], bary[b]) })
+	l.placeLayer(ly)
 }
 
 // x is the left edge of layer ly's column.
