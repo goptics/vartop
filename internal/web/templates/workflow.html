@@ -42,7 +42,7 @@
 </dl>
 {{with .Undo}}<h3>Undo job</h3>{{template "task_facts" .}}{{end}}{{end}}
 
-{{define "live"}}<div id="live" hx-disinherit="*"{{if gt .LivePoll 0}} hx-get="{{.SelfURL}}" hx-trigger="every {{.LivePoll}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="this" hx-swap="outerHTML" hx-sync="#page:drop"{{end}}>{{with .Workflow}}
+{{define "live"}}<div id="live" hx-disinherit="*"{{if gt .IntervalSec 0}} hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="this" hx-swap="outerHTML" hx-sync="#page:drop"{{end}}>{{with .Workflow}}
 {{if not .Pick}}<header class="qhead wfhead">
   <div class="wftitle"><h1 class="qid">{{.ID}}</h1>{{template "wf_state" .State}}</div>
   <p class="sub">Reported by {{range .On}}<span class="chip">{{.}}</span> {{end}}</p>

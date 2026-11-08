@@ -326,7 +326,7 @@ func (h *handler) workflow(w http.ResponseWriter, r *http.Request) {
 	p, snaps, ok := h.page(r)
 	p.Title = pageTitle(id, p.Server)
 	at, _ := strconv.ParseInt(r.FormValue("at"), 10, 64)
-	// #live polls itself (Page.LivePoll), and stops once the workflow
+	// #live polls itself (Page.OwnPoll), and stops once the workflow
 	// ended, or is not found, or is one of several: nothing changes then.
 	// A read that failed for now (stale data, an error) keeps polling.
 	p.Pods, p.OwnPoll, p.SelfURL = nil, true, workflowURL(id, p.Server, at)
@@ -381,7 +381,6 @@ func (h *handler) workflow(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	p.LivePoll = p.IntervalSec
 	h.render(w, "workflow", status, p)
 }
 

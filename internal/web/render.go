@@ -79,11 +79,9 @@ type Page struct {
 	WorkflowList *WorkflowsView
 	Workflow     *WorkflowView
 
-	// OwnPoll: the page's #live polls itself (the workflow page), not the
-	// layout's poller; LivePoll is its interval in seconds, 0: it does not
-	// (the workflow ended).
-	OwnPoll  bool
-	LivePoll int
+	// OwnPoll: the page's #live polls itself (the workflow page), every
+	// IntervalSec, not the layout's poller; 0: it does not (it ended).
+	OwnPoll bool
 
 	// Spans are the spans besides the hour the server's charts may show
 	// (spansOf its history); Ranges says which each of Detail's charts

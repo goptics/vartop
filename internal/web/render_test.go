@@ -1344,7 +1344,7 @@ func TestWorkflowRenders(t *testing.T) {
 		v := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[i].Record(), On: []string{"a", "b"}}, "dev", time.Now())
 		p := Page{Title: "wf", Server: "dev", SelfURL: "/workflows/x?server=dev", OwnPoll: true, Workflow: v}
 		if !v.Final {
-			p.IntervalSec, p.LivePoll = 5, 5
+			p.IntervalSec = 5
 		}
 		return p
 	}
