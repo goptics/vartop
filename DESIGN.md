@@ -160,13 +160,13 @@ Stack constraint shapes the system: one Go binary, `html/template` + vendored ht
 Cool neutral greys, one teal accent, four state hues. Light values are the `-light` keys; they replace the dark ones under `@media (prefers-color-scheme: light)`.
 
 ### Primary
-- **varmq Teal** (`accent`): selection, focus ring, links, current-nav icon, brand mark, completed series in charts and sparklines, waiting dot, current state-tab underline, job-row hover/open tint (7%), selected-row tint (8%), `::selection` (35%), native `accent-color` (slider, checkboxes), primary button fill.
+- **varmq Teal** (`accent`): selection, focus ring, selected graph task (2px edge, 8% fill), traced edges on graph hover/focus, links, current-nav icon, brand mark, completed series in charts and sparklines, waiting dot, current state-tab underline, job-row hover/open tint (7%), selected-row tint (8%), `::selection` (35%), native `accent-color` (slider, checkboxes), primary button fill.
 - **Teal Ink** (`on-accent`): text on accent fill only.
 
 ### State
 - **Ok Green** (`ok`): active status, healthy count, ok result, finished step, completed tab.
-- **Amber** (`warn`): processing tab, started step, no-change result, absent badge, stale freshness, banners, confirm-panel edge, Restart button text.
-- **Coral Red** (`bad`): stopped status, failed series, hot stat tile, errors, failed tab and step, down grid column tint (6%), Stop button text.
+- **Amber** (`warn`): processing tab, started step, running workflow and in-flight task (pending/processing) with its pulse ring and flowing edge, compensating workflow (hollow), no-change result, absent badge, stale freshness, banners, confirm-panel edge, Restart button text.
+- **Coral Red** (`bad`): stopped status, failed series, failed and compensation-failed workflow, failed task node (7% fill, 55% edge), cancelled workflow and task (hollow), hot stat tile, errors, failed tab and step, down grid column tint (6%), Stop button text.
 - **Periwinkle** (`paused`): paused status only (worker status, queue paused badge).
 
 ### Neutral
@@ -175,7 +175,7 @@ Cool neutral greys, one teal accent, four state hues. Light values are the `-lig
 - **Raised** (`raised`): table head, default button, current nav/tab, chip, bulk bar, notes.
 - **Hairline** (`line`): borders, dividers, gridlines, load-bar track.
 - **Strong Hairline** (`line-strong`): control borders, empty-state dash, bulk bar edge, scrollbar.
-- **Ink** (`fg`) / **Muted Ink** (`subtle`): text; `subtle` also unknown/mixed/transitional status, crosshair, load-bar fill.
+- **Ink** (`fg`) / **Muted Ink** (`subtle`): text; `subtle` also unknown/mixed/transitional status, crosshair, load-bar fill, graph edges (70%), waiting task (hollow dot, dashed box), compensated workflow (ended, rolled back: neutral filled dot).
 
 ### Named Rules
 **The One Accent Rule.** Teal means "selected, focused, current, or completed". Never a second meaning; failed series use `bad`, grid load fill uses `subtle`, so teal never sits beside ok green as a peer.
@@ -236,7 +236,7 @@ Small, consistent corners: 4px (focus ring, range segment, tooltip), 6px (contro
 ## Components
 
 ### Rail / shell
-Brand (20px three-line SVG mark in accent, wordmark 16px/650). Nav: Dashboard, Instance grid, Queues, each with a 16px stroke icon; links `subtle`, hover and current `raised` + `fg`, current icon teal. Scope: server and instance pickers together (`#pick-server`, `#pick-unit`). `#status`: health with 7px dot (ok / warn / bad by healthy share), refresh interval, "updated" (warn when stale), optional `.note`.
+Brand (20px three-line SVG mark in accent, wordmark 16px/650). Nav: Dashboard, Instance grid, Queues, Workflows (three linked nodes), each with a 16px stroke icon; Workflows always shown (a note on the page when no instance serves the routes, not a probe per page); links `subtle`, hover and current `raised` + `fg`, current icon teal. Scope: server and instance pickers together (`#pick-server`, `#pick-unit`). `#status`: health with 7px dot (ok / warn / bad by healthy share), refresh interval, "updated" (warn when stale), optional `.note`.
 
 ### Page header
 `h1` + `.sub` scope line on one baseline, wrapping. Worker and job pages add breadcrumbs (`/` separator, 13px, `subtle`).
@@ -271,7 +271,7 @@ Sticky header row and worker column. Cell: status dot (label hidden for active, 
 
 ### Buttons and controls
 Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtle` + fill `line`, active nudges 1px down, disabled 50%. Primary: teal fill. Warn / danger: tinted text only (danger hover border `bad`). Range slider and number input share the `controls` panel (`.controls input[name="n"]` kept in sync by `detail.js`).
-- **Gap:** Restart and Stop use the native `hx-confirm` box, not the confirm panel; only bulk actions and queue pause/resume use the panel.
+- **Gap:** Restart and Stop use the native `hx-confirm` box, not the confirm panel; only bulk actions, queue pause/resume and workflow cancel use the panel.
 
 ### Confirm panel
 `panel`, border warn 45% into `line`, 8px, 14px. Title 16px, one `subtle` line, a table of worker x instance ("not on this instance" in `subtle`), right-aligned teal "Confirm <action>".
@@ -295,7 +295,24 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
   - **Gap:** shows absolute times, not durations between steps.
 - **Errors:** per attempt, bad 7% fill, bad 30% edge, 6px; mono 12px, pre-wrap.
 - **Payload:** ground well, hairline, 6px, mono 12px, max 24em, scrolls, focusable.
-- **Pager:** Previous / numbered pages / Next with 14px SVG arrows; buttons 6px bordered `panel`; numbers borderless `subtle`, current `raised` + border + 600; `…` gap.
+- **Pager:** Previous / numbered pages / Next with 14px SVG arrows (workflow list: Previous / "N–M" / Next, no total); buttons 6px bordered `panel`; numbers borderless `subtle`, current `raised` + border + 600; `…` gap.
+
+### Workflows list
+- **State tabs:** the `.states` strip as `.wfstates`: All + every `WorkflowState`, label only (varmq counts none), columns `max-content`, scrolls sideways when narrow. State words: `_` read as a space ("compensation failed"); unknown states shown as sent, hollow `subtle` dot.
+- **Rows** (`table.wfs`): mono ID link, state (`.wst` dot + words), progress, created (short time, full in title), duration (`so far` in `subtle` while running), "Reported by" chips. Stack under 640px like queue rows. One row per (ID, created_at): shared durable ones once, an in-memory twin its own row (link carries `at=`).
+- **Progress** (`.prog`): 72x6 bar, 3px radius, `line` track; segments completed `ok`, failed `bad`, cancelled `bad` 35% into `line`, in flight `warn`; then `ended/total` 13px `subtle`. Has an `aria-label` with the counts.
+
+### Workflow page
+- **Header:** mono ID (20px/600) + state; "Reported by" chips; facts row (`dl.facts`: 12px `subtle` term over value: Created, Running for / Took, Tasks ended, On cancel); `#wfctl` danger buttons "Cancel workflow" and "Cancel without undo" (the second only while `undo_on_cancel`), none once ended. `#results` sits in `#live` with `hx-preserve`, so a poll keeps an open confirm panel.
+- **Graph well** (`.dagbox` > `.dag-port`): `bg` well, hairline, 8px. With workflow.js (`.pz`): 300–560px tall (graph height, 62vh cap), pans/zooms in place; without, it scrolls. Tool buttons top-left (zoom in / out / fit, 14px icons, `panel` fill). Legend below in 12px `subtle`: task state dots, solid vs dashed edge, the gesture hint.
+- **Layout** (Go, `dag.go`): left to right; column = longest path from a root; dummy slots (10px) carry long edges so none crosses a box; order by barycenter, 4 sweeps. Boxes 184x56, columns 64px apart, rows 30px apart, 20px pad. Edges: horizontal-tangent cubics, straight through dummy columns, 7px arrowhead in the edge's colour (`context-stroke`).
+- **Task node** (SVG `<a href="#task-N">`, focusable, `aria-label` "name, state, after deps, runs always, undo state"): `panel` box, `line-strong` 1px, 8px; 9px state dot; name 13px/600 `fg` (cut at 20 chars with "…", full in `<title>`); "state · queue" 12px/500 `subtle`. Failed: `bad` 7% fill, 55% edge. In flight: `warn` 60% edge + pulse ring. Cancelled: hollow `bad` dot, name `subtle`. Waiting: hollow dot, dashed box, no fill. Hover/focus: `accent` edge; selected: 2px `accent` + 8% fill.
+- **Undo badge:** 72x18 pill on the box's bottom edge, right: `raised` + `line-strong`, stroke undo arrow, "undo" 12px, 6px dot in the undo job's state colour.
+- **Edges:** 1.5px `subtle` 70%; into an always task dashed 5 4; into an in-flight task a `warn` 2px overlay dashed 2 10 flowing (dashoffset, .9s). Hover/focus a task: its upstream and downstream stay, traced edges `accent`, the rest fade (nodes 32%, edges 15%).
+- **Task panel** (`.wf-panel`): over the graph's right side (340px, `panel`, `line-strong`, 8px, no shadow), as tall as the well at most, scrolls; under the graph below 760px. Facts as `dl.kv` (6.5em terms, 13px), reason in mono `bad`, "Undo job" block under a hairline; close button top-right. Opening it moves the view so the task (or the whole graph) sits clear of it.
+- **Task table** (`table.tasks`): the accessible fallback, row `id="task-N"` (`:target` accent 8%): name (mono 13px, `always` chip), state + reason (12px `subtle`), deps, queue link (to its job page), job ID, result size, undo state. Stacks under 640px.
+- **Motion:** pulse ring 1.8s ease-out, flowing edge .9s linear, box stroke .12s. All off under `prefers-reduced-motion` (ring shown static at 50%).
+- **Live:** `#live` polls itself (`hx-trigger="every Ns"`, `hx-disinherit="*"`) while the workflow runs; the first answer of an ended (or missing, or ambiguous) workflow has no trigger, so polling stops. workflow.js keeps the view, open panel and focused task across each swap.
 
 ## Do's and Don'ts
 
@@ -303,7 +320,7 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Do** use `accent` only for selection, focus, current, completed; `bad` for failed series, `subtle` for load fill.
 - **Do** group related numbers in one hairline-split panel (8px radius, 1px `line`).
 - **Do** set every number in tabular figures and right-align numeric columns.
-- **Do** mark uncertain status (transitional, unknown, mixed) with a hollow dot. One exception, in `bad`: the cancelled job state (stopped before it ran, not failed).
+- **Do** mark uncertain status (transitional, unknown, mixed, a waiting task, a compensating workflow) with a hollow dot. One exception, in `bad`: cancelled, of a job, task or workflow (stopped before it ran, not failed).
 - **Do** draw icons as inline SVG (`.ico`: stroke currentColor, 1.5, round caps/joins), `aria-hidden`.
 - **Do** keep tables scrolling inside their wrapper and stack worker/queue rows under 640px.
 - **Do** check every new text colour for >= 4.5:1 on `bg`, `panel`, `raised` in both themes.
@@ -315,4 +332,4 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Don't** use mono outside IDs, payloads, errors, endpoints.
 - **Don't** put state colours on decoration, or teal on anything with a second meaning.
 - **Don't** use gradients (the load bar's hard-stop `linear-gradient` is a fill meter, not a gradient), card soup, or terminal styling.
-- **Don't** rename htmx ids or detail.js hooks: `page`, `live`, `poller`, `status`, `banner`, `banner-merged`, `bulk`, `errors`, `results`, `qstate`, `pick-server`, `pick-unit`; `.history`, `.tip`, `.hit`, `.cross`, `.controls input[name="n"]`.
+- **Don't** rename htmx ids or detail.js hooks: `page`, `live`, `poller`, `status`, `banner`, `banner-merged`, `bulk`, `errors`, `results`, `qstate`, `wfctl`, `pick-server`, `pick-unit`; `.history`, `.tip`, `.hit`, `.cross`, `.controls input[name="n"]`; workflow.js: `.dagbox`, `.dag-port`, `svg.dag` (`data-w`, `data-h`), `.view`, `.node[data-i]`, `.edge`/`.flow` (`data-from`, `data-to`), `#task-detail-N`, `.wf-panel`, `.dag-tools [data-zoom]`.
