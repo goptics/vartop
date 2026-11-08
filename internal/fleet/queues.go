@@ -166,7 +166,9 @@ func FetchJobs(ctx context.Context, g QueueGroup, state contract.JobState, offse
 // QueueAct sends action (pause or resume) on queue g to every unit that
 // reported it, at once, and returns one result per unit in g's order, and
 // g as the units answered: each answering unit's paused from its answer,
-// the entry's paused from the first answer (g's own where none answered). The pause flag lives in the queue's storage, so one unit would do;
+// the entry's paused from the first answer that has one (g's own where
+// none has: an error entry has no paused). The pause flag lives in the
+// queue's storage, so one unit would do;
 // each is sent it anyway (the route is idempotent) so the results say what
 // every unit answered. A unit whose copy did not report paused (varmq
 // before API 1.2.0) is sent nothing: no change, not supported. A unit that
@@ -207,8 +209,8 @@ func QueueAct(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, n
 	after, first := g, true
 	after.paused = slices.Clone(g.paused)
 	for i, q := range answers {
-		if q == nil {
-			continue
+		if q == nil || q.Paused == nil {
+			continue // none, or an error entry: flag stored, not read back
 		}
 		after.paused[i] = q.Paused
 		if first {

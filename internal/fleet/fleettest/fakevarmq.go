@@ -250,6 +250,9 @@ type Queue struct {
 	// reply with it, changing nothing: 404 as the router's plain text (an
 	// older varmq), others with {"error":"..."}.
 	ActionStatus int
+	// ActionErr, when set, makes a queue action store the flag, then answer
+	// 200 {"id":...,"error":ActionErr}: varmq when re-reading the queue fails.
+	ActionErr string
 
 	mu sync.Mutex // guards Summary across the Varmqs sharing it
 }
@@ -322,6 +325,9 @@ func (f *Varmq) queueAction(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := json.Marshal(e)
 	q.Summary = string(b)
+	if q.ActionErr != "" {
+		b, _ = json.Marshal(map[string]any{"id": e["id"], "error": q.ActionErr})
+	}
 	q.mu.Unlock()
 	writeFakeJSON(w, http.StatusOK, json.RawMessage(b))
 }
