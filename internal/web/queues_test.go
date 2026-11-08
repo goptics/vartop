@@ -609,9 +609,28 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 		!strings.Contains(body, `<p class="banner">Workflow &#34;twin&#34;: instance-`) || !strings.Contains(body, `hx-trigger="every`) {
 		t.Errorf("stale at, its unit failing = %d:\n%s", status, visibleText(body))
 	}
+	// three twins, the linked one's unit failing: two left still poll on
+	varmqs[2].Mu.Lock()
+	varmqs[2].Workflows = []*fleettest.Workflow{twin(1002)}
+	varmqs[2].Mu.Unlock()
+	status, body = fetch(t, srv, "/workflows/twin?server=multi&at=1000", false)
+	if status != http.StatusOK || strings.Contains(body, "no longer reported") || !strings.Contains(body, "Service Unavailable") ||
+		!strings.Contains(body, `<p class="banner">Workflow &#34;twin&#34;: instance-`) || !strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("stale at of three, its unit failing = %d:\n%s", status, visibleText(body))
+	}
+	// the same, its unit answering 409
 	varmqs[0].Mu.Lock()
 	varmqs[0].WorkflowStatus = 0
+	varmqs[0].Workflows = []*fleettest.Workflow{twin(1000), twin(1000)}
 	varmqs[0].Mu.Unlock()
+	status, body = fetch(t, srv, "/workflows/twin?server=multi&at=1000", false)
+	if status != http.StatusOK || strings.Contains(body, "no longer reported") ||
+		!strings.Contains(body, "is held by more than one storage on instance-") || !strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("stale at of three, its unit 409 = %d:\n%s", status, visibleText(body))
+	}
+	varmqs[2].Mu.Lock()
+	varmqs[2].Workflows = nil
+	varmqs[2].Mu.Unlock()
 
 	// the twin a link named is gone, one is left: offered, not "not found"
 	varmqs[0].Mu.Lock()
