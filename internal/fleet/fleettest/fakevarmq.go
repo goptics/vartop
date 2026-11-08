@@ -255,6 +255,9 @@ type Queue struct {
 	ActionErr string
 	// ActionDrop closes the connection on a queue action: a transport error.
 	ActionDrop bool
+	// JobsStatus, when non-zero, makes GET /queues/{id}/jobs reply with it
+	// and {"error":"..."}.
+	JobsStatus int
 
 	mu sync.Mutex // guards Summary across the Varmqs sharing it
 }
@@ -351,14 +354,20 @@ func (f *Varmq) jobs(w http.ResponseWriter, r *http.Request) {
 		writeFakeError(w, http.StatusNotFound, "queue not found")
 		return
 	}
+	if q.JobsStatus != 0 {
+		writeFakeError(w, q.JobsStatus, http.StatusText(q.JobsStatus))
+		return
+	}
 	state := r.URL.Query().Get("state")
 	offset, err1 := strconv.Atoi(cmp.Or(r.URL.Query().Get("offset"), "0"))
 	limit, err2 := strconv.Atoi(cmp.Or(r.URL.Query().Get("limit"), "50"))
-	if !slices.Contains([]string{"pending", "processing", "completed", "failed"}, state) || err1 != nil || err2 != nil || offset < 0 || limit < 1 || limit > 1000 {
+	_, listsCancelled := q.Jobs["cancelled"] // a varmq that lists it (spec 1.3.0)
+	known := slices.Contains([]string{"pending", "processing", "completed", "failed"}, state) || state == "cancelled" && listsCancelled
+	if !known || err1 != nil || err2 != nil || offset < 0 || limit < 1 || limit > 1000 {
 		writeFakeError(w, http.StatusBadRequest, "invalid state, offset or limit")
 		return
 	}
-	all := q.Jobs[state] // Jobs is never changed while serving
+	all := q.Jobs[state] // Jobs: changed only under f.Mu
 	page := all[min(offset, len(all)):min(offset+limit, len(all))]
 	out := make([]json.RawMessage, len(page))
 	for i, j := range page {
