@@ -623,7 +623,8 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 	if _, body := fetch(t, srv, "/workflows/twin?server=multi&at=1001", false); !strings.Contains(body, `<a class="node `) || !strings.Contains(body, "Other workflows share this ID") {
 		t.Errorf("twin at 1001:\n%s", visibleText(body))
 	}
-	if _, body := fetch(t, srv, "/workflows?server=multi", false); !strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) {
+	if _, body := fetch(t, srv, "/workflows?server=multi", false); !strings.Contains(body, `href="/workflows/twin?at=1000&amp;server=multi"`) ||
+		!strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) {
 		t.Errorf("list links twins to their own pages:\n%s", body)
 	}
 
@@ -646,6 +647,12 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 		!strings.Contains(body, `<p class="banner">Workflow &#34;twin&#34;: instance-`) || !strings.Contains(body, `hx-trigger="every`) {
 		t.Errorf("stale at of three, its unit failing = %d:\n%s", status, visibleText(body))
 	}
+	// no at, a unit failing: still pick one of those read, the failure noted
+	status, body = fetch(t, srv, "/workflows/twin?server=multi", false)
+	if status != http.StatusOK || !strings.Contains(body, "Pick one") || !strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) ||
+		!strings.Contains(body, `href="/workflows/twin?at=1002&amp;server=multi"`) || !strings.Contains(body, "Service Unavailable") || strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("no at of three, a unit failing = %d:\n%s", status, visibleText(body))
+	}
 	// the same, its unit answering 409
 	varmqs[0].Mu.Lock()
 	varmqs[0].WorkflowStatus = 0
@@ -655,6 +662,16 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 	if status != http.StatusOK || strings.Contains(body, "no longer reported") ||
 		!strings.Contains(body, "is held by more than one storage on instance-") || !strings.Contains(body, `hx-trigger="every`) {
 		t.Errorf("stale at of three, its unit 409 = %d:\n%s", status, visibleText(body))
+	}
+	// the linked twin gone, two left, every unit read: offered, not "not found"
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workflows = []*fleettest.Workflow{}
+	varmqs[0].Mu.Unlock()
+	status, body = fetch(t, srv, "/workflows/twin?server=multi&at=1000", false)
+	if status != http.StatusOK || strings.Contains(body, "not found") || !strings.Contains(body, "no longer reported") ||
+		!strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) || !strings.Contains(body, `href="/workflows/twin?at=1002&amp;server=multi"`) ||
+		strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("stale at, two twins left = %d:\n%s", status, visibleText(body))
 	}
 	varmqs[2].Mu.Lock()
 	varmqs[2].Workflows = nil
