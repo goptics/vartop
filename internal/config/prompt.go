@@ -55,17 +55,12 @@ func PromptOnboarding() (*Config, error) {
 // PromptServer interactively asks the user for a single server configuration.
 func PromptServer() (*Server, error) {
 	var (
-		name          string
-		serverType    string
-		endpoint      string
-		context       string
-		namespace     string
-		discoveryType string
-		service       string
-		selector      string
-		dnsHost       string
-		dnsPort       string
-		token         string
+		name       string
+		serverType string
+		endpoint   string
+		dnsHost    string
+		dnsPort    string
+		token      string
 	)
 
 	form := huh.NewForm(
@@ -87,7 +82,6 @@ func PromptServer() (*Server, error) {
 				Description("How should vartop discover this server?").
 				Options(
 					huh.NewOption("Static endpoints", "endpoints"),
-					huh.NewOption("Kubernetes", "kubernetes"),
 					huh.NewOption("DNS (all addresses of a hostname)", "dns"),
 				).
 				Value(&serverType),
@@ -105,64 +99,6 @@ func PromptServer() (*Server, error) {
 					return nil
 				}),
 		).WithHideFunc(func() bool { return serverType != "endpoints" }),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Kubernetes Context").
-				Description("The kubectl context to use").
-				Value(&context).
-				Validate(func(s string) error {
-					if s == "" {
-						return fmt.Errorf("context cannot be empty")
-					}
-					return nil
-				}),
-		).WithHideFunc(func() bool { return serverType != "kubernetes" }),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Kubernetes Namespace").
-				Description("The namespace containing the varmq service").
-				Value(&namespace).
-				Validate(func(s string) error {
-					if s == "" {
-						return fmt.Errorf("namespace cannot be empty")
-					}
-					return nil
-				}),
-		).WithHideFunc(func() bool { return serverType != "kubernetes" }),
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Kubernetes Discovery").
-				Description("Discover pods by service name or label selector").
-				Options(
-					huh.NewOption("Service", "service"),
-					huh.NewOption("Label selector", "selector"),
-				).
-				Value(&discoveryType),
-		).WithHideFunc(func() bool { return serverType != "kubernetes" }),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Service Name").
-				Description("The Kubernetes service name").
-				Value(&service).
-				Validate(func(s string) error {
-					if s == "" {
-						return fmt.Errorf("service cannot be empty")
-					}
-					return nil
-				}),
-		).WithHideFunc(func() bool { return serverType != "kubernetes" || discoveryType != "service" }),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Label Selector").
-				Description("e.g., app=varmq-mux").
-				Value(&selector).
-				Validate(func(s string) error {
-					if s == "" {
-						return fmt.Errorf("selector cannot be empty")
-					}
-					return nil
-				}),
-		).WithHideFunc(func() bool { return serverType != "kubernetes" || discoveryType != "selector" }),
 		huh.NewGroup(
 			huh.NewInput().
 				Title("DNS Host").
@@ -207,17 +143,6 @@ func PromptServer() (*Server, error) {
 	switch serverType {
 	case "endpoints":
 		server.Endpoints = []string{endpoint}
-	case "kubernetes":
-		server.Kubernetes = &KubernetesRef{
-			Context:   context,
-			Namespace: namespace,
-		}
-		switch discoveryType {
-		case "service":
-			server.Kubernetes.Service = service
-		case "selector":
-			server.Kubernetes.Selector = selector
-		}
 	case "dns":
 		port, _ := strconv.Atoi(dnsPort) // validated by the form
 		server.DNS = &DNSRef{Host: dnsHost, Port: port}

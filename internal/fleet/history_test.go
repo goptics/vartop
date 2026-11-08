@@ -89,8 +89,8 @@ func TestPollTimesAreWallClock(t *testing.T) {
 			}
 		}
 	}
-	check("direct", pollOnce(context.Background(), dpool, newTracker(time.Second, false)))
-	check("direct pollAt", pollAt(context.Background(), dpool, newTracker(time.Second, false), time.Now()))
+	check("direct", pollOnce(context.Background(), dpool, newTracker(time.Second)))
+	check("direct pollAt", pollAt(context.Background(), dpool, newTracker(time.Second), time.Now()))
 	check("balanced", pollUntil(t, bpool, btr, 5, "both units", hasKeys("#a", "#b")))
 	if samples != 4 {
 		t.Errorf("checked %d samples, want 4: the direct unit's in two polls and both balanced units'", samples)

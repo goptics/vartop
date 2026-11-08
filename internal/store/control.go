@@ -30,8 +30,8 @@ type Lease struct {
 	Token string // "" once released
 	PID   int
 	// The collector's environment, as far as collection depends on it.
-	ConfigPath, Kubeconfig string
-	Started, Beat          time.Time
+	ConfigPath    string
+	Started, Beat time.Time
 }
 
 // Control is control.db: the collector's lease, and per server the UIs' poke
@@ -44,7 +44,8 @@ type Control struct {
 }
 
 const controlSchema = `
--- build, path_env and stop are unused: the vartop daemon of
+-- build, kubeconfig, path_env and stop are unused (kubeconfig is written
+-- empty: Kubernetes discovery is gone): the vartop daemon of
 -- 2026-10-26 wrote them. They stay so that its files open unchanged.
 CREATE TABLE IF NOT EXISTS daemon (
 	id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -138,8 +139,8 @@ func (c *Control) claim(l Lease, now time.Time, dead string) (token string, ok b
 	ms := now.UnixMilli()
 	if _, err := tx.Exec(`INSERT OR REPLACE INTO daemon
 		(id, token, pid, build, config_path, kubeconfig, path_env, started, beat, stop)
-		VALUES (1, ?, ?, '', ?, ?, '', ?, ?, 0)`,
-		token, l.PID, l.ConfigPath, l.Kubeconfig, ms, ms); err != nil {
+		VALUES (1, ?, ?, '', ?, '', '', ?, ?, 0)`,
+		token, l.PID, l.ConfigPath, ms, ms); err != nil {
 		return "", false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -237,8 +238,8 @@ func (c *Control) Release(token string) error {
 func (c *Control) Lease() (Lease, bool, error) {
 	var l Lease
 	var started, beat int64
-	err := c.db.QueryRow(`SELECT token, pid, config_path, kubeconfig, started, beat FROM daemon WHERE id = 1`).
-		Scan(&l.Token, &l.PID, &l.ConfigPath, &l.Kubeconfig, &started, &beat)
+	err := c.db.QueryRow(`SELECT token, pid, config_path, started, beat FROM daemon WHERE id = 1`).
+		Scan(&l.Token, &l.PID, &l.ConfigPath, &started, &beat)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Lease{}, false, nil
 	}
@@ -258,7 +259,7 @@ type Collector struct {
 	Fresh bool  // a collector holds the lease: it collects
 	// Other: the lease — fresh, released or stale — is of another
 	// environment than the reader's (R31). Release and a crash keep its
-	// config path and KUBECONFIG: the snapshots stored under it are of
+	// config path: the snapshots stored under it are of
 	// that configuration's servers, whose units this one's token must not
 	// reach.
 	Other bool

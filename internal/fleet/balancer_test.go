@@ -31,7 +31,7 @@ func lbPoll(t *testing.T, urls ...string) (*api.Pool, *tracker) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pool.Close() })
-	return pool, newTracker(srv.PollInterval(), srv.Kubernetes != nil)
+	return pool, newTracker(srv.PollInterval())
 }
 
 // pollUntil polls up to ticks times until cond holds for the snapshot, and
@@ -273,7 +273,7 @@ func TestPollBalancerRates(t *testing.T) {
 	const interval = 200 * time.Millisecond
 	fakes, srvs := fleettest.NewInstances(t, "a", "b", "c")
 	lb := fleettest.NewRoundRobinLB(t, srvs...)
-	pool, tr := fleettest.StaticPool(t, lb.URL), newTracker(interval, false)
+	pool, tr := fleettest.StaticPool(t, lb.URL), newTracker(interval)
 	h := newTestHistory(interval)
 
 	h.Append(pollOnce(context.Background(), pool, tr))
@@ -723,7 +723,7 @@ func labels(pods []PodSnapshot) map[string]string {
 // hands its number on to the instance it showed, and units are listed by
 // number.
 func TestLabelsFollowTheInstance(t *testing.T) {
-	tr := newTracker(time.Second, false)
+	tr := newTracker(time.Second)
 	first := []PodSnapshot{{Key: "http://lb", Instance: "b"}}
 	tr.label(first, labelT0)
 	second := []PodSnapshot{{Key: "#a", Instance: "a", Balanced: true}, {Key: "#b", Instance: "b", Balanced: true}}
@@ -741,7 +741,7 @@ func TestLabelsFollowTheInstance(t *testing.T) {
 
 	t.Run("a shared instance numbers by key", func(t *testing.T) {
 		pods := []PodSnapshot{{Key: "http://z", Instance: "x"}, {Key: "http://y", Instance: "x"}, {Key: "http://w"}}
-		newTracker(time.Second, false).label(pods, labelT0)
+		newTracker(time.Second).label(pods, labelT0)
 		want := map[string]string{"http://w": "instance-1", "http://y": "instance-2", "http://z": "instance-3"}
 		if got := labels(pods); !maps.Equal(got, want) {
 			t.Errorf("labels = %v, want %v", got, want)
@@ -770,7 +770,7 @@ func TestLabelsFollowTheInstance(t *testing.T) {
 // given to another unit for a day, while stored snapshots may still show
 // it (TestLabelNumberFreedAfter24h has the day after).
 func TestLabelsNotReusedWithinADay(t *testing.T) {
-	tr := newTracker(time.Second, false)
+	tr := newTracker(time.Second)
 
 	first := []PodSnapshot{{Key: "#b"}, {Key: "#a"}}
 	tr.label(first, labelT0)
@@ -794,13 +794,6 @@ func TestLabelsNotReusedWithinADay(t *testing.T) {
 
 		want := map[string]string{urls[0]: "instance-1", urls[1]: "instance-2", urls[2]: "instance-3"}
 		if got := labels(s.Pods); !maps.Equal(got, want) {
-			t.Errorf("labels = %v, want %v", got, want)
-		}
-	})
-	t.Run("kubernetes leaves labels alone", func(t *testing.T) {
-		pods := []PodSnapshot{{Key: "#a", Label: "varmq-0"}, {Key: "http://h:1", Label: "varmq-1"}}
-		newTracker(time.Second, true).label(pods, labelT0)
-		if got, want := labels(pods), map[string]string{"#a": "varmq-0", "http://h:1": "varmq-1"}; !maps.Equal(got, want) {
 			t.Errorf("labels = %v, want %v", got, want)
 		}
 	})
@@ -883,7 +876,7 @@ func TestLabelsOfDownUnits(t *testing.T) {
 		want map[string]string // unit key → label
 	}
 	run := func(t *testing.T, steps ...step) {
-		tr := newTracker(time.Second, false)
+		tr := newTracker(time.Second)
 		for i, s := range steps {
 			tr.label(s.pods, labelT0)
 			if got := labels(s.pods); !maps.Equal(got, s.want) {
@@ -959,7 +952,7 @@ func TestLabelStateRoundTrip(t *testing.T) {
 	}
 	clone := func(pods []PodSnapshot) []PodSnapshot { return slices.Clone(pods) }
 
-	tr := newTracker(time.Second, false)
+	tr := newTracker(time.Second)
 	for i, pods := range ticks {
 		tr.label(clone(pods), labelT0.Add(time.Duration(i)*time.Second))
 	}
@@ -968,7 +961,7 @@ func TestLabelStateRoundTrip(t *testing.T) {
 		t.Fatalf("labels() = %+v, %v; want the numbers given, changed", state, changed)
 	}
 
-	loaded := newTracker(time.Second, false)
+	loaded := newTracker(time.Second)
 	loaded.loadLabels(state)
 	if again, changed := loaded.labels(); changed || !reflect.DeepEqual(again, state) {
 		t.Errorf("after loadLabels, labels() = %+v, %v; want the state loaded, unchanged", again, changed)
@@ -994,7 +987,7 @@ func TestLabelStateRoundTrip(t *testing.T) {
 // TestLabelsChanged: labels() reports a change only when a number or what a
 // unit follows changed, or a number was seen in a later minute.
 func TestLabelsChanged(t *testing.T) {
-	tr := newTracker(time.Second, false)
+	tr := newTracker(time.Second)
 	if _, changed := tr.labels(); changed {
 		t.Error("a new tracker's labels changed")
 	}
@@ -1039,7 +1032,7 @@ func TestLabelNumberFreedAfter24h(t *testing.T) {
 		},
 		Followed: map[string]string{"#a": "#a", "#b": "#b", "#c": "#c", "#e": "#e"},
 	}
-	tr := newTracker(time.Second, false)
+	tr := newTracker(time.Second)
 	tr.loadLabels(state)
 
 	pods := []PodSnapshot{
@@ -1070,7 +1063,7 @@ func TestLabelNumberFreedAfter24h(t *testing.T) {
 // a day, the units still there keep their numbers; only the number of one
 // that is gone is free.
 func TestLiveNumberNotFreedAfterSleep(t *testing.T) {
-	tr := newTracker(time.Second, false)
+	tr := newTracker(time.Second)
 	before := []PodSnapshot{{Key: "http://x", Instance: "x"}, {Key: "http://y", Instance: "y"}, {Key: "http://z", Instance: "z"}}
 	tr.label(before, labelT0)
 

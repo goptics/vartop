@@ -430,10 +430,9 @@ const freeAfter = 24 * time.Hour
 // belongs to the poller goroutine, which lends it to the balancer pass while
 // it waits for the direct endpoints.
 type tracker struct {
-	window     time.Duration                   // how long a sighting counts: max(1 minute, 3 × interval)
-	kubernetes bool                            // labels are pod names, not instance-N
-	seen       map[string]map[string]time.Time // endpoint → instance → last answer through it
-	direct     map[string]bool                 // instances shown as a direct unit by the latest tick
+	window time.Duration                   // how long a sighting counts: max(1 minute, 3 × interval)
+	seen   map[string]map[string]time.Time // endpoint → instance → last answer through it
+	direct map[string]bool                 // instances shown as a direct unit by the latest tick
 
 	numbers  map[string]LabelNumber // what a unit's number follows (see label) → its instance-N; handed from a key to an instance, freed after freeAfter unshown
 	followed map[string]string      // unit key → what its number followed when last labelled
@@ -441,13 +440,12 @@ type tracker struct {
 }
 
 // newTracker returns an empty tracker for a server polled every interval.
-func newTracker(interval time.Duration, kubernetes bool) *tracker {
+func newTracker(interval time.Duration) *tracker {
 	return &tracker{
-		window:     max(time.Minute, 3*interval),
-		kubernetes: kubernetes,
-		seen:       make(map[string]map[string]time.Time),
-		numbers:    make(map[string]LabelNumber),
-		followed:   make(map[string]string),
+		window:   max(time.Minute, 3*interval),
+		seen:     make(map[string]map[string]time.Time),
+		numbers:  make(map[string]LabelNumber),
+		followed: make(map[string]string),
 	}
 }
 
@@ -562,7 +560,7 @@ func (t *tracker) prune(now time.Time) {
 	}
 }
 
-// label names the units of a non-Kubernetes server instance-1, instance-2, …
+// label names the units of a server instance-1, instance-2, …
 // and lists them in that order. A unit's number follows its instance when
 // no other unit of pods has the same one, so it stays with the process
 // while its endpoint turns from direct to balancer or back; otherwise it
@@ -578,12 +576,8 @@ func (t *tracker) prune(now time.Time) {
 // long sleep keeps its number. A new number is the lowest free one: until
 // numbers are freed, they are given in the order the collector first saw
 // what they follow (new ones of one call in unit key order, so a static
-// list numbers in endpoint order). On a Kubernetes server it leaves labels
-// and order as they are.
+// list numbers in endpoint order).
 func (t *tracker) label(pods []PodSnapshot, now time.Time) {
-	if t.kubernetes {
-		return
-	}
 	units := make(map[string]int, len(pods)) // instance → units of pods it answered for
 	held := make(map[string]bool, len(pods)) // "#"+instance of pods' instances, then what down units follow
 	for _, p := range pods {

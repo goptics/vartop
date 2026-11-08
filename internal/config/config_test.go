@@ -22,21 +22,6 @@ func TestValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "kubernetes service",
-			server:  &Server{Name: "k8s", Kubernetes: &KubernetesRef{Context: "prod", Namespace: "default", Service: "varmq"}},
-			wantErr: false,
-		},
-		{
-			name:    "kubernetes selector",
-			server:  &Server{Name: "k8s", Kubernetes: &KubernetesRef{Context: "prod", Namespace: "default", Selector: "app=varmq"}},
-			wantErr: false,
-		},
-		{
-			name:    "both endpoints and kubernetes",
-			server:  &Server{Name: "bad", Endpoints: []string{"http://localhost:8080/varmq"}, Kubernetes: &KubernetesRef{Context: "prod", Namespace: "default", Service: "varmq"}},
-			wantErr: true,
-		},
-		{
 			name:    "dns",
 			server:  &Server{Name: "dns", DNS: &DNSRef{Host: "varmq-headless", Port: 8080}},
 			wantErr: false,
@@ -44,11 +29,6 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "dns and endpoints",
 			server:  &Server{Name: "bad", Endpoints: []string{"http://a:1/varmq"}, DNS: &DNSRef{Host: "varmq", Port: 8080}},
-			wantErr: true,
-		},
-		{
-			name:    "dns and kubernetes",
-			server:  &Server{Name: "bad", Kubernetes: &KubernetesRef{Context: "prod", Namespace: "default", Service: "varmq"}, DNS: &DNSRef{Host: "varmq", Port: 8080}},
 			wantErr: true,
 		},
 		{
@@ -67,28 +47,8 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "neither endpoints nor kubernetes",
+			name:    "neither endpoints nor dns",
 			server:  &Server{Name: "bad"},
-			wantErr: true,
-		},
-		{
-			name:    "kubernetes missing context",
-			server:  &Server{Name: "bad", Kubernetes: &KubernetesRef{Namespace: "default", Service: "varmq"}},
-			wantErr: true,
-		},
-		{
-			name:    "kubernetes missing namespace",
-			server:  &Server{Name: "bad", Kubernetes: &KubernetesRef{Context: "prod", Service: "varmq"}},
-			wantErr: true,
-		},
-		{
-			name:    "kubernetes both service and selector",
-			server:  &Server{Name: "bad", Kubernetes: &KubernetesRef{Context: "prod", Namespace: "default", Service: "varmq", Selector: "app=varmq"}},
-			wantErr: true,
-		},
-		{
-			name:    "kubernetes neither service nor selector",
-			server:  &Server{Name: "bad", Kubernetes: &KubernetesRef{Context: "prod", Namespace: "default"}},
 			wantErr: true,
 		},
 	}
@@ -119,17 +79,6 @@ func TestRoundTrip(t *testing.T) {
 				Token:     "secret",
 				Interval:  10,
 			},
-			"k8s": {
-				Name: "k8s",
-				Kubernetes: &KubernetesRef{
-					Context:   "prod",
-					Namespace: "varmq",
-					Service:   "mux",
-					Port:      8080,
-					Path:      "/varmq",
-				},
-				Interval: 5,
-			},
 		},
 	}
 
@@ -147,29 +96,6 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.Servers) != len(cfg.Servers) {
 		t.Fatalf("Servers count = %d, want %d", len(loaded.Servers), len(cfg.Servers))
-	}
-
-	k8s, ok := loaded.Servers["k8s"]
-	if !ok {
-		t.Fatalf("server k8s not found")
-	}
-	if k8s.Kubernetes == nil {
-		t.Fatalf("k8s Kubernetes ref is nil")
-	}
-	if k8s.Kubernetes.Context != "prod" {
-		t.Errorf("Context = %q, want %q", k8s.Kubernetes.Context, "prod")
-	}
-	if k8s.Kubernetes.Namespace != "varmq" {
-		t.Errorf("Namespace = %q, want %q", k8s.Kubernetes.Namespace, "varmq")
-	}
-	if k8s.Kubernetes.Service != "mux" {
-		t.Errorf("Service = %q, want %q", k8s.Kubernetes.Service, "mux")
-	}
-	if k8s.Kubernetes.Port != 8080 {
-		t.Errorf("Port = %d, want %d", k8s.Kubernetes.Port, 8080)
-	}
-	if k8s.Kubernetes.Path != "/varmq" {
-		t.Errorf("Path = %q, want %q", k8s.Kubernetes.Path, "/varmq")
 	}
 
 	prod, ok := loaded.Servers["prod"]
@@ -453,5 +379,36 @@ func TestValidateHistory(t *testing.T) {
 	bad := &Server{Name: "local", Endpoints: []string{"http://localhost:8080/varmq"}, History: "90d"}
 	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), `server "local": history`) {
 		t.Errorf("history 90d: err %v, want one naming the server and history", err)
+	}
+}
+
+// TestLoadRejectsKubernetes: a config with a kubernetes block fails to load,
+// naming the server; a null block is no block.
+func TestLoadRejectsKubernetes(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	dir := filepath.Join(tmp, configDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, configFileName), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(`{"default_server":"k","servers":{"k":{"name":"k","kubernetes":{"context":"prod","namespace":"jobs","service":"varmq"}}}}`)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), `server "k": kubernetes discovery was removed; use static or dns`) {
+		t.Fatalf("Load() error = %v, want kubernetes removed", err)
+	}
+	if !errors.Is(err, ErrKubernetesRemoved) {
+		t.Fatalf("Load() error = %v, want ErrKubernetesRemoved", err)
+	}
+
+	write(`{"servers":{"s":{"name":"s","endpoints":["http://a:1/varmq"],"kubernetes":null}}}`)
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() with null kubernetes: %v", err)
 	}
 }

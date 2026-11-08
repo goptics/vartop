@@ -52,10 +52,9 @@ type target struct {
 // previous collector's, or no collector collecting), the unit gone or unknown,
 // the form out of date — and returns false; nothing may reach varmq then.
 //
-// The unit parameter is taken as it is, unlike a page's (see labelOf): a
-// form from before labels, still open in a tab, names its unit by key,
-// under pod= on every server. Its key is no label, and the other noun's
-// parameter, set, is no unit of this server: either is refused, where
+// The unit parameter is taken as it is: a form from before labels, still
+// open in a tab, names its unit by key, under pod=. Its key is no label,
+// and pod=, set, is no unit of this server: either is refused, where
 // reading it as absent would act on every unit. Empty, it is the old
 // merged form, which acts on every unit as it says.
 func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
@@ -110,7 +109,7 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		return nil, false
 	}
 	t.latest = latest
-	if r.PostFormValue(otherParam(t.noun)) != "" {
+	if r.PostFormValue("pod") != "" {
 		conflict(w, outOfDateMsg)
 		return nil, false
 	}
@@ -140,17 +139,9 @@ func refused(w http.ResponseWriter, d store.Collector) bool {
 	return true
 }
 
-// outOfDateMsg refuses a form that names a unit under the other noun's
-// parameter: one from before labels.
+// outOfDateMsg refuses a form that names a unit under pod=: one from before
+// labels.
 const outOfDateMsg = "This page is out of date — reload"
-
-// otherParam is the unit parameter of the other kind of server than n's.
-func otherParam(n fleet.Noun) string {
-	if n.Param == "pod" {
-		return "instance"
-	}
-	return "pod"
-}
 
 // refresh pokes t's server and syncs its feed until it holds a snapshot
 // taken after the poke, for up to fleet.SettleWait or until ctx ends. With

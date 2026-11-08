@@ -34,9 +34,9 @@ and pause, resume, restart, stop or resize it, from your browser or the command 
 [varmq](https://github.com/goptics/varmq) is a typed worker pool and message queue for Go. Each process that uses it can serve its workers over a small REST API, `varmq.Handler`. **vartop** talks to that API on every instance of your service and puts the whole fleet in one place:
 
 - **`vartop web`**, a dashboard in your browser. It merges every instance (or shows one), refreshes at each poll, keeps the history in a local SQLite store, and lets you act on workers.
-- **`vartop action`** and **`vartop concurrency`**, the same actions from a terminal or a script, against every endpoint of a server at once: each static URL, or each pod or address Kubernetes or DNS discovery finds.
+- **`vartop action`** and **`vartop concurrency`**, the same actions from a terminal or a script, against every endpoint of a server at once: each static URL, or each address DNS discovery finds.
 
-There is no agent to deploy and no database to run: vartop is one binary on your machine. It finds your instances from a fixed list of URLs, the pods behind a Kubernetes Service, or the addresses a DNS name resolves to, and it collects only while `vartop web` runs.
+There is no agent to deploy and no database to run: vartop is one binary on your machine. It finds your instances from a fixed list of URLs or the addresses a DNS name resolves to, and it collects only while `vartop web` runs.
 
 ## Features
 
@@ -55,7 +55,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 
 **Find every instance**
 
-- **Static endpoints, or Kubernetes EndpointSlices and DNS**, the last two followed live as instances scale, restart or move.
+- **Static endpoints or DNS**, DNS followed live as instances scale, restart or move.
 - **Load-balancer detection.** One URL answered by several instances is recognised, and each instance behind it is listed.
 
 **Safe by default**
@@ -76,9 +76,9 @@ http.ListenAndServe(":8080", mux)
 
 vartop then calls `http://<instance>:8080/varmq`. The API is unauthenticated by design: keep it on a trusted network, or put it behind a proxy that checks a bearer token and give vartop that `token` (sent as `Authorization: Bearer <token>`).
 
-**vartop reaches each instance directly** when it discovers them through [Kubernetes](#kubernetes) or [DNS](#dns): run it inside the network, or over a VPN or route that reaches their addresses.
+**vartop reaches each instance directly** when it discovers them through [DNS](#dns): run it inside the network, or over a VPN or route that reaches their addresses.
 
-**Go 1.26+** to install it (the Kubernetes client libraries need it).
+**Go 1.26+** to install it.
 
 ## Quick start
 
@@ -90,7 +90,7 @@ vartop then calls `http://<instance>:8080/varmq`. The API is unauthenticated by 
 
    Or build from source: `git clone https://github.com/goptics/vartop.git && cd vartop && make build` (binary at `bin/vartop`).
 
-2. **Open the dashboard.** On first run a short wizard sets up your first server: a name, then a **static endpoint**, **Kubernetes** discovery (context, namespace, service or label selector) or **DNS** discovery (host and port), and an optional token.
+2. **Open the dashboard.** On first run a short wizard sets up your first server: a name, then a **static endpoint** or **DNS** discovery (host and port), and an optional token.
 
    ```bash
    vartop web
@@ -175,7 +175,7 @@ Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 | `vartop` | Print help |
 | `vartop web` | Serve the dashboard and collect every server while it runs |
 | `vartop server list` | List all servers (static servers with their health status) |
-| `vartop server add` | Register a new server via the interactive wizard (static, Kubernetes or DNS) |
+| `vartop server add` | Register a new server via the interactive wizard (static or DNS) |
 | `vartop server use <name>` | Set the default server |
 | `vartop server remove <name>` | Remove a server (`--all`: every server) |
 | `vartop server set <name> endpoint\|token\|interval\|history <value>` | Update a server property (`endpoint` accepts a comma-separated list, static servers only; `history` is whole days, `1d` to `30d`) |
@@ -183,7 +183,7 @@ Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 | `vartop concurrency <worker> <n>` | Set a worker's concurrency pool size |
 | `-s`, `--server <name>` | The server `web`, `action` and `concurrency` use (overrides the default) |
 
-`action` and `concurrency` run against **every endpoint** of the server (each static endpoint, or each pod or address Kubernetes or DNS discovery finds) concurrently and print one result line per endpoint; the command fails if any endpoint fails. Behind a load-balancer URL that is one instance, the one the balancer picks: see [Load balancers](#load-balancers). `concurrency` is per instance, so `concurrency orders 8` on 3 endpoints gives 24 workers in total. To target one endpoint, pass its URL:
+`action` and `concurrency` run against **every endpoint** of the server (each static endpoint, or each address DNS discovery finds) concurrently and print one result line per endpoint; the command fails if any endpoint fails. Behind a load-balancer URL that is one instance, the one the balancer picks: see [Load balancers](#load-balancers). `concurrency` is per instance, so `concurrency orders 8` on 3 endpoints gives 24 workers in total. To target one endpoint, pass its URL:
 
 ```bash
 vartop action orders pause                                        # every endpoint
@@ -198,11 +198,10 @@ A page's address says what it shows, by the names the page shows, so a reload, t
 | Parameter | Meaning |
 | --- | --- |
 | `server=<name>` | The configured server to show, by the key it is listed under in the config (the default server when absent, else the first configured server by name) |
-| `instance=<label>` | Off Kubernetes: only that instance, e.g. `?instance=instance-2` |
-| `pod=<pod name>` | On Kubernetes: only that pod |
+| `instance=<label>` | Only that instance, e.g. `?instance=instance-2` |
 | `completed=<span>`, `failed=<span>` | On a worker page: the span of that chart, `24h`, `7d`, `30d` or the server's history (e.g. `14d`); without it, the hour |
 
-Without `instance` or `pod` the page shows every instance (on Kubernetes, every pod) merged. An old `pod=` link opens the merged view: that is a `pod=` on a server that is not on Kubernetes, or on a Kubernetes one a value that is an endpoint key (`#…` or a URL), not a pod name. A label the server never had says so; one that is no longer reported says that, with a link to the merged view. A span the server's history does not offer (a link from before it was shortened, say) shows the hour.
+Without `instance` the page shows every instance merged. An old `pod=` link opens the merged view. A label the server never had says so; one that is no longer reported says that, with a link to the merged view. A span the server's history does not offer (a link from before it was shortened, say) shows the hour.
 
 ## Configuration
 
@@ -218,7 +217,7 @@ If `config.json` is a symlink, say into a dotfiles repository, vartop saves thro
 
 ### Schema
 
-Each server uses **exactly one** of `endpoints` (static list), `kubernetes` or `dns` (live discovery). Setting more than one, or none, is rejected when the config is loaded.
+Each server uses **exactly one** of `endpoints` (static list) or `dns` (live discovery). Setting both, or neither, is rejected when the config is loaded. A server with a `kubernetes` block (discovery removed) fails to load with *kubernetes discovery was removed; use static or dns*: replace the block with `endpoints` or `dns`.
 
 ```json
 {
@@ -230,17 +229,6 @@ Each server uses **exactly one** of `endpoints` (static list), `kubernetes` or `
       "token": "optional-bearer-token",
       "interval": 5,
       "history": "30d"
-    },
-    "cluster": {
-      "name": "cluster",
-      "kubernetes": {
-        "context": "prod-eu",
-        "namespace": "workers",
-        "service": "varmq-mux",
-        "port": 8080,
-        "path": "/varmq"
-      },
-      "token": "optional-bearer-token"
     },
     "headless": {
       "name": "headless",
@@ -257,50 +245,17 @@ Each server uses **exactly one** of `endpoints` (static list), `kubernetes` or `
 | Field | Description | Default |
 | --- | --- | --- |
 | `default_server` | Server to use when no `-s` flag is given | *(none)* |
-| `servers.<name>.endpoints` | Static list of mux endpoint URLs (one for a single instance, several for more) | *(one of endpoints / kubernetes / dns)* |
-| `servers.<name>.kubernetes` | Kubernetes discovery block, see [Kubernetes](#kubernetes) | *(one of endpoints / kubernetes / dns)* |
-| `servers.<name>.dns` | DNS discovery block, see [DNS](#dns) | *(one of endpoints / kubernetes / dns)* |
+| `servers.<name>.endpoints` | Static list of mux endpoint URLs (one for a single instance, several for more) | *(one of endpoints / dns)* |
+| `servers.<name>.dns` | DNS discovery block, see [DNS](#dns) | *(one of endpoints / dns)* |
 | `servers.<name>.token` | Bearer token for authentication (sent as `Authorization` header) | *(none)* |
 | `servers.<name>.interval` | How often vartop web polls the server, in seconds | `5` |
 | `servers.<name>.history` | How far back a worker page's charts reach: whole days, `1d` to `30d`. Each worker's rates are kept that long, in 5-minute buckets (about 4–5 MB a day for 10 instances of 20 workers); lowering it drops the older ones within 5 minutes, and later buckets reuse their space (the file does not shrink) | `1d` |
-
-### Kubernetes
-
-| Field | Description | Default |
-| --- | --- | --- |
-| `context` | kubeconfig context to use (kubeconfig is read from `$KUBECONFIG` or `~/.kube/config`, in the [environment](#environment) vartop web runs in) | *(required)* |
-| `namespace` | Namespace of the varmq pods | *(required)* |
-| `service` | Service name; pods are found via its EndpointSlices (`kubernetes.io/service-name=<service>`) | *(one of service / selector)* |
-| `selector` | EndpointSlice label selector, e.g. `app=varmq-mux` | *(one of service / selector)* |
-| `port` | Port to dial on each pod | first port on the EndpointSlice |
-| `path` | Mux API path on each pod | `/varmq` |
-
-Only **ready** endpoints are used, so pods that are starting up or terminating are skipped, and pods are labelled by pod name. The `server add` wizard asks for context, namespace, and service or selector; to change `port` or `path`, edit the config file.
-
-- **Reachable pod IPs.** vartop dials each pod directly at `http://<pod-ip>:<port><path>`. There is no port-forward or API-server proxy, so run it from inside the cluster network or over a VPN or route that reaches pod IPs.
-- **RBAC.** Your kube identity needs `list` and `watch` on EndpointSlices in the namespace:
-
-  ```yaml
-  apiVersion: rbac.authorization.k8s.io/v1
-  kind: Role
-  metadata:
-    name: vartop
-    namespace: workers
-  rules:
-    - apiGroups: ["discovery.k8s.io"]
-      resources: ["endpointslices"]
-      verbs: ["list", "watch"]
-  ```
-
-- **Plain HTTP.** Pods are dialed over `http://`. If you set a `token`, it travels unencrypted on the pod network, so only use it where that network is trusted.
-
-If the watcher can't sync within 10 seconds (wrong context, no access, API server unreachable), vartop shows the underlying error, and vartop web tries again with a growing delay (5 seconds, doubling up to 5 minutes).
 
 ### DNS
 
 Resolves a hostname to **all** of its addresses and dials each one, re-resolving every 5 seconds so instances that scale out or move are picked up. Works anywhere a name returns one address per instance:
 
-- a Kubernetes **headless** Service (`clusterIP: None`): no kubeconfig or RBAC needed, handy when vartop runs inside the cluster
+- a Kubernetes **headless** Service (`clusterIP: None`), handy when vartop runs inside the cluster
 - a Docker Compose service name with several replicas (`tasks.<service>` on Swarm)
 - Consul, Nomad, or AWS Cloud Map service DNS
 
@@ -310,7 +265,7 @@ Resolves a hostname to **all** of its addresses and dials each one, re-resolving
 | `port` | Port each instance serves the mux on | *(required)* |
 | `path` | Mux API path on each instance | `/varmq` |
 
-An unresolvable host fails at connect time with the lookup error; a failed refresh later keeps the last known instances. Like Kubernetes discovery, instances are dialed directly over `http://`, so their addresses must be reachable from vartop. The `server add` wizard asks for host and port; edit the config file to change `path`.
+An unresolvable host fails at connect time with the lookup error; a failed refresh later keeps the last known instances. Instances are dialed directly over `http://`, so their addresses must be reachable from vartop. The `server add` wizard asks for host and port; edit the config file to change `path`.
 
 ## How it works
 
@@ -345,7 +300,7 @@ flowchart LR
 - **After a crash**, the dead process's lease stays valid for up to 15 seconds. A `vartop web` started meanwhile watches the lease's heartbeat for 6 seconds and takes it over if it does not move.
 - **Its data directory deleted** while it runs (by a cache cleaner, say), vartop web stops, whether it collects or only shows what another collects, with *data directory removed: {dir} no longer holds the control.db …; start vartop web again*.
 - **History stored by an older vartop is filled into the 24h charts once.** A server file from before the 5-minute buckets has its stored polls summed into them in the background after vartop web starts: 50 polls at a time, each batch followed by a pause at least as long, and without holding anything the collector's own polls or the lease need, so collection carries on meanwhile. That takes about 15 seconds for 12,000 polls of a small fleet, and about 45 seconds per server for a full day of a 10 × 20 server polled every 5 seconds. Until it is done, the 24h charts show the part already filled.
-- **It logs state changes only**, to its terminal: servers added, removed or restarted, a server that cannot be polled at all (its discovery failing: a Kubernetes watcher that cannot sync, a DNS name that does not resolve) and its recovery, store problems, and who collects. Instances that stop answering, even all of them, show on the page, not in the log.
+- **It logs state changes only**, to its terminal: servers added, removed or restarted, a server that cannot be polled at all (its discovery failing: a DNS name that does not resolve) and its recovery, store problems, and who collects. Instances that stop answering, even all of them, show on the page, not in the log.
 
 ### Charts
 
@@ -362,15 +317,15 @@ flowchart LR
 - **Loopback only.** The dashboard has no login, and whoever reaches it can stop your workers, so vartop refuses any `--host` that is not a loopback address (`127.0.0.1`, `localhost`, `::1`), and the server only answers requests addressed to its own loopback host name.
 - **The token stays on the server.** vartop calls varmq on the page's behalf; the bearer token is never sent to the browser.
 - **Stale data is visible.** When no new data has arrived for three times the polling interval plus 2 seconds, a banner says how old the data is and why (vartop web is not collecting, or the server's error). Everything current shows `—` or is hidden (the values, the health count, the load-balancer note, per-instance errors, the list of reporting instances), and the history stays drawn. A server with only old history, say after vartop web was not running for hours, shows the same banner with its age, not "Waiting for the first snapshot".
-- **Another configuration is refused.** Two `vartop web` on one machine share the [data directory](#data-directory), and only one collects (see [Collection](#collection)). If the one collecting reads another config file or `KUBECONFIG`, the other's pages read *Another vartop (pid {pid}) is collecting with another configuration; this vartop web collects once it stops.*, the current values show `—`, and every action is refused with that text (HTTP 409) and sends nothing: its snapshots name endpoints found under the other configuration, and this server's token must not go to them. The check reads the last collector's lease, running or not, so it holds after that one stopped or crashed too, until this vartop web collects.
-- **Only current data is shown or acted on.** A snapshot is current when it is not stale, the collector's configuration is this vartop's, and it was not taken before that collector started: an older one is a previous collector's. Right after vartop web starts, or takes over from another, the page therefore shows `—` and *No new data for {age}.* and refuses actions (HTTP 409, nothing sent) until its first snapshot, up to about two polling intervals (longer while Kubernetes discovery connects). With nothing collecting, an action is refused at once, with *… — vartop web is not collecting.* If the collector's lease cannot be read, actions are refused with *cannot read the collector's lease: {err}* and the page keeps showing data by the stale rule above. After a server's endpoints (or Kubernetes or DNS settings) are edited, its newest snapshot still names the old units until the collector restarts it, a few seconds; an action meanwhile is refused with *The configuration of {server} changed; actions wait for its first snapshot under it. Try again in a few seconds.*, and nothing is sent: this server's token must not go to endpoints the config no longer lists.
-- **Connecting takes a moment.** While vartop web is still connecting to a server (a Kubernetes watcher can take a few seconds to sync), the page says it is waiting for the server's first snapshot. If the connection fails, the real cause (for example an RBAC `forbidden` error) is shown with the server's name.
+- **Another configuration is refused.** Two `vartop web` on one machine share the [data directory](#data-directory), and only one collects (see [Collection](#collection)). If the one collecting reads another config file, the other's pages read *Another vartop (pid {pid}) is collecting with another configuration; this vartop web collects once it stops.*, the current values show `—`, and every action is refused with that text (HTTP 409) and sends nothing: its snapshots name endpoints found under the other configuration, and this server's token must not go to them. The check reads the last collector's lease, running or not, so it holds after that one stopped or crashed too, until this vartop web collects.
+- **Only current data is shown or acted on.** A snapshot is current when it is not stale, the collector's configuration is this vartop's, and it was not taken before that collector started: an older one is a previous collector's. Right after vartop web starts, or takes over from another, the page therefore shows `—` and *No new data for {age}.* and refuses actions (HTTP 409, nothing sent) until its first snapshot, up to about two polling intervals . With nothing collecting, an action is refused at once, with *… — vartop web is not collecting.* If the collector's lease cannot be read, actions are refused with *cannot read the collector's lease: {err}* and the page keeps showing data by the stale rule above. After a server's endpoints (or DNS settings) are edited, its newest snapshot still names the old units until the collector restarts it, a few seconds; an action meanwhile is refused with *The configuration of {server} changed; actions wait for its first snapshot under it. Try again in a few seconds.*, and nothing is sent: this server's token must not go to endpoints the config no longer lists.
+- **Connecting takes a moment.** While vartop web is still connecting to a server (a DNS lookup can take a moment), the page says it is waiting for the server's first snapshot. If the connection fails, the real cause is shown with the server's name.
 
 </details>
 
 ### Instance labels
 
-Outside Kubernetes the page says **instance** where Kubernetes says pod, and labels each one instance-1, instance-2, … in the order vartop first sees them, static and DNS endpoints included; hover a label for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number. Labels are stored per server, so they survive restarting vartop web; a number not seen for 24 hours is freed, and a new instance takes the lowest free number.
+The page says **instance** and labels each one instance-1, instance-2, … in the order vartop first sees them, static and DNS endpoints included; hover a label for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number. Labels are stored per server, so they survive restarting vartop web; a number not seen for 24 hours is freed, and a new instance takes the lowest free number.
 
 ### Load balancers
 
@@ -384,9 +339,9 @@ If a server is configured with a single **load-balancer URL** (an ingress, nginx
 
 Actions on **All instances (merged)** go through the balancer until every instance has answered or the retry limit is reached (at most 15 seconds), one result line each. Since the balancer picks which instance answers, an instance reached only through it has no actions of its own, and **Restart** is hidden on the merged view whenever such an instance is in it.
 
-**To restart or act on one instance, skip the balancer:** use [`kubernetes`](#kubernetes) discovery, [`dns`](#dns) with a headless Service or service-discovery name, or list the instance URLs in `endpoints`. A cloud load balancer's own hostname resolves to the balancer's nodes, not your instances, so `dns` doesn't help there.
+**To restart or act on one instance, skip the balancer:** use [`dns`](#dns) with a headless Service or service-discovery name, or list the instance URLs in `endpoints`. A cloud load balancer's own hostname resolves to the balancer's nodes, not your instances, so `dns` doesn't help there.
 
-To reach every instance, vartop opens roughly K·(1 + ln K) short-lived connections per worker per refresh through a balancer with K instances behind it; for large fleets prefer `kubernetes` or `dns` discovery, or an interval of 5 seconds or more.
+To reach every instance, vartop opens roughly K·(1 + ln K) short-lived connections per worker per refresh through a balancer with K instances behind it; for large fleets prefer `dns` discovery, or an interval of 5 seconds or more.
 
 </details>
 
@@ -394,7 +349,7 @@ To reach every instance, vartop opens roughly K·(1 + ln K) short-lived connecti
 
 ### Environment
 
-What vartop web can reach depends on the environment you start it in: the config path (`XDG_CONFIG_HOME` or `HOME`), `KUBECONFIG`, the credential plugins on `PATH` that EKS, GKE and AKS kubeconfigs call, proxies, `VARTOP_DATA_DIR`. Two `vartop web` that differ in config path or `KUBECONFIG` share the data directory but not each other's configuration: see *Another configuration is refused* under [Safety](#safety).
+What vartop web can reach depends on the environment you start it in: the config path (`XDG_CONFIG_HOME` or `HOME`), proxies, `VARTOP_DATA_DIR`. Two `vartop web` that differ in config path share the data directory but not each other's configuration: see *Another configuration is refused* under [Safety](#safety).
 
 ### Data directory
 
@@ -441,18 +396,17 @@ vartop
 │   ├── root.go             # Root command, onboarding
 │   ├── server.go           # Server management subcommands
 │   ├── web.go              # `vartop web`: serves the dashboard and runs the collector while it does
-│   └── workers.go          # Worker action & concurrency subcommands (fan out to all pods)
+│   └── workers.go          # Worker action & concurrency subcommands (fan out to all instances)
 ├── internal/
 │   ├── api/
 │   │   ├── client.go       # REST client for one varmq mux endpoint (+ instance header tracking)
-│   │   └── pool.go         # One client per discovered pod, reconciled from a discovery source
+│   │   └── pool.go         # One client per discovered instance, reconciled from a discovery source
 │   ├── config/
 │   │   ├── config.go       # Config load/save + validation (<config dir>/vartop/config.json)
 │   │   └── prompt.go       # Interactive onboarding / server add wizard
 │   ├── discovery/
 │   │   ├── discovery.go    # Source interface: live set of ready endpoint URLs
 │   │   ├── static.go       # Fixed endpoint list from config
-│   │   ├── kubernetes.go   # EndpointSlice informer (client-go) for a service or selector
 │   │   └── dns.go          # Re-resolves a hostname to every instance address
 │   ├── fleet/              # Model of a varmq fleet, no HTTP
 │   │   ├── poller.go       # Collector: polls every unit of a server into snapshots
@@ -461,7 +415,7 @@ vartop
 │   │   ├── balancer.go     # Reaches every instance behind a load balancer
 │   │   ├── view.go         # Snapshots → dashboard, grid and detail view models
 │   │   ├── act.go          # Worker action core, and the dashboard's notices
-│   │   ├── noun.go         # pod / instance wording and the URL parameter
+│   │   ├── noun.go         # instance wording and the URL parameter
 │   │   └── fleettest/      # Fake varmq servers and load balancers for tests
 │   ├── store/              # SQLite store the collector writes and the pages read
 │   │   ├── dir.go          # Data dir, file names, pragmas, retention and size cap
@@ -512,7 +466,6 @@ vartop
 | [Lip Gloss](https://github.com/charmbracelet/lipgloss) | Styling of those prompts |
 | [Cobra](https://github.com/spf13/cobra) | CLI command parsing |
 | [pterm](https://github.com/pterm/pterm) | Big-text ASCII art banner |
-| [client-go](https://github.com/kubernetes/client-go) (+ `k8s.io/api`, `k8s.io/apimachinery`) | Kubernetes EndpointSlice discovery |
 | [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) | Pure-Go SQLite (no cgo) for the history store |
 | [htmx](https://htmx.org) (vendored) | The dashboard's live updates, without a build step |
 

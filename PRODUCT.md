@@ -21,7 +21,7 @@ Live dashboard and control panel for varmq worker fleets. Talks to varmq's REST 
 ## Positioning
 
 - No agent, no database to run: one binary on the user's machine; collects only while `vartop web` runs.
-- Finds instances from static URLs, Kubernetes EndpointSlices or DNS, followed live; detects one URL answered by several instances behind a load balancer.
+- Finds instances from static URLs or DNS, followed live; detects one URL answered by several instances behind a load balancer.
 - Merges every instance, or shows one; queue data grouped by Queue ID, never summed across instances.
 
 ## Operating Context

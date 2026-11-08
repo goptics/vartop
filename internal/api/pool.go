@@ -17,16 +17,8 @@ type Pool struct {
 }
 
 // PoolFor builds a Pool over the discovery source matching the server
-// configuration: Kubernetes EndpointSlices for kubernetes servers, DNS
-// resolution for dns servers, a fixed list otherwise. Callers must Close the pool to stop any informer.
+// configuration: DNS resolution for dns servers, a fixed list otherwise.
 func PoolFor(server *config.Server) (*Pool, error) {
-	if server.Kubernetes != nil {
-		source, err := discovery.NewKubernetes(*server.Kubernetes)
-		if err != nil {
-			return nil, err
-		}
-		return NewPool(source, server.Token), nil
-	}
 	if server.DNS != nil {
 		source, err := discovery.NewDNS(*server.DNS)
 		if err != nil {
@@ -79,26 +71,6 @@ func (p *Pool) Clients() []*Client {
 	}
 
 	return clients
-}
-
-// PodName returns a display name for a pod endpoint: the pod name when the
-// source knows it (kubernetes), else the instance ID the endpoint reported
-// (varmq InstanceHeader), else the endpoint's host.
-func (p *Pool) PodName(endpoint string) string {
-	if n, ok := p.source.(interface{ PodName(string) string }); ok {
-		if name := n.PodName(endpoint); name != "" {
-			return name
-		}
-	}
-	p.mu.Lock()
-	c := p.clients[endpoint]
-	p.mu.Unlock()
-	if c != nil {
-		if id := c.LastInstance(); id != "" {
-			return id
-		}
-	}
-	return config.ShortOrigin(endpoint)
 }
 
 // LoadBalanced returns the endpoints that more than one varmq instance has

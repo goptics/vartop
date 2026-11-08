@@ -42,18 +42,3 @@ func TestNewStaticEmptyAndClose(t *testing.T) {
 		t.Fatalf("second Close() = %v, want nil", err)
 	}
 }
-
-func TestK8sSourceCloseTwiceDoesNotPanic(t *testing.T) {
-	k := &k8sSource{stopCh: make(chan struct{})}
-	if err := k.Close(); err != nil {
-		t.Fatalf("first Close() = %v", err)
-	}
-	if err := k.Close(); err != nil {
-		t.Fatalf("second Close() = %v", err)
-	}
-	select {
-	case <-k.stopCh:
-	default:
-		t.Fatalf("stopCh should be closed after Close()")
-	}
-}

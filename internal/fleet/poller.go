@@ -1,14 +1,12 @@
 package fleet
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"maps"
 	"net/url"
 	"runtime/debug"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -74,7 +72,7 @@ func NewCollector(srv *config.Server, pool *api.Pool, init CollectorInit, sink f
 		interval: interval,
 		pool:     pool,
 		sink:     sink,
-		tracker:  newTracker(interval, srv.Kubernetes != nil),
+		tracker:  newTracker(interval),
 		rater:    NewRater(interval),
 		ctx:      ctx,
 		cancel:   cancel,
@@ -322,21 +320,7 @@ func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Sna
 	}
 	t.direct = direct
 
-	if t.kubernetes {
-		for i := range snap.Pods {
-			p := &snap.Pods[i]
-			if p.Balanced && p.Instance != "" {
-				p.Label = p.Instance
-			} else {
-				// After the requests: PodName may name the instance that just answered.
-				p.Label = pool.PodName(p.Via)
-			}
-		}
-		dedupeLabels(snap.Pods)
-		slices.SortFunc(snap.Pods, func(a, b PodSnapshot) int { return strings.Compare(a.Key, b.Key) })
-	} else {
-		t.label(snap.Pods, now) // and lists them by number
-	}
+	t.label(snap.Pods, now) // and lists them by number
 	t.prune(now)
 	return snap
 }
@@ -396,28 +380,6 @@ func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered [
 	}
 	slices.Sort(answered)
 	return pod, slices.Compact(answered)
-}
-
-// dedupeLabels makes pod labels distinct within a snapshot: pods sharing a
-// label fall back to the host:port of the endpoint they were reached through
-// (their key when none is set), and pods still sharing one to the full URL.
-func dedupeLabels(pods []PodSnapshot) {
-	address := func(p PodSnapshot) string { return cmp.Or(p.Via, p.Key) }
-	fallbacks := []func(PodSnapshot) string{
-		func(p PodSnapshot) string { return hostPort(address(p)) },
-		address,
-	}
-	for _, fallback := range fallbacks {
-		count := make(map[string]int, len(pods))
-		for _, p := range pods {
-			count[p.Label]++
-		}
-		for i := range pods {
-			if count[pods[i].Label] > 1 {
-				pods[i].Label = fallback(pods[i])
-			}
-		}
-	}
 }
 
 // hostPort returns the endpoint URL's host:port, or the endpoint unchanged

@@ -367,7 +367,7 @@ func TestWebLogsStoreNotices(t *testing.T) {
 }
 
 // TestWebSourceChecksEnv (R31): vartop web checks the collector's lease
-// against its own environment — its config file and KUBECONFIG.
+// against its own environment — its config file.
 func TestWebSourceChecksEnv(t *testing.T) {
 	isolate(t)
 	src, release, err := webSource()
@@ -390,14 +390,12 @@ func TestWebSourceChecksEnv(t *testing.T) {
 }
 
 // TestSameEnv (R31): two leases are of one environment when their config
-// path and KUBECONFIG agree, whatever their pid; vartop web's own lease is
-// of its own, KUBECONFIG set or not.
+// path agrees, whatever their pid; vartop web's own lease is of its own.
 func TestSameEnv(t *testing.T) {
 	isolate(t)
-	t.Setenv("KUBECONFIG", "/home/u/.kube/prod")
 	own := ownLease()
-	if own.Kubeconfig != "/home/u/.kube/prod" || own.ConfigPath == "" {
-		t.Fatalf("ownLease = %+v, want this environment's config path and KUBECONFIG", own)
+	if own.ConfigPath == "" {
+		t.Fatalf("ownLease = %+v, want this environment's config path", own)
 	}
 	with := func(edit func(*store.Lease)) store.Lease { l := own; edit(&l); return l }
 	for _, c := range []struct {
@@ -408,15 +406,13 @@ func TestSameEnv(t *testing.T) {
 		{"identical", own, true},
 		{"another pid", with(func(l *store.Lease) { l.PID++ }), true},
 		{"another config path", with(func(l *store.Lease) { l.ConfigPath = "/elsewhere/vartop/config.json" }), false},
-		{"another KUBECONFIG", with(func(l *store.Lease) { l.Kubeconfig = "/home/u/.kube/staging" }), false},
-		{"KUBECONFIG unset", with(func(l *store.Lease) { l.Kubeconfig = "" }), false},
 	} {
 		if got := sameEnv(c.l, own); got != c.want {
 			t.Errorf("%s: sameEnv = %v, want %v", c.name, got, c.want)
 		}
 	}
 	if !sameEnvAsOwn()(own) {
-		t.Error("sameEnvAsOwn refuses this vartop's own lease with KUBECONFIG set")
+		t.Error("sameEnvAsOwn refuses this vartop's own lease")
 	}
 }
 
@@ -646,7 +642,6 @@ func isolate(t *testing.T) string {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	dataDir := filepath.Join(home, "data")
 	t.Setenv("VARTOP_DATA_DIR", dataDir)
-	t.Setenv("KUBECONFIG", "")
 	return dataDir
 }
 

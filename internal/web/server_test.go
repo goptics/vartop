@@ -247,25 +247,6 @@ func TestPagesSayInstanceOnStaticServers(t *testing.T) {
 	})
 }
 
-// TestPagesSayPodOnKubernetes: a Kubernetes server reads as it always did,
-// except for the subtitle of the status card, which no longer ends in
-// "instances".
-func TestPagesSayPodOnKubernetes(t *testing.T) {
-	srv := serveUnits(t, kubernetesServer, threeFakes(t)...)
-
-	checkPages(t, srv, "instance", map[string][]string{
-		"/": {
-			"All pods (merged)", ">Pod grid<", "3/3 pods", `title="healthy / total pods"`,
-			"Pending (max/pod)", "Concurrency (per pod)", `<p class="sub">pod × worker</p>`, "4 ×3 pods", "absent on 2 pods",
-		},
-		"/grid": {">Pod grid<", "<title>Pod grid · multi</title>", "3/3 pods"},
-		"/workers/orders": {
-			"All pods (merged)", "Pods reporting:", "3/3 pods",
-			"per pod, on all pods", `aria-label="Concurrency per pod"`, `aria-label="Concurrency per pod, exact"`,
-		},
-	})
-}
-
 // TestMessagesUseNoun: what the handlers say when a request misses names the
 // server's units by its noun, with the right article.
 func TestMessagesUseNoun(t *testing.T) {
@@ -275,7 +256,6 @@ func TestMessagesUseNoun(t *testing.T) {
 		one, article string
 	}{
 		{"static", config.Server{}, "instance", "an"},
-		{"kubernetes", kubernetesServer, "pod", "a"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := serveUnits(t, tc.server, threeFakes(t)...)
@@ -545,7 +525,7 @@ func TestServerIdentityIsConfigKey(t *testing.T) {
 	}
 }
 
-// TestInstanceParamResolves: off Kubernetes, ?instance= names a unit by
+// TestInstanceParamResolves: ?instance= names a unit by
 // the label the pages show; every link and form of the page carries it.
 func TestInstanceParamResolves(t *testing.T) {
 	varmqs, fakes := threeVarmqs(t)
@@ -603,40 +583,6 @@ func TestInstanceParamResolves(t *testing.T) {
 	}
 }
 
-// TestKubernetesPodParam: on Kubernetes, ?pod= names a pod by its name.
-func TestKubernetesPodParam(t *testing.T) {
-	varmqs, fakes := threeVarmqs(t) // pods a, b and c: labelled by the instance that answered
-	f := unitsFixture(t, kubernetesServer, &mutableSource{eps: urlsOf(fakes...)})
-
-	_, body := fetch(t, f.srv, "/?server=multi&pod=b", false)
-	if !strings.Contains(body, ">orders<") || strings.Contains(body, ">emails<") {
-		t.Errorf("dashboard of pod b should show orders only:\n%s", body)
-	}
-	for _, want := range []string{
-		`<select name="pod" id="pick-unit">`,
-		`<option value="b" selected`,
-		`<input type="hidden" name="pod" value="b">`,
-		`href="/workers/orders?pod=b&amp;server=multi"`,
-		`Selected workers on b:`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("dashboard of pod b lacks %q", want)
-		}
-	}
-	if strings.Contains(body, `name="instance"`) {
-		t.Error("a pod page carries an instance parameter")
-	}
-
-	if resp, _ := post(t, f.srv, "/workers/orders/actions/pause", multi("pod", "b"), true); resp.StatusCode != http.StatusOK {
-		t.Fatalf("pause on pod b = %d, want 200", resp.StatusCode)
-	}
-	for i, fk := range varmqs {
-		if want := map[bool]int{true: 1, false: 0}[i == 1]; len(patches(fk)) != want {
-			t.Errorf("fake %s got %q, want %d PATCH", fk.Instance, patches(fk), want)
-		}
-	}
-}
-
 // TestUnknownAndGoneLabels: a label no snapshot of the hour has is not a
 // unit of the server; one only older snapshots have is gone. Either way the
 // page shows no data, and an action sends nothing.
@@ -648,7 +594,6 @@ func TestUnknownAndGoneLabels(t *testing.T) {
 			copy         string
 		}{
 			{config.Server{}, "instance", "instance-9", "instance-9 is not an instance of multi"},
-			{kubernetesServer, "pod", "web-0", "web-0 is not a pod of multi"},
 		} {
 			fa, fb, aSrv, bSrv := twoFakes(t)
 			srv := serveUnits(t, tc.server, aSrv, bSrv)
@@ -698,15 +643,13 @@ func TestUnknownAndGoneLabels(t *testing.T) {
 }
 
 // TestOldPodParamFallsBackToMerged: links from before labels — a unit key
-// in pod= — show the merged view: off Kubernetes pod= is no parameter at
-// all, and on it a value shaped like a key (#… or a URL) is no pod name.
+// in pod= — show the merged view: pod= is no parameter at all.
 func TestOldPodParamFallsBackToMerged(t *testing.T) {
 	for _, tc := range []struct {
 		server config.Server
 		many   string
 	}{
 		{config.Server{}, "instances"},
-		{kubernetesServer, "pods"},
 	} {
 		fakes := threeFakes(t)
 		srv := serveUnits(t, tc.server, fakes...)
@@ -883,7 +826,7 @@ func bannerOf(body string) string {
 }
 
 // TestOtherConfigCollector (R31): another vartop collecting in another
-// environment than this vartop web's — another config file or KUBECONFIG —
+// environment than this vartop web's — another config file —
 // stores snapshots of units this web must not send its token to. Every
 // page says so, with no current value; every action is refused with that
 // notice, nothing sent and nothing poked.

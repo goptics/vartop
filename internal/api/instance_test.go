@@ -53,9 +53,6 @@ func TestClientDetectsLoadBalancer(t *testing.T) {
 	if lb := p.LoadBalanced(); lb[srv.URL] != 2 {
 		t.Fatalf("LoadBalanced = %v", lb)
 	}
-	if got := p.PodName(srv.URL); got != "pod-1" {
-		t.Fatalf("PodName = %q, want last instance pod-1", got)
-	}
 }
 
 func TestClientInstanceCapAndLegacyServer(t *testing.T) {

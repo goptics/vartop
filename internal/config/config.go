@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -19,20 +21,12 @@ const (
 
 var (
 	ErrConfigNotFound = errors.New("config file not found")
+	// ErrKubernetesRemoved is why a config with a kubernetes server fails to load.
+	ErrKubernetesRemoved = errors.New("kubernetes discovery was removed; use static or dns")
 )
 
-// KubernetesRef identifies a varmq mux endpoint discovered through Kubernetes.
-type KubernetesRef struct {
-	Context   string `json:"context"`
-	Namespace string `json:"namespace"`
-	Service   string `json:"service,omitempty"`
-	Selector  string `json:"selector,omitempty"`
-	Port      int    `json:"port,omitempty"` // 0 = first port from EndpointSlice
-	Path      string `json:"path,omitempty"` // default "/varmq"
-}
-
 // DNSRef discovers varmq instances by resolving a hostname to all of its
-// addresses (e.g. a headless Kubernetes Service, Docker Compose service name,
+// addresses (e.g. a headless service, Docker Compose service name,
 // or Consul DNS) and dialing each one.
 type DNSRef struct {
 	Host string `json:"host"`
@@ -42,12 +36,11 @@ type DNSRef struct {
 
 // Server represents a single varmq server connection definition.
 type Server struct {
-	Name       string         `json:"name"`
-	Endpoints  []string       `json:"endpoints,omitempty"`
-	Kubernetes *KubernetesRef `json:"kubernetes,omitempty"`
-	DNS        *DNSRef        `json:"dns,omitempty"`
-	Token      string         `json:"token,omitempty"`
-	Interval   int            `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+	Name      string   `json:"name"`
+	Endpoints []string `json:"endpoints,omitempty"`
+	DNS       *DNSRef  `json:"dns,omitempty"`
+	Token     string   `json:"token,omitempty"`
+	Interval  int      `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
 	// History is how far back the server's longer charts reach, in whole
 	// days: "7d". Empty is DefaultHistory.
 	History string `json:"history,omitempty"`
@@ -95,24 +88,23 @@ func (s *Server) HistorySpan() time.Duration {
 	return d
 }
 
-// Validate checks that exactly one of Endpoints, Kubernetes or DNS is
+// Validate checks that exactly one of Endpoints or DNS is
 // configured and that the chosen block has its required fields.
 func (s *Server) Validate() error {
 	hasEndpoints := len(s.Endpoints) > 0
-	hasKubernetes := s.Kubernetes != nil
 	hasDNS := s.DNS != nil
 
 	set := 0
-	for _, has := range []bool{hasEndpoints, hasKubernetes, hasDNS} {
+	for _, has := range []bool{hasEndpoints, hasDNS} {
 		if has {
 			set++
 		}
 	}
 	if set > 1 {
-		return fmt.Errorf("server %q: exactly one of endpoints, kubernetes or dns must be set, got %d", s.Name, set)
+		return fmt.Errorf("server %q: exactly one of endpoints or dns must be set, got %d", s.Name, set)
 	}
 	if set == 0 {
-		return fmt.Errorf("server %q: exactly one of endpoints, kubernetes or dns must be set, got neither", s.Name)
+		return fmt.Errorf("server %q: exactly one of endpoints or dns must be set, got neither", s.Name)
 	}
 
 	if s.History != "" {
@@ -127,21 +119,6 @@ func (s *Server) Validate() error {
 		}
 		if s.DNS.Port <= 0 || s.DNS.Port > 65535 {
 			return fmt.Errorf("server %q: dns port must be between 1 and 65535", s.Name)
-		}
-	}
-
-	if hasKubernetes {
-		if s.Kubernetes.Context == "" {
-			return fmt.Errorf("server %q: kubernetes context is required", s.Name)
-		}
-		if s.Kubernetes.Namespace == "" {
-			return fmt.Errorf("server %q: kubernetes namespace is required", s.Name)
-		}
-		if s.Kubernetes.Service != "" && s.Kubernetes.Selector != "" {
-			return fmt.Errorf("server %q: exactly one of kubernetes service or selector must be set, got both", s.Name)
-		}
-		if s.Kubernetes.Service == "" && s.Kubernetes.Selector == "" {
-			return fmt.Errorf("server %q: exactly one of kubernetes service or selector must be set, got neither", s.Name)
 		}
 	}
 
@@ -203,6 +180,20 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Kubernetes discovery is gone: refuse its block, not ignore it.
+	var legacy struct {
+		Servers map[string]struct {
+			Kubernetes json.RawMessage `json:"kubernetes"`
+		} `json:"servers"`
+	}
+	if err := json.Unmarshal(data, &legacy); err == nil {
+		for _, name := range slices.Sorted(maps.Keys(legacy.Servers)) {
+			if k := legacy.Servers[name].Kubernetes; len(k) > 0 && string(k) != "null" {
+				return nil, fmt.Errorf("server %q: %w", name, ErrKubernetesRemoved)
+			}
+		}
 	}
 
 	if cfg.Servers == nil {

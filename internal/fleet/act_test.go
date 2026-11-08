@@ -187,7 +187,7 @@ func TestReaderCopy(t *testing.T) {
 }
 
 // TestSourceOf: a server's source changes with what finds its units — its
-// endpoints, Kubernetes or DNS settings — and with nothing else: not its
+// endpoints or DNS settings — and with nothing else: not its
 // token, interval or name.
 func TestSourceOf(t *testing.T) {
 	base := func() *config.Server {
@@ -211,10 +211,7 @@ func TestSourceOf(t *testing.T) {
 	for name, edit := range map[string]func(*config.Server){
 		"endpoint":  func(s *config.Server) { s.Endpoints = []string{"http://b:8080/varmq"} },
 		"endpoints": func(s *config.Server) { s.Endpoints = append(s.Endpoints, "http://b:8080/varmq") },
-		"kubernetes": func(s *config.Server) {
-			s.Endpoints, s.Kubernetes = nil, &config.KubernetesRef{Context: "prod", Namespace: "workers", Service: "mux"}
-		},
-		"dns": func(s *config.Server) { s.Endpoints, s.DNS = nil, &config.DNSRef{Host: "mux.internal", Port: 8080} },
+		"dns":       func(s *config.Server) { s.Endpoints, s.DNS = nil, &config.DNSRef{Host: "mux.internal", Port: 8080} },
 	} {
 		s := base()
 		edit(s)

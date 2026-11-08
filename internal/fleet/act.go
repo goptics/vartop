@@ -59,8 +59,8 @@ func GoneLabelMsg(label string, n Noun) string {
 }
 
 // OtherConfigMsg is the notice of another vartop, pid, collecting in
-// another environment than vartop web's — another config file or
-// KUBECONFIG — whose snapshots it shows no current value of and acts on
+// another environment than vartop web's — another config file —
+// whose snapshots it shows no current value of and acts on
 // none of (R31). vartop web collects once that one lets the lease go.
 func OtherConfigMsg(pid int) string {
 	return "Another vartop (pid " + strconv.Itoa(pid) + ") is collecting with another configuration; this vartop web collects once it stops."
@@ -73,15 +73,14 @@ func ConfigChangedMsg(server string) string {
 	return "The configuration of " + server + " changed; actions wait for its first snapshot under it. Try again in a few seconds."
 }
 
-// SourceOf identifies what finds srv's units: its endpoints, Kubernetes or
+// SourceOf identifies what finds srv's units: its endpoints or
 // DNS settings — not its token, interval or name, which leave the units as
 // they are. It is a short hash, so that no setting is stored as it is.
 func SourceOf(srv *config.Server) string {
 	b, _ := json.Marshal(struct {
-		Endpoints  []string
-		Kubernetes *config.KubernetesRef
-		DNS        *config.DNSRef
-	}{srv.Endpoints, srv.Kubernetes, srv.DNS})
+		Endpoints []string
+		DNS       *config.DNSRef
+	}{srv.Endpoints, srv.DNS})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
 }
