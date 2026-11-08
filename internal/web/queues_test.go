@@ -485,7 +485,7 @@ func TestWorkflowsUnsupported(t *testing.T) {
 // One workflow: the graph and table; polled while it runs, not once it
 // ended; 404 when no unit has it (200 to a poll, the notice in the banner).
 func TestWorkflowPage(t *testing.T) {
-	_, fakes, _ := workflowFakes(t)
+	varmqs, fakes, _ := workflowFakes(t)
 	srv, _ := newTestServer(t, fakes...)
 
 	status, body := fetch(t, srv, "/workflows/"+fleettest.RunningID+"?server=multi", false)
@@ -515,6 +515,30 @@ func TestWorkflowPage(t *testing.T) {
 	_, body = fetch(t, srv, "/workflows/"+fleettest.SagaID+"?server=multi", false)
 	if strings.Contains(body, `hx-trigger="every`) || strings.Contains(body, "Cancel workflow") || !strings.Contains(body, "Took") || !strings.Contains(body, `<g class="undo t-completed"`) {
 		t.Errorf("ended workflow polls or offers cancel:\n%s", body)
+	}
+
+	// one unit's storage fails: the copy the other reports shows, the
+	// failure named, and the page keeps polling; all fail: the banner, still
+	// polling (a failure may pass)
+	varmqs[0].Mu.Lock()
+	varmqs[0].WorkflowStatus = http.StatusServiceUnavailable
+	varmqs[0].Mu.Unlock()
+	running := "/workflows/" + fleettest.RunningID + "?server=multi"
+	if _, body := fetch(t, srv, running, true); !strings.Contains(body, `<p class="err">instance-`) || !strings.Contains(body, "Service Unavailable") ||
+		!strings.Contains(body, `<a class="node `) || !strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("one unit failing:\n%s", visibleText(body))
+	}
+	varmqs[1].Mu.Lock()
+	varmqs[1].WorkflowStatus = http.StatusServiceUnavailable
+	varmqs[1].Mu.Unlock()
+	if status, body := fetch(t, srv, running, true); status != http.StatusOK || !strings.Contains(body, `<p class="banner">Workflow &#34;`+fleettest.RunningID+`&#34;: instance-`) ||
+		strings.Contains(body, `<a class="node `) || !strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("every unit failing = %d:\n%s", status, visibleText(body))
+	}
+	for _, v := range varmqs[:2] {
+		v.Mu.Lock()
+		v.WorkflowStatus = 0
+		v.Mu.Unlock()
 	}
 
 	// the in-memory one: on its unit only
@@ -559,8 +583,8 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 		v.Workflows = []*fleettest.Workflow{twin(int64(1000 + i))}
 		v.Mu.Unlock()
 	}
-	_, body := fetch(t, srv, "/workflows/twin?server=multi", false)
-	if !strings.Contains(body, "Pick one") || !strings.Contains(body, `href="/workflows/twin?at=1000&amp;server=multi"`) || strings.Contains(body, `<a class="node `) {
+	status, body := fetch(t, srv, "/workflows/twin?server=multi", false)
+	if status != http.StatusOK || !strings.Contains(body, "Pick one") || !strings.Contains(body, `href="/workflows/twin?at=1000&amp;server=multi"`) || strings.Contains(body, `<a class="node `) {
 		t.Errorf("twins without at:\n%s", body)
 	}
 	if _, body := fetch(t, srv, "/workflows/twin?server=multi&at=1001", false); !strings.Contains(body, `<a class="node `) || !strings.Contains(body, "Other workflows share this ID") {
@@ -568,5 +592,15 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 	}
 	if _, body := fetch(t, srv, "/workflows?server=multi", false); !strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) {
 		t.Errorf("list links twins to their own pages:\n%s", body)
+	}
+
+	// the twin a link named is gone, one is left: offered, not "not found"
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workflows = []*fleettest.Workflow{}
+	varmqs[0].Mu.Unlock()
+	status, body = fetch(t, srv, "/workflows/twin?server=multi&at=1000", false)
+	if status != http.StatusOK || strings.Contains(body, "not found") || !strings.Contains(body, "no longer reported") ||
+		!strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) || strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("stale at, one twin left = %d:\n%s", status, visibleText(body))
 	}
 }

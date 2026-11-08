@@ -15,12 +15,17 @@ import (
 // Workflow is one workflow as a Varmq serves it (spec WorkflowRecord).
 // Several Varmqs may share one: a durable store they all bind.
 type Workflow struct {
-	// ActionStatus, when non-zero, makes PATCH .../actions/cancel reply
-	// with it and {"error":"..."}, changing nothing.
-	ActionStatus int
+	mu           sync.Mutex
+	rec          contract.WorkflowRecord
+	actionStatus int
+}
 
-	mu  sync.Mutex
-	rec contract.WorkflowRecord
+// SetActionStatus makes PATCH .../actions/cancel reply with status and
+// {"error":"..."}, changing nothing; 0 undoes it.
+func (w *Workflow) SetActionStatus(status int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.actionStatus = status
 }
 
 // NewWorkflow is a Workflow holding rec.
@@ -85,10 +90,14 @@ func (f *Varmq) byID(id string) []*Workflow {
 // ID; state, offset and limit checked as the spec says.
 func (f *Varmq) workflows(w http.ResponseWriter, r *http.Request) {
 	f.Mu.Lock()
-	all := slices.Clone(f.Workflows)
+	all, status := slices.Clone(f.Workflows), f.WorkflowStatus
 	f.Mu.Unlock()
-	if all == nil {
+	switch {
+	case all == nil:
 		http.NotFound(w, nil)
+		return
+	case status != 0:
+		writeFakeError(w, status, http.StatusText(status))
 		return
 	}
 	q := r.URL.Query()
@@ -116,12 +125,14 @@ func (f *Varmq) workflows(w http.ResponseWriter, r *http.Request) {
 // with no Workflows; JSON when none has the ID) or 409 (several have it).
 func (f *Varmq) one(w http.ResponseWriter, r *http.Request) (*Workflow, bool) {
 	f.Mu.Lock()
-	served := f.Workflows != nil
+	served, status := f.Workflows != nil, f.WorkflowStatus
 	found := f.byID(r.PathValue("id"))
 	f.Mu.Unlock()
 	switch {
 	case !served:
 		http.NotFound(w, nil)
+	case status != 0:
+		writeFakeError(w, status, http.StatusText(status))
 	case len(found) == 0:
 		writeFakeError(w, http.StatusNotFound, "workflow not found")
 	case len(found) > 1:
@@ -155,8 +166,11 @@ func (f *Varmq) workflowAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if wf.ActionStatus != 0 {
-		writeFakeError(w, wf.ActionStatus, http.StatusText(wf.ActionStatus))
+	wf.mu.Lock()
+	status := wf.actionStatus
+	wf.mu.Unlock()
+	if status != 0 {
+		writeFakeError(w, status, http.StatusText(status))
 		return
 	}
 	writeFakeJSON(w, http.StatusOK, wf.cancel(has, time.Now().UnixMilli()))

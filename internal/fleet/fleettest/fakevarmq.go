@@ -47,7 +47,10 @@ type Varmq struct {
 	// Varmq is held by two of its storages (409 by ID). Nil: those routes
 	// answer the router's plain-text 404, as varmq before API 1.3.0.
 	Workflows []*Workflow
-	received  []string // "METHOD escaped-path" of every request received
+	// WorkflowStatus, when non-zero, makes every workflow route reply with
+	// it and {"error":"..."}: storage that cannot be read.
+	WorkflowStatus int
+	received       []string // "METHOD escaped-path" of every request received
 
 	listInFlight, maxListInFlight int // concurrent GET /workers requests
 }
