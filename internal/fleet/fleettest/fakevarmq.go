@@ -253,6 +253,8 @@ type Queue struct {
 	// ActionErr, when set, makes a queue action store the flag, then answer
 	// 200 {"id":...,"error":ActionErr}: varmq when re-reading the queue fails.
 	ActionErr string
+	// ActionDrop closes the connection on a queue action: a transport error.
+	ActionDrop bool
 
 	mu sync.Mutex // guards Summary across the Varmqs sharing it
 }
@@ -307,6 +309,11 @@ func (f *Varmq) queueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	case q.ActionStatus != 0:
 		writeFakeError(w, q.ActionStatus, http.StatusText(q.ActionStatus))
+		return
+	case q.ActionDrop:
+		if c, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = c.Close()
+		}
 		return
 	}
 	action := r.PathValue("action")
