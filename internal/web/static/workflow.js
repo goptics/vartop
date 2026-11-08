@@ -43,12 +43,8 @@
     apply(p);
   }
 
-  // zoomBy scales the view by f around (cx, cy), a point of the port.
-  function zoomBy(p, f, cx, cy) {
-    if (cx === undefined) {
-      cx = p.port.clientWidth / 2;
-      cy = p.port.clientHeight / 2;
-    }
+  // zoomBy scales the view by f around (cx, cy), a point of the port (its centre by default).
+  function zoomBy(p, f, cx = p.port.clientWidth / 2, cy = p.port.clientHeight / 2) {
     const k = clamp(view.k * f);
     view.x = cx - ((cx - view.x) * k) / view.k;
     view.y = cy - ((cy - view.y) * k) / view.k;
@@ -363,6 +359,5 @@
     if (f) trace(f.dataset.i);
   });
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-  else init();
+  init(); // deferred: the DOM is parsed
 })();
