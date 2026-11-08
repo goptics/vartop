@@ -288,7 +288,7 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 
 ### Job page
 - **Header:** mono queue ID (20px/600), "Reported by" chips.
-- **Queue controls** (`#qstate`, under the header): paused status dot ("paused since"), default buttons "Pause queue" / "Resume queue"; hidden, with a `subtle` line, when no instance reports `paused` (varmq < API 1.2.0). Confirm panel lists instance x sent, then results; `#qstate` refreshed out of band.
+- **Queue controls** (`#qstate`, under the header): paused status dot ("paused since"), default buttons "Pause queue" / "Resume queue" (Resume alone when every instance says paused, Pause alone when none does, both when mixed or unknown); hidden, with a `subtle` line, when no instance reports `paused` (varmq < API 1.2.0). Confirm panel lists instance x sent, then results; `#qstate` refreshed out of band.
 - **State tabs:** one sticky strip, five equal columns split by hairlines (scrolls sideways under 640px); label (capitalized, state dot: processing warn, completed ok, failed bad, cancelled hollow `bad` ring, pending `subtle`) over 20px count, `—` in `subtle` when varmq does not count the state (cancelled); current `raised` + 2px teal underline.
 - **Job list:** one panel; list head (state word, "N–M of T"); rows are `<details>`: dot, mono ID 14px/600 (italic `subtle` "(no ID yet)"), time right, 14px chevron rotating 90deg (.15s, off under reduced motion); second line mono preview (bad-tinted when last error), attempts right. Hover/open accent 7%.
 - **Timeline:** 20px circular SVG step icons tinted 18% (enqueued teal, started warn, finished ok, failed bad; cancelled: dash on a hollow `bad` ring, labelled "Cancelled"), 1px connector; unreached step hollow dashed at 60%.

@@ -155,9 +155,12 @@ func TestQueueAct(t *testing.T) {
 		t.Errorf("units = %+v", u)
 	}
 
+	if all, none := g.PauseState(); all || none {
+		t.Errorf("older unit says nothing: PauseState = %v, %v, want neither", all, none)
+	}
 	res, now := QueueAct(context.Background(), g, nil, instanceNoun, "pause")
-	if now == nil || !now.IsPaused() || now.PausedAt == 0 || now.ID != id {
-		t.Errorf("answered entry = %+v, want paused", now)
+	if !now.IsPaused() || now.PausedAt == 0 || now.ID != id || g.IsPaused() {
+		t.Errorf("answered group paused %v at %d (before: %v), want paused, g untouched", now.IsPaused(), now.PausedAt, g.IsPaused())
 	}
 	want := []ActionResult{
 		{Pod: "old", Key: o.URL, Tip: o.URL, Outcome: "no change", Msg: "not supported by this instance"},
@@ -212,8 +215,8 @@ func TestQueueActUnsupported(t *testing.T) {
 		}
 		f.Mu.Unlock()
 		res, now := QueueAct(context.Background(), g, nil, instanceNoun, "pause")
-		if now != nil {
-			t.Errorf("%d: answered entry %+v from a failure", c.status, now)
+		if all, none := now.PauseState(); now.IsPaused() || all || !none {
+			t.Errorf("%d: a failure changed the group: paused %v, state %v %v", c.status, now.IsPaused(), all, none)
 		}
 		if len(res) != 1 || res[0].Outcome != c.outcome || res[0].Msg != c.msg {
 			t.Errorf("%d drop %v: %+v, want %s (%s)", c.status, c.drop, res, c.outcome, c.msg)
