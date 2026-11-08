@@ -894,7 +894,7 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workflow.js not embedded: %v", err)
 	}
-	for _, want := range []string{".dag-port", "htmx:afterSwap", "task-detail-", "ctrlKey", "Escape", "data-zoom"} {
+	for _, want := range []string{".dag-port", "htmx:afterSwap", "task-detail-", "ctrlKey", "Escape", "data-zoom", "dataset.taken", "CSS.escape(", ".wf-panel .body a[href="} {
 		if !strings.Contains(string(wf), want) {
 			t.Errorf("workflow.js lacks %q", want)
 		}

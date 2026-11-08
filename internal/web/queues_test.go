@@ -535,6 +535,11 @@ func TestWorkflowPage(t *testing.T) {
 		strings.Contains(body, `<a class="node `) || !strings.Contains(body, `hx-trigger="every`) {
 		t.Errorf("every unit failing = %d:\n%s", status, visibleText(body))
 	}
+	// a full load with no graph yet still brings the script, for the graph
+	// a later poll swaps in
+	if _, body := fetch(t, srv, running, false); !strings.Contains(body, `<script src="/static/workflow.js" defer></script>`) || !strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("full load while every unit fails: no workflow.js or no poll:\n%s", body)
+	}
 	for _, v := range varmqs[:2] {
 		v.Mu.Lock()
 		v.WorkflowStatus = 0
@@ -593,6 +598,20 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 	if _, body := fetch(t, srv, "/workflows?server=multi", false); !strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) {
 		t.Errorf("list links twins to their own pages:\n%s", body)
 	}
+
+	// the unit holding the twin a link names fails for now: said so, the
+	// page polls on, not "no longer reported"
+	varmqs[0].Mu.Lock()
+	varmqs[0].WorkflowStatus = http.StatusServiceUnavailable
+	varmqs[0].Mu.Unlock()
+	status, body = fetch(t, srv, "/workflows/twin?server=multi&at=1000", false)
+	if status != http.StatusOK || strings.Contains(body, "no longer reported") || !strings.Contains(body, "Service Unavailable") ||
+		!strings.Contains(body, `<p class="banner">Workflow &#34;twin&#34;: instance-`) || !strings.Contains(body, `hx-trigger="every`) {
+		t.Errorf("stale at, its unit failing = %d:\n%s", status, visibleText(body))
+	}
+	varmqs[0].Mu.Lock()
+	varmqs[0].WorkflowStatus = 0
+	varmqs[0].Mu.Unlock()
 
 	// the twin a link named is gone, one is left: offered, not "not found"
 	varmqs[0].Mu.Lock()

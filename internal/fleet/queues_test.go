@@ -429,6 +429,16 @@ func TestFetchWorkflowsPages(t *testing.T) {
 	if u := units[0]; u.Err != nil || len(u.Workflows) != api.MaxWorkflowOffset+26 {
 		t.Errorf("at the offset cap: %d workflows, err %v; want %d", len(u.Workflows), u.Err, api.MaxWorkflowOffset+26)
 	}
+	// more asked than the cap allows: a page from 10000, then stop; a
+	// request past offset 10000 would be refused (400) and fail the unit
+	for i := api.MaxWorkflowOffset + 40; i < api.MaxWorkflowOffset+api.MaxWorkflowLimit+40; i++ {
+		wfs = append(wfs, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fmt.Sprintf("w%05d", i), CreatedAt: int64(i + 1)}))
+	}
+	_, s = workflowFake(t, "c", wfs...)
+	units = FetchWorkflows(context.Background(), []*api.Client{api.NewClient(s.URL, "")}, byInstance, "", api.MaxWorkflowOffset+api.MaxWorkflowLimit+26)
+	if u := units[0]; u.Err != nil || len(u.Workflows) != api.MaxWorkflowOffset+api.MaxWorkflowLimit {
+		t.Errorf("past the offset cap: %d workflows, err %v; want %d", len(u.Workflows), u.Err, api.MaxWorkflowOffset+api.MaxWorkflowLimit)
+	}
 }
 
 // FetchWorkflow groups the copies by created_at and names the units that
