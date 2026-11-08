@@ -352,9 +352,11 @@ func (h *handler) workflow(w http.ResponseWriter, r *http.Request) {
 					stop()
 				}
 				p.Workflow = v
-			case len(read.Groups) > 1 || at != 0 && len(read.Groups) > 0:
+			case len(read.Groups) > 1 || at != 0 && len(read.Groups) > 0 && len(read.Failed) == 0 && len(read.Ambiguous) == 0:
 				// several of the ID, or the one the URL names is gone
-				// and others are left: pick one
+				// and others are left: pick one. Not while a unit failed
+				// or answered 409: it may hold that one (the banner says
+				// so, and the page polls on)
 				stop()
 				p.Workflow = &WorkflowView{ID: id, Pick: true, Gone: at != 0, Ambiguous: read.Ambiguous, Failed: read.Failed}
 				for _, o := range read.Groups {
