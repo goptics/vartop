@@ -50,7 +50,7 @@
     <div><dt>Created</dt><dd>{{if .Created}}<time datetime="{{.CreatedISO}}">{{.Created}}</time>{{else}}—{{end}}</dd></div>
     <div><dt>{{if .Running}}Running for{{else}}Took{{end}}</dt><dd>{{.Duration}}</dd></div>
     <div><dt>Tasks ended</dt><dd>{{template "progress" .Progress}}</dd></div>
-    <div><dt>On cancel</dt><dd>{{if .Undo}}undo jobs run{{else}}no undo jobs{{end}}</dd></div>
+    <div><dt>On cancel</dt><dd>{{if .Ctl.Undo}}undo jobs run{{else}}no undo jobs{{end}}</dd></div>
   </dl>
   {{template "wfctl" .Ctl}}
 </header>

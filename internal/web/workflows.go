@@ -256,7 +256,6 @@ func (h *handler) workflows(w http.ResponseWriter, r *http.Request) {
 type WorkflowView struct {
 	ID         string
 	State      StateView
-	Final      bool
 	Progress   Progress
 	On         []string
 	Created    string
@@ -265,7 +264,6 @@ type WorkflowView struct {
 	FinishISO  string
 	Duration   string
 	Running    bool
-	Undo       bool // undo_on_cancel
 	Tasks      []TaskView
 	Graph      GraphView
 	Ctl        WorkflowCtl
@@ -346,7 +344,7 @@ func (h *handler) workflow(w http.ResponseWriter, r *http.Request) {
 						v.Others = append(v.Others, choiceOf(o, p.Server))
 					}
 				}
-				if v.Final {
+				if v.Ctl.Final {
 					stop()
 				}
 				p.Workflow = v
@@ -390,8 +388,7 @@ func choiceOf(g fleet.WorkflowGroup, server string) WorkflowChoice {
 // workflowView is g's page model on server at now.
 func workflowView(g fleet.WorkflowGroup, server string, now time.Time) *WorkflowView {
 	w := g.WorkflowRecord
-	v := &WorkflowView{ID: w.ID, State: stateView(string(w.State)), Final: g.Final(),
-		Progress: progressOf(w), On: g.On, Undo: w.UndoOnCancel, Ctl: workflowCtl(server, w)}
+	v := &WorkflowView{ID: w.ID, State: stateView(string(w.State)), Progress: progressOf(w), On: g.On, Ctl: workflowCtl(server, w)}
 	v.Created, v.CreatedISO = msTime(w.CreatedAt)
 	v.Finished, v.FinishISO = msTime(w.FinishedAt)
 	v.Duration, v.Running = runSpan(w, now)
@@ -403,7 +400,7 @@ func workflowView(g fleet.WorkflowGroup, server string, now time.Time) *Workflow
 	}
 	deps := make([][]int, len(w.Tasks))
 	for i, t := range w.Tasks {
-		v.Tasks = append(v.Tasks, taskView(i, t, server, !v.Final))
+		v.Tasks = append(v.Tasks, taskView(i, t, server, !v.Ctl.Final))
 		for _, d := range t.Deps {
 			if j, ok := index[d]; ok {
 				deps[i] = append(deps[i], j)
