@@ -26,6 +26,16 @@ func tenantQueue() *fleettest.Queue {
 	}
 }
 
+// tenantPath is the page of tenantID, its ID escaped.
+const tenantPath = "/queues/redisq:fifo:%7Btenant%2Forders%7D"
+
+// setQueues makes f serve q as tenantID.
+func setQueues(f *fleettest.Varmq, q *fleettest.Queue) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	f.Queues = map[string]*fleettest.Queue{tenantID: q}
+}
+
 // queueFakes returns the two varmqs that share the queue, and all fakes.
 func queueFakes(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server) {
 	t.Helper()
