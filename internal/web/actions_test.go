@@ -1563,4 +1563,28 @@ func TestWorkflowCancel(t *testing.T) {
 	if _, body := post(t, srv, "/workflows/s/actions/cancel", multi("at", "7", "confirm", "1"), true); !strings.Contains(body, "now compensating") || !strings.Contains(body, "Cancel workflow") {
 		t.Errorf("saga cancel (still compensating: buttons stay):\n%s", body)
 	}
+
+	// an ID with '/', '?' and '#': one path segment, end to end
+	odd := fleettest.NewWorkflow(contract.WorkflowRecord{ID: "a/b?c#d", State: contract.WorkflowRunning, CreatedAt: 8, Tasks: []contract.TaskRecord{{Name: "a", State: contract.JobWaiting}}})
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workflows = append(varmqs[0].Workflows, odd)
+	varmqs[0].Mu.Unlock()
+	if resp, body := post(t, srv, "/workflows/a%2Fb%3Fc%23d/actions/cancel", multi("at", "8", "confirm", "1"), true); resp.StatusCode != http.StatusOK || !strings.Contains(body, "now cancelled") {
+		t.Errorf("cancel of %q = %d:\n%s", odd.Record().ID, resp.StatusCode, body)
+	}
+
+	// every unit holds the ID in two storages (409): refused, nothing sent
+	sent = len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1]))
+	for _, v := range varmqs[:2] {
+		v.Mu.Lock()
+		v.Workflows = append(v.Workflows, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fleettest.RunningID, CreatedAt: 9}))
+		v.Mu.Unlock()
+	}
+	resp, body = post(t, srv, path, multi("at", at, "confirm", "1"), true)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "held by more than one storage") || !strings.Contains(body, "cannot cancel") {
+		t.Errorf("cancel of an ID two storages hold = %d %q", resp.StatusCode, body)
+	}
+	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])) - sent; n != 0 {
+		t.Errorf("%d PATCHes for an ambiguous ID, want none", n)
+	}
 }
