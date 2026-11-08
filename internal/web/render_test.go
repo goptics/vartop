@@ -1359,6 +1359,10 @@ func TestWorkflowRenders(t *testing.T) {
 		`<div id="results" aria-live="polite" hx-preserve="true"></div>`,
 		`<script src="/static/workflow.js" defer></script>`,
 		`aria-current="page"><svg class="ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="3.5"`, // the Workflows nav entry
+		// the hooks workflow.js queries
+		`class="dagbox"`, `<div class="dag-tools" hidden>`, `data-zoom="fit"`, `<div class="dag-port" tabindex="0"`,
+		`<svg class="dag"`, `data-w="`, `data-h="`, `<g class="view">`, `data-from="`, `data-to="`,
+		`<aside class="wf-panel" hidden`, `<button type="button" class="close"`, `<div class="body"></div>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("running workflow page lacks %q", want)
@@ -1382,6 +1386,21 @@ func TestWorkflowRenders(t *testing.T) {
 	// no undo on cancel: one button
 	if body := run(t, "workflow", "wfctl", WorkflowCtl{Server: "dev", ID: "w", At: 1}); !strings.Contains(body, "Cancel workflow") || strings.Contains(body, "without undo") {
 		t.Errorf("wfctl without undo_on_cancel:\n%s", body)
+	}
+
+	// over the edge cap: no graph, a note, every task in the table
+	var tasks []contract.TaskRecord
+	for i, deps := range fanIn(100) {
+		tr := contract.TaskRecord{Name: "t" + strconv.Itoa(i), State: contract.JobWaiting}
+		for _, d := range deps {
+			tr.Deps = append(tr.Deps, "t"+strconv.Itoa(d))
+		}
+		tasks = append(tasks, tr)
+	}
+	big := workflowView(fleet.WorkflowGroup{WorkflowRecord: contract.WorkflowRecord{ID: "big", State: contract.WorkflowRunning, CreatedAt: 1, Tasks: tasks}}, "dev", time.Now())
+	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: big})
+	if !strings.Contains(body, "200 tasks: too many edges to draw a graph") || !strings.Contains(body, `<tr id="task-199">`) || strings.Contains(body, `<svg class="dag"`) {
+		t.Errorf("over-cap workflow: no note, a graph, or tasks missing")
 	}
 }
 
