@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goptics/varmq/contract"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 	"github.com/goptics/vartop/internal/store"
@@ -526,10 +527,12 @@ func TestKPIShowsDashWhenLastPointIsGap(t *testing.T) {
 }
 
 func TestEveryFormCarriesServer(t *testing.T) {
+	wf := workflowView(fleet.WorkflowGroup{WorkflowRecord: fleettest.SampleWorkflows(time.Now().UnixMilli())[1].Record()}, "dev", time.Now())
 	for set, page := range map[string]Page{
 		"dashboard": dashboardPage(),
 		"detail":    detailPage(),
 		"grid":      gridPage(),
+		"workflow":  {Server: "dev", OwnPoll: true, Workflow: wf},
 	} {
 		body := run(t, set, "layout", page)
 		forms := strings.Split(body, "<form")[1:]
@@ -543,6 +546,11 @@ func TestEveryFormCarriesServer(t *testing.T) {
 				t.Errorf("%s: form %d lacks the server:\n%s", set, i, f)
 			}
 		}
+	}
+	// the cancel confirmation's form too
+	body := run(t, "confirm", "workflow_confirm", WorkflowConfirmView{Server: "dev", ID: "w", At: 1, Noun: instanceNoun})
+	if !strings.Contains(body, `<input type="hidden" name="server" value="dev">`) {
+		t.Errorf("workflow_confirm lacks the server:\n%s", body)
 	}
 }
 
@@ -1206,6 +1214,53 @@ func TestLayoutDAGGuards(t *testing.T) {
 	if _, ok := layoutDAG(200, fan); ok {
 		t.Error("~10000 dummies laid out")
 	}
+	// a dense fan-in: no dummy, but r*r edges, each a path on the page
+	if _, ok := layoutDAG(2*40, fanIn(40)); !ok {
+		t.Error("40x40 fan-in (1600 edges) not laid out")
+	}
+	if _, ok := layoutDAG(2*100, fanIn(100)); ok {
+		t.Error("100x100 fan-in (10000 edges) laid out")
+	}
+}
+
+// fanIn is r roots, then r tasks each on every root.
+func fanIn(r int) [][]int {
+	deps := make([][]int, 2*r)
+	for i := r; i < 2*r; i++ {
+		for p := range r {
+			deps[i] = append(deps[i], p)
+		}
+	}
+	return deps
+}
+
+// Graphs near the cap: a chain, one wide layer, a dense fan-in, long
+// edges. Layout must stay cheap enough to run on every poll.
+func BenchmarkLayoutDAG(b *testing.B) {
+	chain := make([][]int, dagMaxSlots/2)
+	for i := 1; i < len(chain); i++ {
+		chain[i] = []int{i - 1}
+	}
+	wide := make([][]int, dagMaxSlots/2)
+	for i := 1; i < len(wide); i++ {
+		wide[i] = []int{0}
+	}
+	long := make([][]int, 100) // a chain of 50, the next 50 each on its head and tail
+	for i := 1; i < 50; i++ {
+		long[i] = []int{i - 1}
+	}
+	for i := 50; i < 100; i++ {
+		long[i] = []int{0, 49}
+	}
+	for name, deps := range map[string][][]int{"chain": chain, "wide": wide, "fan-in": fanIn(48), "long-edges": long} {
+		b.Run(name, func(b *testing.B) {
+			for b.Loop() {
+				if _, ok := layoutDAG(len(deps), deps); !ok {
+					b.Fatal("over the cap")
+				}
+			}
+		})
+	}
 }
 
 // The workflow page model: a node per task, an edge per dep, dashed into an
@@ -1327,5 +1382,45 @@ func TestWorkflowRenders(t *testing.T) {
 	// no undo on cancel: one button
 	if body := run(t, "workflow", "wfctl", WorkflowCtl{Server: "dev", ID: "w", At: 1}); !strings.Contains(body, "Cancel workflow") || strings.Contains(body, "without undo") {
 		t.Errorf("wfctl without undo_on_cancel:\n%s", body)
+	}
+}
+
+// A producer names tasks, queues, reasons and the workflow: every one is
+// text on the page, never markup (the panel copies #task-detail-N with
+// innerHTML, so the server's escaping is all there is).
+func TestWorkflowRendersHostileFields(t *testing.T) {
+	const evil = `<script>alert(1)</script><img src=x onerror=y>`
+	task := func(name string, deps ...string) contract.TaskRecord {
+		return contract.TaskRecord{Name: name, State: contract.JobState(evil), QueueID: evil, JobID: evil, Reason: evil, Deps: deps}
+	}
+	a, b := task(evil+"a"), task(evil+"b", evil+"a")
+	b.Undo = &contract.TaskRecord{Name: evil, State: contract.JobFailed, QueueID: evil, JobID: evil, Reason: evil}
+	rec := contract.WorkflowRecord{ID: evil, State: contract.WorkflowState(evil), CreatedAt: 1, Tasks: []contract.TaskRecord{a, b}}
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{evil}}, "dev", time.Now())
+	v.Others, v.Ambiguous, v.Failed = []WorkflowChoice{{URL: "/x", Created: evil, State: evil, On: []string{evil}}}, []string{evil}, []string{evil}
+	for name, body := range map[string]string{
+		"page":    run(t, "workflow", "layout", Page{Title: evil, Server: "dev", OwnPoll: true, Banner: evil, Workflow: v}),
+		"confirm": run(t, "confirm", "workflow_confirm", WorkflowConfirmView{Server: "dev", ID: evil, On: []string{evil}, Noun: instanceNoun}),
+		"list": run(t, "workflows", "layout", Page{Server: "dev", WorkflowList: &WorkflowsView{Read: true, Rows: []WorkflowRow{
+			{ID: evil, URL: workflowURL(evil, "dev", 0), State: stateView(evil), Created: evil, Duration: evil, On: []string{evil}}}}}),
+	} {
+		if !strings.Contains(body, "&lt;script&gt;") || strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") {
+			t.Errorf("%s: a field rendered as markup", name)
+		}
+		if n, want := strings.Count(body, "<script"), map[string]int{"page": 2, "confirm": 0, "list": 1}[name]; n != want {
+			t.Errorf("%s: %d <script, want %d (htmx, workflow.js)", name, n, want)
+		}
+	}
+}
+
+// Two tasks of one name: a dep on it is the first one's edge, as in the
+// table, not the last's.
+func TestWorkflowViewDuplicateName(t *testing.T) {
+	rec := contract.WorkflowRecord{ID: "w", State: contract.WorkflowRunning, Tasks: []contract.TaskRecord{
+		{Name: "a", State: contract.JobCompleted}, {Name: "a", State: contract.JobCompleted}, {Name: "b", State: contract.JobWaiting, Deps: []string{"a"}},
+	}}
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", time.Now())
+	if len(v.Graph.Edges) != 1 || v.Graph.Edges[0].From != 0 || v.Graph.Edges[0].To != 2 {
+		t.Errorf("edges = %+v, want 0 -> 2", v.Graph.Edges)
 	}
 }

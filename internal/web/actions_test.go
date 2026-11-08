@@ -332,6 +332,7 @@ func TestPOSTWithoutHXRequest(t *testing.T) {
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
 		{tenantPath + "/actions/pause", multi("confirm", "1")},
+		{"/workflows/w/actions/cancel", multi("at", "1", "confirm", "1")},
 	} {
 		if resp, _ := post(t, srv, c.path, c.form, false); resp.StatusCode != http.StatusForbidden {
 			t.Errorf("POST %s without HX-Request = %d, want 403", c.path, resp.StatusCode)
@@ -358,6 +359,7 @@ func TestCrossOriginPOST(t *testing.T) {
 			{"/workers/orders/concurrency", multi("n", "9")},
 			{"/bulk/pause", multi("names", "orders", "confirm", "1")},
 			{tenantPath + "/actions/pause", multi("confirm", "1")},
+			{"/workflows/w/actions/cancel", multi("at", "1", "confirm", "1")},
 		} {
 			req := postRequest(t, srv, c.path, c.form)
 			for k, v := range headers {
@@ -385,6 +387,7 @@ func TestGETOnMutatingRoute(t *testing.T) {
 		"/workers/orders/concurrency?server=multi&n=3",
 		"/bulk/pause?server=multi&names=orders&confirm=1",
 		tenantPath + "/actions/pause?server=multi&confirm=1",
+		"/workflows/w/actions/cancel?server=multi&at=1&confirm=1",
 	} {
 		for _, hx := range []bool{false, true} {
 			if status, _ := fetch(t, srv, path, hx); status != http.StatusMethodNotAllowed {
@@ -1474,6 +1477,10 @@ func TestWorkflowCancel(t *testing.T) {
 	path := "/workflows/" + fleettest.RunningID + "/actions/cancel"
 
 	resp, body := post(t, srv, path, multi("at", at), true)
+	if !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) || !strings.Contains(body, `<form hx-post="`+path+`" hx-target="#results"`) ||
+		!strings.Contains(body, `<input type="hidden" name="server" value="multi">`) {
+		t.Errorf("confirm panel does not post the cancel back:\n%s", body)
+	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Confirm cancel of workflow") || strings.Contains(body, "without undo") ||
 		!strings.Contains(body, `<input type="hidden" name="at" value="`+at+`">`) || !strings.Contains(body, "No completed task has an undo job yet") {
 		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
@@ -1486,11 +1493,26 @@ func TestWorkflowCancel(t *testing.T) {
 		t.Fatalf("%d PATCHes before confirm", n)
 	}
 
+	// every unit refuses (storage down): failed per unit, the buttons stay
+	running.SetActionStatus(http.StatusServiceUnavailable)
+	resp, body = post(t, srv, path, multi("at", at, "confirm", "1"), true)
+	if resp.StatusCode != http.StatusOK || strings.Count(body, `<li class="failed">`) != 2 || strings.Count(body, "(Service Unavailable)") != 2 || strings.Contains(body, "now cancelled") {
+		t.Errorf("refused cancel = %d:\n%s", resp.StatusCode, body)
+	}
+	if _, oob, ok := strings.Cut(body, `<div id="wfctl" class="qctl" hx-swap-oob="outerHTML">`); !ok || !strings.Contains(oob, "Cancel workflow") {
+		t.Errorf("refused cancel: #wfctl lost its buttons:\n%s", body)
+	}
+	if r := running.Record(); r.State != contract.WorkflowRunning {
+		t.Errorf("refused cancel changed the workflow: %s", r.State)
+	}
+	running.SetActionStatus(0)
+	sent := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1]))
+
 	resp, body = post(t, srv, path, multi("at", at, "undo", "false", "confirm", "1"), true)
 	if resp.StatusCode != http.StatusOK || strings.Count(body, `<li class="ok">`) != 1 || !strings.Contains(body, "now cancelled") {
 		t.Errorf("cancel = %d:\n%s", resp.StatusCode, body)
 	}
-	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])); n != 1 {
+	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])) - sent; n != 1 {
 		t.Errorf("%d PATCHes, want one: the cancel is stored with the workflow", n)
 	}
 	if r := running.Record(); r.State != contract.WorkflowCancelled || r.UndoOnCancel {
@@ -1525,7 +1547,7 @@ func TestWorkflowCancel(t *testing.T) {
 			t.Errorf("POST %s %v = %d %q, want %d with %q", c.path, c.form, resp.StatusCode, body, c.status, c.msg)
 		}
 	}
-	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])); n != 1 {
+	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])) - sent; n != 1 {
 		t.Errorf("%d PATCHes after the refusals, want still one", n)
 	}
 

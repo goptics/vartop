@@ -376,6 +376,24 @@ func TestMergeWorkflowsKeepsMostAdvanced(t *testing.T) {
 			t.Errorf("merged = %+v", v.Groups)
 		}
 	}
+
+	// the same tasks ended either way (undo jobs are nested, not counted):
+	// the copy that ended wins on that alone
+	tasks := []contract.TaskRecord{{Name: "t", State: contract.JobFailed, Undo: &contract.TaskRecord{Name: "t", State: contract.JobCompleted}}}
+	comp := contract.WorkflowRecord{ID: "s", State: contract.WorkflowCompensating, CreatedAt: 5, Tasks: tasks}
+	done = comp
+	done.State, done.FinishedAt = contract.WorkflowCompensated, 9
+	_, c := workflowFake(t, "c", fleettest.NewWorkflow(comp))
+	_, d := workflowFake(t, "d", fleettest.NewWorkflow(done))
+	for _, order := range [][]*api.Client{
+		{api.NewClient(c.URL, ""), api.NewClient(d.URL, "")},
+		{api.NewClient(d.URL, ""), api.NewClient(c.URL, "")},
+	} {
+		v := MergeWorkflows(FetchWorkflows(context.Background(), order, byInstance, "", 10), 0, 10)
+		if len(v.Groups) != 1 || v.Groups[0].State != contract.WorkflowCompensated || !v.Groups[0].Final() {
+			t.Errorf("compensating vs compensated = %+v", v.Groups)
+		}
+	}
 }
 
 // A unit's first offset+limit+1 workflows past the route's page cap are
@@ -398,6 +416,18 @@ func TestFetchWorkflowsPages(t *testing.T) {
 	}
 	if lists != 2 {
 		t.Errorf("%d list requests, want 2 pages", lists)
+	}
+
+	// up to the route's largest offset, and a page past it: the merged page
+	// at offset 10000 needs each unit's records past 10000
+	wfs = wfs[:0]
+	for i := range api.MaxWorkflowOffset + 40 {
+		wfs = append(wfs, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fmt.Sprintf("w%05d", i), CreatedAt: int64(i + 1)}))
+	}
+	_, s = workflowFake(t, "b", wfs...)
+	units = FetchWorkflows(context.Background(), []*api.Client{api.NewClient(s.URL, "")}, byInstance, "", api.MaxWorkflowOffset+26)
+	if u := units[0]; u.Err != nil || len(u.Workflows) != api.MaxWorkflowOffset+26 {
+		t.Errorf("at the offset cap: %d workflows, err %v; want %d", len(u.Workflows), u.Err, api.MaxWorkflowOffset+26)
 	}
 }
 
@@ -434,14 +464,25 @@ func TestCancelWorkflow(t *testing.T) {
 	wfs := fleettest.SampleWorkflows(1762228800000)
 	running := wfs[1]
 	_, empty := workflowFake(t, "gone")
+	down, dn := workflowFake(t, "down", running)
+	down.Mu.Lock()
+	down.WorkflowStatus = http.StatusServiceUnavailable
+	down.Mu.Unlock()
 	fb, b := workflowFake(t, "b", running)
 	dead := httptest.NewServer(http.NotFoundHandler())
 	dead.Close()
 	g := WorkflowGroup{WorkflowRecord: running.Record(),
-		Clients: []*api.Client{api.NewClient(dead.URL, ""), api.NewClient(empty.URL, ""), api.NewClient(b.URL, "")},
-		labels:  []string{"dead", "gone", "b"}}
+		Clients: []*api.Client{api.NewClient(dead.URL, ""), api.NewClient(dn.URL, ""), api.NewClient(empty.URL, ""), api.NewClient(b.URL, "")},
+		labels:  []string{"dead", "down", "gone", "b"}}
 
 	res, after := CancelWorkflow(context.Background(), g, nil, instanceNoun, true)
+	if len(res) != 4 {
+		t.Fatalf("results = %+v, want one per unit asked", res)
+	}
+	if res[1].Outcome != "failed" || res[1].Msg != "Service Unavailable" {
+		t.Errorf("503 unit = %+v, want failed with the API message", res[1])
+	}
+	res = append(res[:1], res[2:]...) // the rest as before
 	if after == nil || after.State != contract.WorkflowCancelled || after.UndoOnCancel || running.Record().State != contract.WorkflowCancelled {
 		t.Fatalf("after = %+v", after)
 	}
