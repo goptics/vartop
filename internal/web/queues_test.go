@@ -248,6 +248,20 @@ func TestQueuePauseResume(t *testing.T) {
 		t.Errorf("mixed: want both buttons:\n%s", body)
 	}
 
+	// An older instance (no paused) beside 1.2.0 ones: shown not supported, sent nothing.
+	setQueues(varmqs[1], shared)
+	setQueues(varmqs[2], tenantQueue())
+	_, body = post(t, srv, esc+"/actions/pause", multi(), true)
+	if strings.Count(body, "<td>pause</td>") != 2 || !strings.Contains(body, `<td><span class="na">not supported by this instance</span></td>`) {
+		t.Errorf("mixed confirm panel:\n%s", body)
+	}
+	_, body = post(t, srv, esc+"/actions/pause", multi("confirm", "1"), true)
+	if strings.Count(body, `<li class="ok">`) != 2 || strings.Count(body, `<li class="nochange">`) != 1 ||
+		!strings.Contains(body, `<span class="outcome">no change (not supported by this instance)</span>`) {
+		t.Errorf("mixed pause results:\n%s", body)
+	}
+	noPatches(t, varmqs[2])
+
 	for _, c := range []struct {
 		path   string
 		status int
