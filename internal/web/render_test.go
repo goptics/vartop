@@ -1268,8 +1268,8 @@ func BenchmarkLayoutDAG(b *testing.B) {
 func TestWorkflowView(t *testing.T) {
 	wfs := fleettest.SampleWorkflows(time.Now().UnixMilli())
 	run := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[1].Record(), On: []string{"a"}}, "dev", time.Now())
-	if run.Final || len(run.Graph.Nodes) != 7 || len(run.Graph.Edges) != 8 || !run.Running || run.Progress.Live != 2 || run.Progress.Ended() != 3 {
-		t.Fatalf("running view: final %v, %d nodes, %d edges, progress %+v", run.Final, len(run.Graph.Nodes), len(run.Graph.Edges), run.Progress)
+	if run.Ctl.Final || len(run.Graph.Nodes) != 7 || len(run.Graph.Edges) != 8 || !run.Running || run.Progress.Live != 2 || run.Progress.Ended() != 3 {
+		t.Fatalf("running view: final %v, %d nodes, %d edges, progress %+v", run.Ctl.Final, len(run.Graph.Nodes), len(run.Graph.Edges), run.Progress)
 	}
 	var always, live int
 	for _, e := range run.Graph.Edges {
@@ -1290,7 +1290,7 @@ func TestWorkflowView(t *testing.T) {
 		t.Errorf("audit-log = %+v", tv)
 	}
 	saga := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[2].Record()}, "dev", time.Now())
-	if !saga.Final || !saga.Ctl.Final || saga.Tasks[0].Undo == nil || saga.Tasks[0].Undo.State.Class != "completed" || saga.Duration != "4.2s" {
+	if !saga.Ctl.Final || saga.Tasks[0].Undo == nil || saga.Tasks[0].Undo.State.Class != "completed" || saga.Duration != "4.2s" {
 		t.Errorf("saga = %+v", saga)
 	}
 	for _, tv := range saga.Tasks {
@@ -1343,7 +1343,7 @@ func TestWorkflowRenders(t *testing.T) {
 	page := func(i int) Page {
 		v := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[i].Record(), On: []string{"a", "b"}}, "dev", time.Now())
 		p := Page{Title: "wf", Server: "dev", SelfURL: "/workflows/x?server=dev", OwnPoll: true, Workflow: v}
-		if !v.Final {
+		if !v.Ctl.Final {
 			p.IntervalSec = 5
 		}
 		return p
@@ -1355,7 +1355,7 @@ func TestWorkflowRenders(t *testing.T) {
 		`<rect class="halo"`, `<path class="flow"`, `<path class="edge always"`, `marker-end="url(#dag-arrow)"`,
 		`<tr id="task-6">`, `<div id="task-detail-6">`, `<span class="chip">always</span>`,
 		`hx-post="/workflows/` + fleettest.RunningID + `/actions/cancel">Cancel workflow</button>`,
-		`name="undo" value="false"`, `<input type="hidden" name="at" value="`,
+		`name="undo" value="false"`, `<input type="hidden" name="at" value="`, `<dt>On cancel</dt><dd>undo jobs run</dd>`,
 		`<div id="results" aria-live="polite" hx-preserve="true"></div>`,
 		`<script src="/static/workflow.js" defer></script>`,
 		`aria-current="page"><svg class="ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="3.5"`, // the Workflows nav entry
