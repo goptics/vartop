@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -127,6 +128,95 @@ func TestUnitLabel(t *testing.T) {
 	} {
 		if got := label(api.NewClient(c.ep, ""), c.instance); got != c.want {
 			t.Errorf("UnitLabel(%s, %q) = %q, want %q", c.ep, c.instance, got, c.want)
+		}
+	}
+}
+
+// pausableQueue is a fresh shared queue that reports paused (API 1.2.0+).
+func pausableQueue(id string) *fleettest.Queue {
+	return &fleettest.Queue{Summary: `{"id":"` + id + `","counts":{"pending":1,"processing":0,"completed":0,"failed":0},"totals":{"submitted":1,"completed":0,"failed":0},"paused":false}`}
+}
+
+// QueueAct sends the action to every unit that reports the queue and serves
+// the route; an older unit (no paused in its entry) is sent nothing. The
+// group's paused comes from a copy that reports it, whichever unit was first.
+func TestQueueAct(t *testing.T) {
+	const id = "redisq:ns:fifo:{orders}"
+	shared := pausableQueue(id)
+	old, o := queueFake(t, "old", map[string]*fleettest.Queue{id: {Summary: `{"id":"` + id + `","counts":{"pending":1,"processing":0,"completed":0,"failed":0},"totals":{"submitted":1,"completed":0,"failed":0}}`}})
+	fa, a := queueFake(t, "a", map[string]*fleettest.Queue{id: shared})
+	_, b := queueFake(t, "b", map[string]*fleettest.Queue{id: shared})
+	clients := []*api.Client{api.NewClient(o.URL, ""), api.NewClient(a.URL, ""), api.NewClient(b.URL, "")}
+	g, _ := GroupQueues(FetchQueues(context.Background(), clients, byInstance)).Group(id)
+	if !g.CanPause() || g.IsPaused() {
+		t.Fatalf("group paused %v, can %v: want a copy that reports it", g.Paused, g.CanPause())
+	}
+	if u := g.Units(); len(u) != 3 || u[0].Pausable || !u[1].Pausable || u[1].Label != "a" || u[1].Endpoint != a.URL {
+		t.Errorf("units = %+v", u)
+	}
+
+	res, now := QueueAct(context.Background(), g, nil, instanceNoun, "pause")
+	if now == nil || !now.IsPaused() || now.PausedAt == 0 || now.ID != id {
+		t.Errorf("answered entry = %+v, want paused", now)
+	}
+	want := []ActionResult{
+		{Pod: "old", Key: o.URL, Tip: o.URL, Outcome: "no change", Msg: "not supported by this instance"},
+		{Pod: "a", Key: a.URL, Tip: a.URL, Outcome: "ok"},
+		{Pod: "b", Key: b.URL, Tip: b.URL, Outcome: "ok"},
+	}
+	if !slices.Equal(res, want) {
+		t.Errorf("results =\n%+v\nwant\n%+v", res, want)
+	}
+	if !shared.Paused() {
+		t.Error("queue not paused")
+	}
+	for _, c := range old.Calls() {
+		if strings.HasPrefix(c, "PATCH") {
+			t.Errorf("older unit sent %s", c)
+		}
+	}
+	if want := "PATCH /queues/redisq:ns:fifo:%7Borders%7D/actions/pause"; !slices.Contains(fa.Calls(), want) {
+		t.Errorf("a calls %v, want %s", fa.Calls(), want)
+	}
+	g, _ = GroupQueues(FetchQueues(context.Background(), clients, byInstance)).Group(id)
+	if !g.IsPaused() || g.PausedAt == 0 {
+		t.Errorf("after pause: paused %v at %d", g.IsPaused(), g.PausedAt)
+	}
+	QueueAct(context.Background(), g, nil, instanceNoun, "resume")
+	if shared.Paused() {
+		t.Error("queue not resumed")
+	}
+}
+
+// An instance that cannot pause is a failure saying so, never a crash; one
+// that lost the queue is no change; a storage error is failed with it.
+func TestQueueActUnsupported(t *testing.T) {
+	const id = "q"
+	for _, c := range []struct {
+		status       int
+		drop         bool
+		outcome, msg string
+	}{
+		{status: http.StatusNotImplemented, outcome: "failed", msg: "not supported by this instance"},
+		{status: http.StatusNotFound, outcome: "failed", msg: "not supported by this instance"}, // router 404: older route set
+		{status: http.StatusServiceUnavailable, outcome: "failed", msg: "Service Unavailable"},
+		{drop: true, outcome: "no change", msg: "queue not on this instance now"},
+	} {
+		q := pausableQueue(id)
+		f, s := queueFake(t, "a", map[string]*fleettest.Queue{id: q})
+		g, _ := GroupQueues(FetchQueues(context.Background(), []*api.Client{api.NewClient(s.URL, "")}, byInstance)).Group(id)
+		f.Mu.Lock()
+		q.ActionStatus = c.status
+		if c.drop {
+			f.Queues = map[string]*fleettest.Queue{}
+		}
+		f.Mu.Unlock()
+		res, now := QueueAct(context.Background(), g, nil, instanceNoun, "pause")
+		if now != nil {
+			t.Errorf("%d: answered entry %+v from a failure", c.status, now)
+		}
+		if len(res) != 1 || res[0].Outcome != c.outcome || res[0].Msg != c.msg {
+			t.Errorf("%d drop %v: %+v, want %s (%s)", c.status, c.drop, res, c.outcome, c.msg)
 		}
 	}
 }

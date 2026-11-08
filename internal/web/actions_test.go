@@ -1212,6 +1212,8 @@ func TestActionRefusedWhenStale(t *testing.T) {
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+		{"/queues/q/actions/pause", multi()},
+		{"/queues/q/actions/resume", multi("confirm", "1")},
 	} {
 		start := time.Now()
 		resp, body := post(t, f.srv, c.path, c.form, true)
