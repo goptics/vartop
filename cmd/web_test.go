@@ -199,6 +199,38 @@ func TestLoadOrOnboardRejectsCorruptConfig(t *testing.T) {
 	}
 }
 
+// TestLoadOrOnboardRejectsKubernetesConfig: a legacy kubernetes config is an
+// error, never a reason to onboard, which would overwrite the file.
+func TestLoadOrOnboardRejectsKubernetesConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	path := filepath.Join(dir, "vartop", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"servers":{"k":{"name":"k","kubernetes":{"context":"prod","namespace":"jobs","service":"varmq"}}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		cfg, err := loadOrOnboard()
+		if cfg != nil {
+			t.Errorf("loadOrOnboard() config = %+v, want nil", cfg)
+		}
+		return err
+	})
+	if !errors.Is(err, config.ErrKubernetesRemoved) {
+		t.Errorf("loadOrOnboard() error = %v, want ErrKubernetesRemoved", err)
+	}
+	if out != "" {
+		t.Errorf("loadOrOnboard() printed %q: onboarding started", out)
+	}
+	if data, _ := os.ReadFile(path); string(data) != body {
+		t.Errorf("config file now holds %q, want it untouched", data)
+	}
+}
+
 // TestWebCmdSilencesUsage: a runtime error (port in use, shutdown) is not a
 // usage mistake, so it must not print the usage text.
 func TestWebCmdSilencesUsage(t *testing.T) {

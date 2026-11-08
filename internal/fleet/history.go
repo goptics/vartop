@@ -51,7 +51,7 @@ func (p PodSnapshot) Tip() string {
 type Snapshot struct {
 	At time.Time
 	// Pods are in the order the pages list them: by label number
-	// (instance-N) off Kubernetes, by Key on it.
+	// (instance-N).
 	Pods []PodSnapshot
 	// Behind maps each balancer endpoint to the distinct instances that
 	// answered through it within the lifecycle window (tracker.window), not

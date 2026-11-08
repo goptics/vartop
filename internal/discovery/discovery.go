@@ -5,5 +5,5 @@ package discovery
 // Source is a live set of ready endpoint URLs, safe for concurrent use.
 type Source interface {
 	Endpoints() []string // sorted snapshot of current ready endpoints
-	Close() error        // no-op nil for static and dns
+	Close() error        // static: no-op; dns: stops the refresh loop
 }

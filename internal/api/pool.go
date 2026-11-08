@@ -17,7 +17,7 @@ type Pool struct {
 }
 
 // PoolFor builds a Pool over the discovery source matching the server
-// configuration: DNS resolution for dns servers, a fixed list otherwise.
+// configuration: DNS resolution for dns servers, a fixed list otherwise. Callers must Close the pool to stop DNS refresh.
 func PoolFor(server *config.Server) (*Pool, error) {
 	if server.DNS != nil {
 		source, err := discovery.NewDNS(*server.DNS)

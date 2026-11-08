@@ -90,7 +90,7 @@ type Page struct {
 func (p Page) Interval() time.Duration { return time.Duration(p.IntervalSec) * time.Second }
 
 // Scope names what an action on this page touches: the selected unit's
-// label, or "all pods" ("all instances" off Kubernetes).
+// label, or "all instances".
 func (p Page) Scope() string {
 	if p.Pod == "" {
 		return "all " + p.Noun.Many

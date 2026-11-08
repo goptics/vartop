@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -20,7 +21,10 @@ var actionOrigin string
 func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("failed to load config (%w). run vartop server add first", err)
+		if errors.Is(err, config.ErrConfigNotFound) {
+			return fmt.Errorf("failed to load config (%w). run vartop server add first", err)
+		}
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	server, err := cfg.GetActiveServer(serverFlag)

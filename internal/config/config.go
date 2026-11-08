@@ -22,7 +22,7 @@ const (
 var (
 	ErrConfigNotFound = errors.New("config file not found")
 	// ErrKubernetesRemoved is why a config with a kubernetes server fails to load.
-	ErrKubernetesRemoved = errors.New("kubernetes discovery was removed; use static or dns")
+	ErrKubernetesRemoved = errors.New("kubernetes discovery was removed; use endpoints or dns")
 )
 
 // DNSRef discovers varmq instances by resolving a hostname to all of its
@@ -191,7 +191,7 @@ func Load() (*Config, error) {
 	if err := json.Unmarshal(data, &legacy); err == nil {
 		for _, name := range slices.Sorted(maps.Keys(legacy.Servers)) {
 			if k := legacy.Servers[name].Kubernetes; len(k) > 0 && string(k) != "null" {
-				return nil, fmt.Errorf("server %q: %w", name, ErrKubernetesRemoved)
+				return nil, fmt.Errorf("%s: server %q: %w", path, name, ErrKubernetesRemoved)
 			}
 		}
 	}
