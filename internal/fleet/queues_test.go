@@ -357,6 +357,16 @@ func TestMergeWorkflows(t *testing.T) {
 	if len(v.Groups) != 1 || v.Groups[0].ID != fleettest.SagaID {
 		t.Errorf("compensated = %+v", v.Groups)
 	}
+	// a unit whose list fails: named, the others' rows still merged
+	down, dn := workflowFake(t, "down", shared...)
+	down.Mu.Lock()
+	down.WorkflowStatus = http.StatusServiceUnavailable
+	down.Mu.Unlock()
+	v = MergeWorkflows(FetchWorkflows(context.Background(), []*api.Client{api.NewClient(dn.URL, ""), api.NewClient(a.URL, "")}, byInstance, "", 50), 0, 50)
+	if len(v.Failed) != 1 || !strings.HasPrefix(v.Failed[0], "down: ") || !strings.Contains(v.Failed[0], "Service Unavailable") ||
+		len(v.Groups) != 4 || !slices.Equal(v.Groups[0].On, []string{"a"}) {
+		t.Errorf("one unit failing: failed %v, groups %+v", v.Failed, v.Groups)
+	}
 }
 
 // Copies of one workflow read at different moments: the one further on
