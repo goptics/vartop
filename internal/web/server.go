@@ -86,9 +86,9 @@ type Source struct {
 }
 
 // handler serves the pages of every configured server from the store.
-// Pages only read it; only the POST routes in actions.go and queues.go
-// (queue pause and resume) call varmq, and the queue pages, which read it
-// live.
+// Pages only read it; only the POST routes in actions.go, queues.go (queue
+// pause and resume) and workflows.go (workflow cancel) call varmq, and the
+// queue and workflow pages, which read it live.
 type handler struct {
 	src   Source
 	tmpl  map[string]*template.Template
@@ -133,11 +133,14 @@ func (h *handler) routes(hosts []string) http.Handler {
 	mux.HandleFunc("GET /workers/{name}", h.detail)
 	mux.HandleFunc("GET /queues", h.queues)
 	mux.HandleFunc("GET /queues/{id}", h.queue)
+	mux.HandleFunc("GET /workflows", h.workflows)
+	mux.HandleFunc("GET /workflows/{id}", h.workflow)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	mux.HandleFunc("POST /workers/{name}/actions/{action}", h.action)
 	mux.HandleFunc("POST /workers/{name}/concurrency", h.concurrency)
 	mux.HandleFunc("POST /bulk/{action}", h.bulk)
 	mux.HandleFunc("POST /queues/{id}/actions/{action}", h.queueAction)
+	mux.HandleFunc("POST /workflows/{id}/actions/{action}", h.workflowAction)
 
 	return denyFraming(allowHosts(hosts, http.NewCrossOriginProtection().Handler(requireHTMX(recoverPanics(h.logf, mux)))))
 }

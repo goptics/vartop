@@ -440,3 +440,135 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .pager .gap { color: var(--subtle); padding: 0 4px; }
 .pager a[rel="next"] { margin-left: auto; }
 .pager .nums ~ a[rel="next"] { margin-left: 0; }
+
+/* workflows: a state is a dot and its words. in flight warn, ended well
+   ok, failed bad; hollow: transitional or stopped before it ran
+   (compensating warn, waiting subtle, cancelled bad, as a cancelled job);
+   compensated: ended, rolled back, neutral */
+.wst { --c: var(--subtle); display: inline-flex; align-items: center; gap: 6px; color: var(--fg); white-space: nowrap; }
+.wst::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.s-running, .s-pending, .s-processing { --c: var(--warn); }
+.s-completed { --c: var(--ok); }
+.s-failed, .s-compensation-failed { --c: var(--bad); }
+.s-compensating { --c: var(--warn); }
+.s-cancelled { --c: var(--bad); }
+.wst.s-compensating::before, .wst.s-cancelled::before, .wst.s-waiting::before, .wst.s-unknown::before { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
+/* state tabs: all, then every state; no counts (varmq counts none) */
+.wfstates { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); overflow-x: auto; }
+.wfstates a { padding: 9px 14px; }
+.wfstates .label { white-space: nowrap; }
+.wfstates .label::before { background: var(--c, var(--subtle)); }
+.wfstates .s-all .label::before { display: none; }
+.wfstates .s-compensating .label::before, .wfstates .s-cancelled .label::before { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
+/* progress: completed ok, failed bad, cancelled bad outline, in flight warn, the rest track */
+.prog { display: inline-flex; align-items: center; gap: 8px; }
+.prog .bar { display: flex; width: 72px; height: 6px; overflow: hidden; border-radius: 3px; background: var(--line); }
+.prog .bar i { display: block; height: 100%; }
+.prog .c { background: var(--ok); }
+.prog .f { background: var(--bad); }
+.prog .x { background: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+.prog .l { background: var(--warn); }
+.prog .n { color: var(--subtle); font-size: var(--fs-2); }
+.wfs .name { overflow-wrap: break-word; }
+.wfs .name a { font-family: var(--mono); font-size: var(--fs-2); }
+.wfs .on { white-space: normal; color: var(--subtle); }
+.wfs .on .chip { margin: 2px 4px 2px 0; }
+@media (max-width: 640px) {
+  .wfs thead { position: absolute; left: -9999px; }
+  .wfs tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .wfs tbody tr:last-child { border-bottom: 0; }
+  .wfs th, .wfs td { padding: 0; border: 0; background: none; white-space: normal; text-align: left; }
+  .wfs .name, .wfs .on { grid-column: 1 / -1; min-width: 0; }
+  .wfs td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: var(--fs-1); }
+}
+
+/* workflow page: header facts, the graph, the task table */
+.wftitle { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
+.wftitle .wst { font-weight: 500; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 12px 0 0; }
+.facts div { display: flex; flex-direction: column; gap: 2px; }
+.facts dt { color: var(--subtle); font-size: var(--fs-1); }
+.facts dd { margin: 0; }
+h2.section { display: flex; align-items: baseline; gap: 10px; margin: 20px 0 10px; font-size: var(--fs-4); font-weight: 600; }
+h2.section .sub { font-weight: 400; }
+.tasks .mono { font-size: var(--fs-2); }
+.tasks .name { white-space: nowrap; }
+.tasks td[data-label="Depends on"] { white-space: normal; min-width: 10em; }
+.tasks .name .chip { margin-left: 6px; font-family: var(--sans); }
+.tasks .reason { display: block; max-width: 28em; color: var(--subtle); font-size: var(--fs-1); white-space: normal; overflow-wrap: anywhere; }
+.tasks tr:target > * { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+@media (max-width: 640px) {
+  .tasks thead { position: absolute; left: -9999px; }
+  .tasks tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .tasks tbody tr:last-child { border-bottom: 0; }
+  .tasks th, .tasks td { padding: 0; border: 0; background: none; white-space: normal; text-align: left; }
+  .tasks .name, .tasks td:nth-child(4) { grid-column: 1 / -1; min-width: 0; }
+  .tasks td.num { text-align: left; }
+  .tasks td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: var(--fs-1); }
+}
+
+/* the graph: a ground well; with workflow.js it pans and zooms in place
+   (.pz), else it scrolls */
+.dagbox { position: relative; margin: 0 0 16px; }
+.dag-port { position: relative; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-3); }
+.dag-port.pz { height: clamp(300px, 58vh, 560px); overflow: hidden; cursor: grab; touch-action: none; }
+.dag-port.pz.dragging { cursor: grabbing; }
+.dag-port.pz .dag { position: absolute; inset: 0; width: 100%; height: 100%; }
+.dag-port:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dag { display: block; font-family: var(--sans); }
+.dag .edge { fill: none; stroke: color-mix(in srgb, var(--subtle) 70%, transparent); stroke-width: 1.5; }
+.dag .edge.always { stroke-dasharray: 5 4; }
+.dag .flow { fill: none; stroke: var(--warn); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 2 10; animation: dag-flow .9s linear infinite; pointer-events: none; }
+@keyframes dag-flow { to { stroke-dashoffset: -12; } }
+.dag .node { --c: var(--subtle); cursor: pointer; outline: none; }
+.dag .node .box { fill: var(--panel); stroke: var(--line-strong); stroke-width: 1; transition: stroke .12s, opacity .12s; }
+.dag .node .dot { fill: var(--c); }
+.dag .node .name { fill: var(--fg); font-size: 13px; font-weight: 600; }
+.dag .node .meta { fill: var(--subtle); font-size: 12px; font-weight: 500; }
+.dag .t-completed { --c: var(--ok); }
+.dag .t-failed { --c: var(--bad); }
+.dag .t-failed .box { fill: color-mix(in srgb, var(--bad) 7%, var(--panel)); stroke: color-mix(in srgb, var(--bad) 55%, var(--line)); }
+.dag .t-pending, .dag .t-processing { --c: var(--warn); }
+.dag .live .box { stroke: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.dag .t-cancelled { --c: var(--bad); }
+.dag .t-cancelled .dot, .dag .t-waiting .dot, .dag .t-unknown .dot { fill: none; stroke: var(--c); stroke-width: 1.5; }
+.dag .t-cancelled .name, .dag .t-waiting .name { fill: var(--subtle); }
+.dag .t-waiting .box { fill: var(--bg); stroke-dasharray: 4 3; }
+.dag .halo { fill: none; stroke: var(--warn); stroke-width: 2; opacity: 0; pointer-events: none; transform-box: fill-box; transform-origin: center; animation: dag-pulse 1.8s ease-out infinite; }
+@keyframes dag-pulse { 0% { opacity: .6; transform: scale(1); } 100% { opacity: 0; transform: scale(1.08, 1.25); } }
+.dag .undo rect { fill: var(--raised); stroke: var(--line-strong); }
+.dag .undo text { fill: var(--fg); font-size: 12px; font-weight: 500; }
+.dag .undo .ico-p { fill: none; stroke: var(--subtle); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.dag .node:hover .box, .dag .node:focus-visible .box { stroke: var(--accent); }
+.dag .node:focus-visible .box { stroke-width: 2; }
+.dag .node.sel .box { stroke: var(--accent); stroke-width: 2; fill: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+/* a task hovered or focused: its upstream and downstream stay, the rest fade */
+.dag.trace .node:not(.hl) { opacity: .32; }
+.dag.trace .edge:not(.hl), .dag.trace .flow:not(.hl) { opacity: .15; }
+.dag .edge.hl { stroke: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .dag .flow, .dag .halo { animation: none; }
+  .dag .halo { opacity: .5; }
+  .dag .node .box { transition: none; }
+}
+.dag-tools { position: absolute; z-index: 2; top: 10px; left: 10px; display: flex; gap: 4px; }
+.dag-tools button { display: inline-flex; padding: 6px; background: var(--panel); }
+.dag-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin: 8px 0 0; padding: 0; list-style: none; color: var(--subtle); font-size: var(--fs-1); }
+.dag-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.dag-legend .wst { color: var(--subtle); }
+.dag-legend .key-edge { fill: none; stroke: var(--subtle); stroke-width: 1.5; }
+.dag-legend .key-edge.always { stroke-dasharray: 5 4; }
+.dag-legend .hint { margin-left: auto; }
+/* the task panel: over the graph's right side; under it on a phone */
+.wf-panel { position: absolute; z-index: 3; top: 10px; right: 10px; width: min(340px, calc(100% - 20px)); overflow: auto; padding: 14px; background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-3); }
+.wf-panel h2 { margin: 0 28px 10px 0; font-size: var(--fs-3); font-weight: 600; overflow-wrap: anywhere; }
+.wf-panel h3 { margin: 14px 0 6px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--subtle); font-size: var(--fs-2); font-weight: 600; }
+.wf-panel .close { position: absolute; top: 8px; right: 8px; display: inline-flex; padding: 5px; }
+.kv { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 6px 10px; margin: 0; font-size: var(--fs-2); }
+.kv + .kv { margin-top: 6px; }
+.kv dt { color: var(--subtle); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.kv code.err { display: block; margin: 0; font-family: var(--mono); font-size: var(--fs-1); white-space: pre-wrap; }
+@media (max-width: 760px) {
+  .wf-panel { position: relative; top: auto; right: auto; width: auto; max-height: none; margin-top: 8px; }
+}
