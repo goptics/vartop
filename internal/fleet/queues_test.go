@@ -162,6 +162,9 @@ func TestQueueAct(t *testing.T) {
 	if !now.IsPaused() || now.PausedAt == 0 || now.ID != id || g.IsPaused() {
 		t.Errorf("answered group paused %v at %d (before: %v), want paused, g untouched", now.IsPaused(), now.PausedAt, g.IsPaused())
 	}
+	if *g.paused[1] || !*now.paused[1] { // PauseState hides it: old's nil
+		t.Errorf("unit a paused: g %v, now %v, want g untouched", *g.paused[1], *now.paused[1])
+	}
 	want := []ActionResult{
 		{Pod: "old", Key: o.URL, Tip: o.URL, Outcome: "no change", Msg: "not supported by this instance"},
 		{Pod: "a", Key: a.URL, Tip: a.URL, Outcome: "ok"},
@@ -254,5 +257,20 @@ func TestQueueActErrorEntries(t *testing.T) {
 	want := "PATCH /queues/q/actions/pause"
 	if !slices.Contains(fe.Calls(), want) || !slices.Contains(fa.Calls(), want) {
 		t.Errorf("calls e %v, a %v, want %s on both", fe.Calls(), fa.Calls(), want)
+	}
+}
+
+// A unit that cannot be reached is failed with the transport error.
+func TestQueueActTransportError(t *testing.T) {
+	const id = "q"
+	_, s := queueFake(t, "a", map[string]*fleettest.Queue{id: pausableQueue(id)})
+	g, _ := GroupQueues(FetchQueues(context.Background(), []*api.Client{api.NewClient(s.URL, "")}, byInstance)).Group(id)
+	s.Close()
+	res, now := QueueAct(context.Background(), g, nil, instanceNoun, "pause")
+	if len(res) != 1 || res[0].Outcome != "failed" || res[0].Msg == "" {
+		t.Errorf("results = %+v, want failed with the error", res)
+	}
+	if now.IsPaused() {
+		t.Error("a failure changed the group")
 	}
 }
