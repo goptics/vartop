@@ -214,6 +214,10 @@ func TestActionResponsesNeverCarryToken(t *testing.T) {
 		if c.failed && !strings.Contains(body, `<li class="failed">`) {
 			t.Errorf("POST %s %v: the dead pod's failure is not rendered; the test would miss a token in it", c.path, c.form)
 		}
+		// b's dropped connection: a transport error, not a bad answer
+		if c.failed && strings.HasPrefix(c.path, tenantPath) && !strings.Contains(body, `/actions/pause&#34;: EOF)`) {
+			t.Errorf("POST %s: no transport error rendered:\n%s", c.path, body)
+		}
 		if strings.Contains(body, testToken) {
 			t.Errorf("POST %s %v: body contains the token", c.path, c.form)
 		}
