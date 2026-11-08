@@ -31,11 +31,11 @@ const (
 	maxPreview = 160
 )
 
-// queueConfigChangedMsg is the notice of a server whose newest snapshot was
+// liveConfigChangedMsg is the notice of a server whose newest snapshot was
 // polled under its previous endpoints: the token read now must not go to
-// them.
-func queueConfigChangedMsg(server string) string {
-	return "The configuration of " + server + " changed; queues show once its first snapshot under it is taken. Reload in a few seconds."
+// them. what names what the page reads live: queues, workflows.
+func liveConfigChangedMsg(server, what string) string {
+	return "The configuration of " + server + " changed; " + what + " show once its first snapshot under it is taken. Reload in a few seconds."
 }
 
 // JobsView is the job page of one queue: a page of its jobs in State,
@@ -182,40 +182,50 @@ func jobsURL(id, server string, state contract.JobState, offset, limit int) stri
 	return u
 }
 
-// readQueues is the queues of p's server, read from the units of the newest
-// of snaps with the server's token, and whether they could be: as for an
-// action (see bind), the snapshot must be current under a fresh lease of
-// this environment's collector and polled under the server's endpoints now.
+// readQueues is the queues of p's server, read live (see liveClients).
 // Otherwise p says why.
 func (h *handler) readQueues(r *http.Request, p *Page, snaps []*fleet.Snapshot) (fleet.QueuesView, bool) {
+	clients, label, ok := h.liveClients(p, snaps, "queues")
+	if !ok {
+		return fleet.QueuesView{}, false
+	}
+	return fleet.GroupQueues(fleet.FetchQueues(r.Context(), clients, label)), true
+}
+
+// liveClients are the clients of the units of the newest of snaps, with
+// p's server's token, and how the pages label them, for a page that reads
+// varmq live. As for an action (see bind), the snapshot must be current
+// under a fresh lease of this environment's collector and polled under the
+// server's endpoints now. Otherwise ok is false and p says why; what names
+// what the page reads (queues, workflows).
+func (h *handler) liveClients(p *Page, snaps []*fleet.Snapshot, what string) (clients []*api.Client, label func(*api.Client, string) string, ok bool) {
 	cfg, err := h.config()
 	if err != nil {
 		p.Banner = "cannot read the config: " + err.Error()
-		return fleet.QueuesView{}, false
+		return nil, nil, false
 	}
 	srv := cfg.Servers[p.Server]
 	if srv == nil {
 		p.Banner = fleet.NotConfiguredMsg(p.Server)
-		return fleet.QueuesView{}, false
+		return nil, nil, false
 	}
 	latest, now := latestOf(snaps), time.Now()
 	switch d := h.collector(); {
 	case d.Err != nil:
 		p.Banner = fleet.LeaseErrMsg(d.Err)
-		return fleet.QueuesView{}, false
+		return nil, nil, false
 	case d.Other:
-		return fleet.QueuesView{}, false // p.Stale says why
+		return nil, nil, false // p.Stale says why
 	case !d.Acts(latest, srv.PollInterval(), now):
 		if p.Stale == "" {
 			p.Stale = h.staleMsg(p.Server, latest, now)
 		}
-		return fleet.QueuesView{}, false
+		return nil, nil, false
 	case latest.Source != fleet.SourceOf(srv):
-		p.Banner = queueConfigChangedMsg(p.Server)
-		return fleet.QueuesView{}, false
+		p.Banner = liveConfigChangedMsg(p.Server, what)
+		return nil, nil, false
 	}
-	clients := fleet.ClientsFor(latest, srv.Token)
-	return fleet.GroupQueues(fleet.FetchQueues(r.Context(), clients, fleet.UnitLabel(latest))), true
+	return fleet.ClientsFor(latest, srv.Token), fleet.UnitLabel(latest), true
 }
 
 func (h *handler) queues(w http.ResponseWriter, r *http.Request) {

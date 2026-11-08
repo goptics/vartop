@@ -71,11 +71,19 @@ type Page struct {
 
 	// At most one is set; none while waiting or when the server or unit
 	// cannot be shown.
-	Dashboard *fleet.DashboardView
-	Grid      *fleet.GridView
-	Detail    *fleet.DetailView
-	Queues    *fleet.QueuesView
-	Jobs      *JobsView
+	Dashboard    *fleet.DashboardView
+	Grid         *fleet.GridView
+	Detail       *fleet.DetailView
+	Queues       *fleet.QueuesView
+	Jobs         *JobsView
+	WorkflowList *WorkflowsView
+	Workflow     *WorkflowView
+
+	// OwnPoll: the page's #live polls itself (the workflow page), not the
+	// layout's poller; LivePoll is its interval in seconds, 0: it does not
+	// (the workflow ended).
+	OwnPoll  bool
+	LivePoll int
 
 	// Spans are the spans besides the hour the server's charts may show
 	// (spansOf its history); Ranges says which each of Detail's charts
@@ -132,6 +140,8 @@ var funcs = template.FuncMap{
 	"workerURL":     workerURL,
 	"queuesURL":     queuesURL,
 	"jobsURL":       jobsURL,
+	"workflowsURL":  workflowsURL,
+	"workflowURL":   workflowURL,
 	"domID":         fleet.DOMID,
 	"pathOf":        pathOf,
 	"sparkline":     sparkline,
@@ -149,20 +159,24 @@ var funcs = template.FuncMap{
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",
-// "detail", "queues", "queue", "results" and "confirm" (layout.html +
-// <key>.html). Entry points:
+// "detail", "queues", "queue", "workflows", "workflow", "results" and
+// "confirm" (layout.html + <key>.html). Entry points:
 //
-//   - dashboard, grid, detail, queues, queue: ExecuteTemplate(w, "layout", Page) renders the
+//   - dashboard, grid, detail, queues, queue, workflows, workflow:
+//     ExecuteTemplate(w, "layout", Page) renders the
 //     full document. The dashboard and detail sets also define "live_oob"
 //     (Page): the #live region as an out-of-band swap, for action responses.
 //   - queue also defines "qstate" (QueueCtl): the paused badge and
 //     pause/resume buttons, out of band with OOB set, for action responses.
+//   - workflow also defines "wfctl" (WorkflowCtl): the cancel buttons, out
+//     of band with OOB set, for action responses.
 //   - results: ExecuteTemplate(w, "results", ResultsView).
 //   - confirm: ExecuteTemplate(w, "confirm", ConfirmView), and
-//     "queue_confirm" (QueueConfirmView) for a queue action.
+//     "queue_confirm" (QueueConfirmView) for a queue action,
+//     "workflow_confirm" (WorkflowConfirmView) for a workflow cancel.
 func parseTemplates() (map[string]*template.Template, error) {
 	sets := make(map[string]*template.Template)
-	for _, name := range []string{"dashboard", "grid", "detail", "queues", "queue", "results", "confirm"} {
+	for _, name := range []string{"dashboard", "grid", "detail", "queues", "queue", "workflows", "workflow", "results", "confirm"} {
 		t, err := template.New(name).Funcs(funcs).ParseFS(assets, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse %s template: %w", name, err)

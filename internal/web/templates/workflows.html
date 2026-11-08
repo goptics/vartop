@@ -1,0 +1,38 @@
+{{define "live_body"}}{{with .WorkflowList}}
+<nav class="states wfstates" aria-label="Workflow state">{{range .Tabs}}<a href="{{.URL}}" class="s-{{.Class}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.Label}}</span></a>{{end}}</nav>
+{{if .Rows}}<div class="table-wrap">
+<table class="wfs">
+  <caption class="sr">Workflows, newest first; one row per workflow, however many {{$.Noun.Many}} report it</caption>
+  <thead><tr>
+    <th scope="col">Workflow</th>
+    <th scope="col">State</th>
+    <th scope="col">Tasks ended</th>
+    <th scope="col">Created</th>
+    <th scope="col" class="num">Duration</th>
+    <th scope="col">Reported by</th>
+  </tr></thead>
+  <tbody>{{range .Rows}}
+  <tr>
+    <th scope="row" class="name"><a href="{{.URL}}">{{.ID}}</a></th>
+    <td data-label="State">{{template "wf_state" .State}}</td>
+    <td data-label="Tasks ended">{{template "progress" .Progress}}</td>
+    <td data-label="Created">{{if .Created}}<time datetime="{{.CreatedISO}}" title="{{.CreFull}}">{{.Created}}</time>{{else}}—{{end}}</td>
+    <td class="num" data-label="Duration">{{.Duration}}{{if .Running}} <span class="sub">so far</span>{{end}}</td>
+    <td class="on" data-label="Reported by">{{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span>{{end}}</td>
+  </tr>{{end}}
+  </tbody>
+</table>
+</div>{{else if .NoRoutes}}<p class="empty">No workflow data: no {{$.Noun.One}} serves the workflow routes. They need varmq API 1.3.0.</p>
+{{else if and .Read (not .Failed)}}<p class="empty">No {{with .State}}{{$.WorkflowList.StateLabel}} {{end}}workflows{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
+{{if or .Prev .Next}}<nav class="pager" aria-label="Pages">{{with .Prev}}<a href="{{.}}" rel="prev">{{template "arrow" "left"}}Previous</a>{{end}}{{if .Rows}}<span class="nums"><span class="gap">{{.First}}–{{.Last}}</span></span>{{end}}{{with .Next}}<a href="{{.}}" rel="next">Next{{template "arrow" "right"}}</a>{{end}}</nav>{{end}}
+{{if and .Rows .Unsupported}}<p class="note" role="note">No workflow routes on: {{range $i, $l := .Unsupported}}{{if $i}}, {{end}}{{$l}}{{end}}</p>{{end}}
+{{range .Failed}}<p class="err">{{.}}</p>{{end}}
+{{end}}{{end}}
+
+{{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
+
+{{/* arrow: a 16px stroke arrow, "left" or "right" */}}
+{{define "arrow"}}<svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">{{if eq . "left"}}<path d="M13 8H3M7 4 3 8l4 4"/>{{else}}<path d="M3 8h10M9 4l4 4-4 4"/>{{end}}</svg>{{end}}
+
+{{define "content"}}<header class="pagehead"><h1>Workflows</h1><p class="sub">Task graphs over queues, newest first; each once, however many {{.Noun.Many}} report it</p></header>
+{{template "live" .}}{{end}}
