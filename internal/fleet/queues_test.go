@@ -223,3 +223,36 @@ func TestQueueActUnsupported(t *testing.T) {
 		}
 	}
 }
+
+// A unit whose entry is an error may serve the route: it is sent the
+// action. One that stores the flag but answers an error entry (200) leaves
+// its paused as it was; the group's paused comes from an answer that has it.
+func TestQueueActErrorEntries(t *testing.T) {
+	const id = "q"
+	bad := &fleettest.Queue{Summary: `{"id":"q","error":"redis down"}`, ActionErr: "redis down"}
+	fe, e := queueFake(t, "e", map[string]*fleettest.Queue{id: bad})
+	fa, a := queueFake(t, "a", map[string]*fleettest.Queue{id: pausableQueue(id)})
+	clients := []*api.Client{api.NewClient(e.URL, ""), api.NewClient(a.URL, "")}
+	g, _ := GroupQueues(FetchQueues(context.Background(), clients, byInstance)).Group(id)
+	if u := g.Units(); len(u) != 2 || !u[0].Pausable || !u[1].Pausable {
+		t.Errorf("units = %+v, want both sent the action", u)
+	}
+	if all, none := g.PauseState(); all || none {
+		t.Errorf("error entry says nothing: PauseState = %v, %v, want neither", all, none)
+	}
+
+	res, now := QueueAct(context.Background(), g, nil, instanceNoun, "pause")
+	if !now.CanPause() || !now.IsPaused() || now.PausedAt == 0 {
+		t.Errorf("answered group: can %v paused %v at %d, want a's answer", now.CanPause(), now.IsPaused(), now.PausedAt)
+	}
+	if now.paused[0] != nil || now.paused[1] == nil || !*now.paused[1] {
+		t.Errorf("unit paused = %v, %v, want e's kept (nil), a's from its answer", now.paused[0], now.paused[1])
+	}
+	if len(res) != 2 || res[0].Outcome != "ok" || res[1].Outcome != "ok" {
+		t.Errorf("results = %+v", res)
+	}
+	want := "PATCH /queues/q/actions/pause"
+	if !slices.Contains(fe.Calls(), want) || !slices.Contains(fa.Calls(), want) {
+		t.Errorf("calls e %v, a %v, want %s on both", fe.Calls(), fa.Calls(), want)
+	}
+}
