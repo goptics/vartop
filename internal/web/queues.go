@@ -64,16 +64,23 @@ type JobsView struct {
 // action response. Since, SinceFull and SinceISO say when it was paused
 // ("" when not known). CanPause: some unit reporting it serves the pause
 // route; NoRoute: the units read the queue and none does (older varmq).
+// Pause and Resume: which buttons show — Resume alone when every unit says
+// paused, Pause alone when none does, both when they differ or one says
+// nothing.
 type QueueCtl struct {
 	Server, ID                 string
 	Paused, CanPause, NoRoute  bool
+	Pause, Resume              bool
 	Since, SinceFull, SinceISO string
 	OOB                        bool
 }
 
-// queueCtl is the QueueCtl of q, the entry of queue id, on server.
-func queueCtl(q api.QueueSummary, server string) QueueCtl {
-	c := QueueCtl{Server: server, ID: q.ID, Paused: q.IsPaused(), CanPause: q.CanPause(), NoRoute: q.Err == "" && !q.CanPause()}
+// queueCtl is the QueueCtl of queue g on server.
+func queueCtl(g fleet.QueueGroup, server string) QueueCtl {
+	q := g.QueueSummary
+	all, none := g.PauseState()
+	c := QueueCtl{Server: server, ID: q.ID, Paused: q.IsPaused(), CanPause: q.CanPause(), NoRoute: q.Err == "" && !q.CanPause(),
+		Pause: !all, Resume: !none}
 	if c.Paused && q.PausedAt > 0 {
 		c.Since = shortTime(time.UnixMilli(q.PausedAt), time.Now())
 		c.SinceFull, c.SinceISO = msTime(q.PausedAt)
@@ -262,7 +269,7 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 	for _, s := range api.JobStates {
 		v.Tabs = append(v.Tabs, JobTab{State: s, URL: jobsURL(g.ID, p.Server, s, 0, v.Limit), Count: stateCount(g.Counts, s), Current: s == v.State})
 	}
-	v.Ctl = queueCtl(g.QueueSummary, p.Server)
+	v.Ctl = queueCtl(g, p.Server)
 	if g.Err != "" {
 		p.Banner = g.ID + ": " + g.Err
 		return v
@@ -329,7 +336,7 @@ type QueueConfirmView struct {
 // is refused unless the server's newest snapshot may be acted on (bind).
 // Without confirm=1 it only answers the confirmation panel and calls
 // nothing. The answer is the results, and the page's #qstate out of band,
-// from the entry a unit answered the action with (as before when none did).
+// as the units answered the action (see fleet.QueueAct).
 func (h *handler) queueAction(w http.ResponseWriter, r *http.Request) {
 	id, action := r.PathValue("id"), r.PathValue("action")
 	if !slices.Contains(queueActions, action) {
@@ -358,12 +365,8 @@ func (h *handler) queueAction(w http.ResponseWriter, r *http.Request) {
 		h.fragments(w, fragment{"confirm", "queue_confirm", QueueConfirmView{Action: action, Server: t.key, ID: id, Noun: t.noun, Units: g.Units()}})
 		return
 	}
-	results, now := fleet.QueueAct(mutationCtx(r), g, fleet.UnitsOf(t.latest), t.noun, action)
-	q := g.QueueSummary
-	if now != nil {
-		q = *now
-	}
-	ctl := queueCtl(q, t.key)
+	results, after := fleet.QueueAct(mutationCtx(r), g, fleet.UnitsOf(t.latest), t.noun, action)
+	ctl := queueCtl(after, t.key)
 	ctl.OOB = true
 	h.fragments(w, fragment{"results", "results", ResultsView{Results: results, Noun: t.noun}}, fragment{"queue", "qstate", ctl})
 }

@@ -34,6 +34,20 @@ type QueueGroup struct {
 	Clients  []*api.Client // the clients that reported it, for the jobs and action routes
 	labels   []string      // the label of each of Clients
 	pausable []bool        // whether each of Clients is sent a queue action: it reported paused, or only an error
+	paused   []*bool       // what each of Clients said of paused; nil: nothing (older varmq, error entry)
+}
+
+// PauseState says what every unit reporting g says of paused: all say
+// paused, or none does. Neither when they differ or one says nothing.
+func (g QueueGroup) PauseState() (all, none bool) {
+	all, none = len(g.paused) > 0, len(g.paused) > 0
+	for _, p := range g.paused {
+		if p == nil {
+			return false, false
+		}
+		all, none = all && *p, none && !*p
+	}
+	return all, none
 }
 
 // QueueUnit is one unit that reports a queue: its label and endpoint, and
@@ -112,6 +126,7 @@ func GroupQueues(units []UnitQueues) QueuesView {
 			// An error entry has no paused (spec): its unit may serve the
 			// route; sending finds out, and an older one answers 404.
 			g.pausable = append(g.pausable, q.CanPause() || q.Err != "")
+			g.paused = append(g.paused, q.Paused)
 		}
 	}
 	slices.SortFunc(v.Groups, func(a, b QueueGroup) int { return cmp.Compare(a.ID, b.ID) })
@@ -150,15 +165,15 @@ func FetchJobs(ctx context.Context, g QueueGroup, state contract.JobState, offse
 
 // QueueAct sends action (pause or resume) on queue g to every unit that
 // reported it, at once, and returns one result per unit in g's order, and
-// the queue's entry as the first unit that did it answered (nil if none
-// did). The pause flag lives in the queue's storage, so one unit would do;
+// g as the units answered: each answering unit's paused from its answer,
+// the entry's paused from the first answer (g's own where none answered). The pause flag lives in the queue's storage, so one unit would do;
 // each is sent it anyway (the route is idempotent) so the results say what
 // every unit answered. A unit whose copy did not report paused (varmq
 // before API 1.2.0) is sent nothing: no change, not supported. A unit that
 // answers it cannot (see api.QueueActionUnsupported) is failed, not
 // supported; one that no longer binds the queue (JSON 404) is no change.
 // units label the results' tips (see UnitsOf); n words their messages.
-func QueueAct(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, n Noun, action string) ([]ActionResult, *api.QueueSummary) {
+func QueueAct(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, n Noun, action string) ([]ActionResult, QueueGroup) {
 	results := make([]ActionResult, len(g.Clients))
 	answers := make([]*api.QueueSummary, len(g.Clients))
 	var pg panicGroup
@@ -189,12 +204,18 @@ func QueueAct(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, n
 		})
 	}
 	pg.Wait()
-	for _, q := range answers {
-		if q != nil {
-			return results, q
+	after, first := g, true
+	after.paused = slices.Clone(g.paused)
+	for i, q := range answers {
+		if q == nil {
+			continue
+		}
+		after.paused[i] = q.Paused
+		if first {
+			after.Paused, after.PausedAt, first = q.Paused, q.PausedAt, false
 		}
 	}
-	return results, nil
+	return results, after
 }
 
 // UnitLabel labels the client of an endpoint of latest for the queue pages:

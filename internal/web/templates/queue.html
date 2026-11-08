@@ -4,8 +4,8 @@
 {{define "qstate"}}<div id="qstate" class="qctl"{{if .OOB}} hx-swap-oob="outerHTML"{{end}}>{{if .Paused}}<span class="status paused"{{with .SinceFull}} title="paused at {{.}}"{{end}}>paused{{with .Since}} since <time datetime="{{$.SinceISO}}">{{.}}</time>{{end}}</span>{{end}}{{if .CanPause}}
   <form class="qact" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" .}}
-    <button type="button" hx-post="/queues/{{pathEscape .ID}}/actions/pause">Pause queue</button>
-    <button type="button" hx-post="/queues/{{pathEscape .ID}}/actions/resume">Resume queue</button>
+    {{if .Pause}}<button type="button" hx-post="/queues/{{pathEscape .ID}}/actions/pause">Pause queue</button>{{end}}
+    {{if .Resume}}<button type="button" hx-post="/queues/{{pathEscape .ID}}/actions/resume">Resume queue</button>{{end}}
   </form>{{else if .NoRoute}}<span class="sub">Pause and resume need varmq API 1.2.0 on an instance reporting this queue</span>{{end}}
 </div>{{end}}
 {{/* arrow: a 16px stroke arrow, "left" or "right" */}}

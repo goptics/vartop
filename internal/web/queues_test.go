@@ -153,10 +153,11 @@ func TestQueuePauseResume(t *testing.T) {
 	srv, _ := newTestServer(t, fakes...)
 	esc := "/queues/redisq:fifo:%7Btenant%2Forders%7D"
 
+	pauseBtn, resumeBtn := `hx-post="`+esc+`/actions/pause"`, `hx-post="`+esc+`/actions/resume"`
 	_, body := fetch(t, srv, esc+"?server=multi", false)
-	if !strings.Contains(body, `hx-post="`+esc+`/actions/pause"`) || !strings.Contains(body, `hx-post="`+esc+`/actions/resume"`) ||
+	if !strings.Contains(body, pauseBtn) || strings.Contains(body, resumeBtn) ||
 		strings.Contains(body, "status paused") || !strings.Contains(body, `<div id="results" aria-live="polite">`) {
-		t.Errorf("queue page lacks its controls:\n%s", body)
+		t.Errorf("running queue: want Pause alone:\n%s", body)
 	}
 
 	resp, body := post(t, srv, esc+"/actions/pause", multi(), true)
@@ -177,8 +178,12 @@ func TestQueuePauseResume(t *testing.T) {
 	if !shared.Paused() {
 		t.Error("queue not paused")
 	}
-	if _, oob, ok := strings.Cut(body, `<div id="qstate" class="qctl" hx-swap-oob="outerHTML">`); !ok || !strings.Contains(oob, `<span class="status paused" title="paused at `) || !strings.Contains(oob, `since <time datetime="20`) {
-		t.Errorf("no paused #qstate out of band:\n%s", body)
+	if _, oob, ok := strings.Cut(body, `<div id="qstate" class="qctl" hx-swap-oob="outerHTML">`); !ok || !strings.Contains(oob, `<span class="status paused" title="paused at `) || !strings.Contains(oob, `since <time datetime="20`) ||
+		!strings.Contains(oob, resumeBtn) || strings.Contains(oob, pauseBtn) {
+		t.Errorf("no paused #qstate (Resume alone) out of band:\n%s", body)
+	}
+	if _, body := fetch(t, srv, esc+"?server=multi", false); !strings.Contains(body, resumeBtn) || strings.Contains(body, pauseBtn) {
+		t.Errorf("paused queue: want Resume alone:\n%s", body)
 	}
 	if strings.Contains(body, testToken) {
 		t.Error("the response carries the token")
@@ -189,8 +194,18 @@ func TestQueuePauseResume(t *testing.T) {
 	}
 
 	_, body = post(t, srv, esc+"/actions/resume", multi("confirm", "1"), true)
-	if shared.Paused() || strings.Contains(body, "status paused") {
-		t.Errorf("resume left it paused:\n%s", body)
+	if shared.Paused() || strings.Contains(body, "status paused") || !strings.Contains(body, pauseBtn) || strings.Contains(body, resumeBtn) {
+		t.Errorf("resume left it paused, or not Pause alone:\n%s", body)
+	}
+
+	// Units that differ (one storage each, say): both buttons.
+	other := pausableTenant()
+	other.Summary = strings.Replace(other.Summary, `"paused":false`, `"paused":true`, 1)
+	varmqs[1].Mu.Lock()
+	varmqs[1].Queues = map[string]*fleettest.Queue{tenantID: other}
+	varmqs[1].Mu.Unlock()
+	if _, body := fetch(t, srv, esc+"?server=multi", false); !strings.Contains(body, pauseBtn) || !strings.Contains(body, resumeBtn) {
+		t.Errorf("mixed: want both buttons:\n%s", body)
 	}
 
 	for _, c := range []struct {
