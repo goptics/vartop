@@ -17,3 +17,20 @@
     {{end}}<button type="submit" class="primary">Confirm {{.Action}}</button>
   </form>
 </section>{{end}}
+{{define "queue_confirm"}}<section class="confirm" aria-labelledby="confirm-head">
+  <h2 id="confirm-head">Confirm {{.Action}} of queue <span class="mono">{{.ID}}</span> on {{.Server}}</h2>
+  <p>{{if eq .Action "pause"}}Every process that reads this queue's storage stops taking its jobs, also ones that serve no API, until it is resumed. Adds still land; running jobs finish.{{else}}Every process that reads this queue's storage takes its jobs again.{{end}}</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>{{.Noun.Cap}}</th><th>Sent</th></tr></thead>
+    <tbody>{{range .Units}}
+    <tr><th scope="row" class="name" title="{{.Endpoint}}">{{.Label}}</th><td>{{if .Pausable}}{{$.Action}}{{else}}<span class="na">not supported by this {{$.Noun.One}}</span>{{end}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  </div>
+  <form hx-post="/queues/{{pathEscape .ID}}/actions/{{pathEscape .Action}}" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+    {{template "server_field" .}}
+    <input type="hidden" name="confirm" value="1">
+    <button type="submit" class="primary">Confirm {{.Action}}</button>
+  </form>
+</section>{{end}}

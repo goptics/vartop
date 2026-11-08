@@ -351,10 +351,16 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .qhead { margin: 0 0 16px; }
 .qid { font-family: var(--mono); font-size: var(--fs-5); font-weight: 600; }
 .qhead .sub { margin: 6px 0 0; }
+/* queue state: paused badge, pause and resume */
+.qctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 12px 0 0; }
+.qctl .status { font-weight: 500; }
+.qctl .sub { margin: 0; }
+.qact { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+.queues .name .status { margin-left: 8px; font-family: var(--sans); font-size: var(--fs-1); font-weight: 500; white-space: nowrap; }
 .chip { display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--raised); color: var(--fg); font-size: var(--fs-1); }
 .queues .on .chip { margin: 2px 4px 2px 0; }
 .states {
-  position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 12px; overflow: hidden;
+  position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0 0 12px; overflow: hidden;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-3);
 }
 .states a { display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; border-left: 1px solid var(--line); color: var(--subtle); text-decoration: none; }
@@ -363,11 +369,18 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .states a[aria-current] { background: var(--raised); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
 .states .label { display: flex; align-items: center; gap: 6px; font-size: var(--fs-2); text-transform: capitalize; }
 .states .count { color: var(--fg); font-size: var(--fs-5); font-weight: 600; }
+.states .count.none { color: var(--subtle); font-weight: 400; }
 .dot, .states .label::before { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--subtle); }
 .states .label::before { content: ""; }
 .state-processing .dot, .states .state-processing .label::before { background: var(--warn); }
 .state-completed .dot, .states .state-completed .label::before { background: var(--ok); }
 .state-failed .dot, .states .state-failed .label::before { background: var(--bad); }
+/* cancelled: failed's hue, hollow: stopped before it ran, not failed */
+.state-cancelled .dot, .states .state-cancelled .label::before { background: none; box-shadow: inset 0 0 0 1.5px var(--bad); }
+/* five tabs do not fit a phone: the strip scrolls sideways */
+@media (max-width: 640px) {
+  .states { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); overflow-x: auto; }
+}
 @media (max-width: 480px) {
   .states a { padding: 6px 8px; }
   .states .label { font-size: var(--fs-1); }
@@ -409,6 +422,7 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .timeline .step-started .ico { --c: var(--warn); }
 .timeline .step-finished .ico { --c: var(--ok); }
 .timeline .step-failed .ico { --c: var(--bad); }
+.timeline .step-cancelled .ico { --c: var(--bad); background: none; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--bad) 60%, transparent); }
 .timeline li.none .ico { --c: var(--subtle); background: none; border: 1px dashed var(--subtle); opacity: .6; }
 .timeline li.none .ico * { display: none; }
 .timeline .what, .errors .what { color: var(--subtle); }
