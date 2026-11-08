@@ -1411,6 +1411,18 @@ func TestWorkflowRendersHostileFields(t *testing.T) {
 			t.Errorf("%s: %d <script, want %d (htmx, workflow.js)", name, n, want)
 		}
 	}
+
+	// an ID with '/', '?' and '#': one path segment in every link and post
+	const odd, esc = "a/b?c#d", "/workflows/a%2Fb%3Fc%23d"
+	for name, c := range map[string]struct{ body, want string }{
+		"list":    {run(t, "workflows", "layout", Page{Server: "dev", WorkflowList: &WorkflowsView{Read: true, Rows: []WorkflowRow{{ID: odd, URL: workflowURL(odd, "dev", 0)}}}}), `href="` + esc + `?server=dev"`},
+		"wfctl":   {run(t, "workflow", "wfctl", WorkflowCtl{Server: "dev", ID: odd, At: 1}), `hx-post="` + esc + `/actions/cancel"`},
+		"confirm": {run(t, "confirm", "workflow_confirm", WorkflowConfirmView{Server: "dev", ID: odd, Noun: instanceNoun}), `hx-post="` + esc + `/actions/cancel"`},
+	} {
+		if !strings.Contains(c.body, c.want) {
+			t.Errorf("%s with ID %q lacks %s:\n%s", name, odd, c.want, c.body)
+		}
+	}
 }
 
 // Two tasks of one name: a dep on it is the first one's edge, as in the
