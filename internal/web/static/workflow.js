@@ -88,15 +88,9 @@
 
   const node = (i) => document.querySelector(`.dag .node[data-i="${i}"]`);
 
-  // trace marks task i, every task upstream and downstream of it, and the
-  // edges between them; the rest of the graph fades. null clears it.
-  function trace(i) {
-    const p = parts();
-    if (!p) return;
-    const svg = p.svg;
-    svg.querySelectorAll(".hl").forEach((el) => el.classList.remove("hl"));
-    svg.classList.toggle("trace", i !== null);
-    if (i === null) return;
+  // lineage is task i and every task upstream and downstream of it (ids as
+  // strings), and the edges of svg with whether each lies on those paths.
+  function lineage(svg, i) {
     const edges = [...svg.querySelectorAll(".edge, .flow")].map((e) => ({ e, from: e.dataset.from, to: e.dataset.to }));
     const walk = (start, next) => {
       const seen = new Set([start]);
@@ -115,17 +109,29 @@
     const id = String(i);
     const up = walk(id, (c) => edges.filter((x) => x.to === c).map((x) => x.from));
     const down = walk(id, (c) => edges.filter((x) => x.from === c).map((x) => x.to));
+    for (const x of edges) x.on = (up.has(x.to) && up.has(x.from)) || (down.has(x.from) && down.has(x.to));
+    return { tasks: new Set([...up, ...down]), down, edges };
+  }
+
+  // trace marks task i, every task upstream and downstream of it, and the
+  // edges between them; the rest of the graph fades. null clears it.
+  function trace(i) {
+    const p = parts();
+    if (!p) return;
+    const svg = p.svg;
+    svg.querySelectorAll(".hl").forEach((el) => el.classList.remove("hl"));
+    svg.classList.toggle("trace", i !== null);
+    if (i === null) return;
+    const l = lineage(svg, i);
     for (const n of svg.querySelectorAll(".node")) {
-      if (up.has(n.dataset.i) || down.has(n.dataset.i)) n.classList.add("hl");
+      if (l.tasks.has(n.dataset.i)) n.classList.add("hl");
     }
-    for (const x of edges) {
-      if ((up.has(x.to) && up.has(x.from)) || (down.has(x.from) && down.has(x.to))) x.e.classList.add("hl");
-    }
+    for (const x of l.edges) if (x.on) x.e.classList.add("hl");
   }
 
   // select opens task i's details in the panel; focus moves into it when
   // a key opened it. move: the user opened it (not a swap reopening it),
-  // so the view may move to keep the graph clear of the panel.
+  // so the view may move to show the task.
   function select(i, focus, move) {
     const p = parts();
     const src = document.getElementById("task-detail-" + i);
@@ -136,30 +142,44 @@
     if (n) n.classList.add("sel");
     p.panel.querySelector(".body").innerHTML = src.innerHTML;
     p.panel.hidden = false;
-    // beside the graph, the panel is as tall as the well at most, and the
-    // view moves the task clear of it
-    if (getComputedStyle(p.panel).position === "absolute") {
-      p.panel.style.maxHeight = p.port.clientHeight - 20 + "px";
-      const pr = p.panel.getBoundingClientRect();
-      const avail = pr.left - p.port.getBoundingClientRect().left - 16;
-      const w = +p.svg.dataset.w;
-      const k = clamp(Math.max(READ, Math.min(view.k, avail / w)));
-      if (move && w * k <= avail) {
-        // the whole graph fits left of the panel: show it there
-        const cy = p.port.clientHeight / 2;
-        view.y = cy - ((cy - view.y) * k) / view.k;
-        view.x = (avail - w * k) / 2;
-        view.k = k;
-        apply(p);
-      } else if (move && n) {
-        // it does not: centre the task in the room left, its neighbours
-        // either side of it
-        const nr = n.getBoundingClientRect();
-        view.x += p.port.getBoundingClientRect().left + avail / 2 - (nr.left + nr.width / 2);
-        apply(p);
-      }
-    } else p.panel.style.maxHeight = "";
+    // the panel takes its own column beside the well (below it on a
+    // phone): the well narrows, nothing hides under the panel. The view
+    // then shows the whole graph if it still reads, else centres the task,
+    // its neighbours either side.
+    p.box.classList.add("panel-open");
+    p.panel.style.maxHeight = getComputedStyle(p.panel).position === "absolute" ? p.port.clientHeight + "px" : "";
+    if (move) reveal(p, i);
     if (focus) p.panel.focus({ preventScroll: true });
+  }
+
+  // reveal brings task i into view in the well as it is now, the first
+  // that reads (zoom at least READ): the whole graph; the task with all it
+  // waits on and all that waits on it; the task and all that waits on it;
+  // else the task centred, its neighbours either side.
+  function reveal(p, i) {
+    const cw = p.port.clientWidth, ch = p.port.clientHeight, pad = 16;
+    const w = +p.svg.dataset.w, h = +p.svg.dataset.h;
+    if (Math.min(1, cw / w, ch / h) >= READ) return fit(p);
+    const l = lineage(p.svg, i);
+    for (const ids of [l.tasks, l.down, new Set([String(i)])]) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const id of ids) {
+        const n = node(id);
+        const box = n && n.querySelector(".box");
+        if (!box) continue;
+        const [x, y] = n.getAttribute("transform").match(/[-\d.]+/g).map(Number);
+        x0 = Math.min(x0, x);
+        y0 = Math.min(y0, y);
+        x1 = Math.max(x1, x + +box.getAttribute("width"));
+        y1 = Math.max(y1, y + +box.getAttribute("height"));
+      }
+      if (x1 < x0) return;
+      let k = Math.min(1, (cw - 2 * pad) / (x1 - x0), (ch - 2 * pad) / (y1 - y0));
+      if (ids.size === 1) k = Math.max(READ, Math.min(view.k, 1)); // the task alone: as close as it is
+      else if (k < READ) continue;
+      view = { k, x: (cw - (x0 + x1) * k) / 2, y: (ch - (y0 + y1) * k) / 2 };
+      return apply(p);
+    }
   }
 
   function close() {
@@ -168,6 +188,7 @@
     const i = open;
     open = null;
     p.panel.hidden = true;
+    p.box.classList.remove("panel-open");
     p.svg.querySelectorAll(".node.sel").forEach((n) => n.classList.remove("sel"));
     const n = node(i);
     if (n) n.focus({ preventScroll: true });
