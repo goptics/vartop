@@ -1,0 +1,25 @@
+{{define "live_body"}}{{with .Grid}}{{$pods := .Pods}}
+{{if not $pods}}<p class="empty">No {{$.Noun.Many}} to show.</p>
+{{else if not .Rows}}<p class="empty">No workers reported yet.</p>
+{{else}}<p class="legend">Each cell: status · busy/concurrency · pending</p>
+<div class="table-wrap grid-wrap" tabindex="0" aria-label="Workers by {{$.Noun.One}}">
+<table class="grid">
+  <thead><tr>
+    <th>Worker</th>{{range $pods}}
+    <th{{if and .Err (not $.Stale)}} class="down"{{end}} title="{{.Tip}}">{{.Label}}{{if and .Err (not $.Stale)}}<small class="err">unreachable</small>{{end}}</th>{{end}}
+  </tr></thead>
+  <tbody>{{range .Rows}}
+  <tr>
+    <th scope="row" class="name"><a id="link-{{domID .Name}}" href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></th>{{range $i, $c := .Cells}}
+    <td{{if and (index $pods $i).Err (not $.Stale)}} class="down"{{end}}>{{if $.Stale}}—{{else if $c.Present}}<span class="cell" style="--busy: {{$c.Busy}}; --conc: {{$c.Concurrency}}"><span class="status {{$c.Class}}">{{$c.Status}}</span><span class="load">{{$c.Busy}}/{{$c.Concurrency}}</span><span class="pend" title="pending">{{$c.Pending}}</span></span>{{else if $c.Unreached}}<span class="na">not reached</span>{{else}}<span class="na">—</span>{{end}}</td>{{end}}
+  </tr>{{end}}
+  </tbody>
+</table>
+</div>
+<ul class="units">{{range $pods}}<li><b>{{.Label}}</b> {{.Tip}}{{if and .Err (not $.Stale)}}: <span class="err">{{.Err}}</span>{{end}}</li>{{end}}</ul>{{end}}
+{{end}}{{end}}
+
+{{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
+
+{{define "content"}}<header class="pagehead"><h1>{{.Noun.Cap}} grid</h1><p class="sub">Every worker on every {{.Noun.One}}</p></header>
+{{template "live" .}}{{end}}

@@ -1,0 +1,43 @@
+{{/* step_icon: the timeline icon of a job step: enqueued, started, finished or failed */}}
+{{define "step_icon"}}<svg class="ico" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false">{{if eq . "enqueued"}}<path d="M12 3v10M8 9l4 4 4-4M4 15v4h16v-4"/>{{else if eq . "started"}}<path class="fill" d="M8 5v14l11-7z"/>{{else if eq . "failed"}}<path d="M6 6l12 12M18 6 6 18"/>{{else}}<path d="M5 12.5 10 17 19 7"/>{{end}}</svg>{{end}}
+{{/* arrow: a 16px stroke arrow, "left" or "right" */}}
+{{define "arrow"}}<svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">{{if eq . "left"}}<path d="M13 8H3M7 4 3 8l4 4"/>{{else}}<path d="M3 8h10M9 4l4 4-4 4"/>{{end}}</svg>{{end}}
+{{define "content"}}{{with .Jobs}}<nav class="crumbs" aria-label="Breadcrumb"><a href="{{queuesURL $.Server}}">Queues</a><span aria-hidden="true">/</span><span aria-current="page" class="mono">{{.Queue.ID}}</span></nav>{{end}}
+{{with .Jobs}}{{$state := .State}}<header class="qhead">
+  <h1 class="qid">{{.Queue.ID}}</h1>
+  <p class="sub">Reported by {{range .Queue.On}}<span class="chip">{{.}}</span> {{end}}</p>
+</header>
+<nav class="states" aria-label="Job state">{{range .Tabs}}<a href="{{.URL}}" class="state-{{.State}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.State}}</span>{{if ge .Count 0}}<span class="count">{{.Count}}</span>{{end}}</a>{{end}}</nav>
+{{if .Jobs}}<section class="joblist" aria-label="{{.State}} jobs">
+<p class="listhead"><span><span class="st">{{.State}}</span> jobs</span><span>{{(index .Jobs 0).N}}–{{.Last}}{{if ge .Total 0}} of {{.Total}}{{end}}</span></p>
+<ol class="jobs" role="list" start="{{(index .Jobs 0).N}}">{{range .Jobs}}
+  <li class="job state-{{$state}}"><details>
+    <summary>
+      <span class="dot" aria-hidden="true"></span>
+      {{with .ID}}<span class="id">{{.}}</span>{{else}}<span class="id none">(no ID yet)</span>{{end}}
+      {{if .When}}<time class="when" datetime="{{.WhenISO}}" title="{{.WhenFull}}">{{.When}}</time>{{end}}
+      <svg class="chev ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M6 4l4 4-4 4"/></svg>
+      {{if .Preview}}<span class="preview{{if .LastError}} err{{end}}">{{.Preview}}</span>{{end}}
+      {{if .Attempts}}<span class="att">{{.Attempts}} attempt{{if ne .Attempts 1}}s{{end}}</span>{{end}}
+    </summary>
+    <div class="job-body">
+      <section aria-label="Times">
+        <h2>Timeline</h2>
+        <ol class="timeline">
+          <li class="step-enqueued{{if not .Enqueued}} none{{end}}">{{template "step_icon" "enqueued"}}<span class="what">Enqueued</span>{{if .Enqueued}}<time datetime="{{.EnqueuedISO}}">{{.Enqueued}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+          <li class="step-started{{if not .Started}} none{{end}}">{{template "step_icon" "started"}}<span class="what">Started</span>{{if .Started}}<time datetime="{{.StartedISO}}">{{.Started}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+          <li class="step-{{if eq $state "failed"}}failed{{else}}finished{{end}}{{if not .Finished}} none{{end}}">{{template "step_icon" (or (and (eq $state "failed") "failed") "finished")}}<span class="what">Finished</span>{{if .Finished}}<time datetime="{{.FinishISO}}">{{.Finished}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+        </ol>
+        {{with .Errors}}<h2>Errors</h2>
+        <ol class="errors">{{range .}}<li><span class="what">Attempt {{.Attempt}}</span>{{if .At}}<time datetime="{{.AtISO}}">{{.At}}</time>{{end}}<code class="err">{{.Error}}</code></li>{{end}}</ol>{{end}}
+      </section>
+      <section aria-label="Payload">
+        <h2>Payload{{if .Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h2>
+        <pre class="payload" tabindex="0">{{or .Payload "null"}}</pre>
+      </section>
+    </div>
+  </details></li>{{end}}
+</ol></section>{{else if not $.Banner}}<p class="empty">No {{.State}} jobs{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
+{{if or .Prev .Next}}<nav class="pager" aria-label="Pages">{{with .Prev}}<a href="{{.}}" rel="prev">{{template "arrow" "left"}}Previous</a>{{end}}{{with .Pages}}<span class="nums">{{range .}}{{if not .N}}<span class="gap" aria-hidden="true">…</span>{{else if .Current}}<a href="{{.URL}}" aria-current="true">{{.N}}</a>{{else}}<a href="{{.URL}}" aria-label="Page {{.N}}">{{.N}}</a>{{end}}{{end}}</span>{{end}}{{with .Next}}<a href="{{.}}" rel="next">Next{{template "arrow" "right"}}</a>{{end}}</nav>{{end}}
+{{with .From}}<p class="pods">Read from {{.}}</p>{{end}}
+{{end}}{{end}}

@@ -1,0 +1,63 @@
+{{define "server_field"}}<input type="hidden" name="server" value="{{.Server}}">{{end}}
+{{define "label_field"}}<input type="hidden" name="{{.Noun.Param}}" value="{{.Pod}}">{{end}}
+{{define "range_fields"}}{{with .Ranges.Completed}}<input type="hidden" name="completed" value="{{spanParam .}}">{{end}}{{with .Ranges.Failed}}<input type="hidden" name="failed" value="{{spanParam .}}">{{end}}{{end}}
+{{define "range_switch"}}<span class="seg" role="group" aria-label="Span">{{range .}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}} id="{{.ID}}" hx-get="{{.URL}}" hx-target="body" hx-push-url="true" hx-sync="#page:replace">{{.Text}}</a>{{end}}</span>{{end}}
+{{define "spark"}}<svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>{{end}}
+{{define "history"}}<div class="history">
+  <div class="axis-y">{{range .YTicks}}<span style="top:{{.Pct}}%">{{.Label}}</span>{{end}}</div>
+  <svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .YTicks}}<line class="grid" x1="0" x2="{{$.PlotW}}" y1="{{.Grid}}" y2="{{.Grid}}"/>{{end}}{{range .XTicks}}<line class="grid" x1="{{.Grid}}" x2="{{.Grid}}" y1="0" y2="{{$.PlotH}}"/>{{end}}{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}<line class="cross" x1="0" x2="0" y1="0" y2="{{.PlotH}}"/>{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>
+  <div class="axis-x">{{range .XTicks}}<span style="left:{{.Pct}}%">{{.Label}}</span>{{end}}</div>
+  <div class="tip" hidden></div>
+</div>{{end}}
+{{/* nav_icon: 16px stroke icon of a nav page: dashboard, grid or queues */}}
+{{define "nav_icon"}}<svg class="ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">{{if eq . "dashboard"}}<path d="M2 13.5h12M4 11V7.5M8 11V3.5M12 11V6"/>{{else if eq . "grid"}}<rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M2 6.5h12M2 10.5h12M6.5 2v12M10.5 2v12"/>{{else}}<path d="M2.5 4h11M2.5 8h11M2.5 12h7"/>{{end}}</svg>{{end}}
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true,"target":"#errors","swapOverride":"innerHTML"}]}'>
+{{if .Waiting}}<meta http-equiv="refresh" content="2">
+{{end}}<title>{{or .Title "vartop"}}</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx-2.0.4.min.js" defer></script>
+{{if .Detail}}<script src="/static/detail.js" defer></script>
+{{end}}
+</head>
+<body id="page">
+<header class="rail">
+  <a class="brand" href="{{pageURL "/" .Server .Noun.Param .Pod}}"><svg class="ico" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M3 5h14M3 10h10M3 15h6" stroke-width="2.2"/></svg>vartop</a>
+  <nav aria-label="Pages">
+    <a href="{{pageURL "/" .Server .Noun.Param .Pod}}"{{if .Dashboard}} aria-current="page"{{end}}>{{template "nav_icon" "dashboard"}}Dashboard</a>
+    <a href="{{pageURL "/grid" .Server .Noun.Param .Pod}}"{{if .Grid}} aria-current="page"{{end}}>{{template "nav_icon" "grid"}}{{.Noun.Cap}} grid</a>
+    <a href="{{queuesURL .Server}}"{{if or .Queues .Jobs}} aria-current="page"{{end}}>{{template "nav_icon" "queues"}}Queues</a>
+  </nav>
+  <div class="scope">
+  {{if .Servers}}<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
+    <label>Server <select name="server" id="pick-server">{{if .Unconfigured}}<option value="{{.Server}}" selected disabled>{{.Server}}</option>{{end}}{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+  </form>{{end}}
+  {{if .Pods}}<form class="pick" hx-get="{{pathOf .SelfURL}}" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
+    {{template "server_field" .}}
+    {{template "range_fields" .}}
+    <label>{{.Noun.Cap}} <select name="{{.Noun.Param}}" id="pick-unit"><option value=""{{if not .Pod}} selected{{end}}>All {{.Noun.Many}} (merged)</option>{{range .Pods}}<option value="{{.Label}}"{{if eq .Label $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}{{with .Gone}}<option value="{{.}}" selected disabled>{{.}}</option>{{end}}</select></label>
+  </form>{{end}}
+  </div>
+<div id="status">{{if not .Waiting}}
+  <span class="health{{if not .Stale}}{{if eq .Health.Healthy .Health.Total}} h-ok{{else if .Health.Healthy}} h-warn{{else}} h-bad{{end}}{{end}}" title="healthy / total {{.Noun.Many}}">{{if .Stale}}—{{else}}{{.Health.Healthy}}/{{.Health.Total}}{{end}} {{.Noun.Many}}</span>
+  {{if gt .IntervalSec 0}}<span class="interval">refresh every {{.IntervalSec}}s</span>{{end}}
+  {{with .Updated}}<span class="updated{{if $.Stale}} stale{{end}}">updated {{.}}</span>{{end}}
+  {{if and .Note (not .Stale)}}<p class="note" role="note">{{.Note}}</p>{{end}}{{end}}
+</div>
+</header>
+<div class="main-col">
+<div id="errors" role="alert"></div>
+<div id="banner" role="status">{{with .Stale}}<p class="banner stale">{{.}}</p>{{end}}{{if .Banner}}<p class="banner">{{.Banner}}{{if .Gone}} · <a id="banner-merged" href="{{pageURL (pathOf .SelfURL) .Server "" ""}}">All {{.Noun.Many}} (merged)</a>{{end}}</p>{{end}}</div>
+<main>
+{{if .Waiting}}<p class="waiting" role="status">{{.Waiting}}</p>{{end}}
+{{template "content" .}}
+</main>
+</div>
+{{if and (gt .IntervalSec 0) (not .Waiting)}}<div id="poller" hidden hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="#live" hx-swap="outerHTML" hx-sync="#page:drop"></div>{{end}}
+</body>
+</html>
+{{end}}
