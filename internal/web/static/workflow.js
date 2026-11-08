@@ -313,13 +313,34 @@
     if (n && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest(".dag .node"))) trace(null);
   });
 
-  // the poll swaps #live: keep the focused task, take the new graph over
+  // keyOf names a control of #live that a swap replaces, so the same one
+  // of the new #live can take focus back: the zoom buttons, the panel's
+  // close, the cancel buttons, the graph well.
+  function keyOf(el) {
+    if (!el || !el.closest || !el.closest("#live")) return null;
+    if (el.matches("[data-zoom]")) return `[data-zoom="${el.dataset.zoom}"]`;
+    if (el.matches(".wf-panel .close")) return ".wf-panel .close";
+    if (el.matches("#wfctl button")) return el.name ? "#wfctl button[name]" : "#wfctl button:not([name])";
+    if (el.matches(".dag-port")) return ".dag-port";
+    return null;
+  }
+  let control = null;
+
+  // the poll swaps #live: keep the focused task or control, take the new
+  // graph over
   document.addEventListener("htmx:beforeSwap", () => {
-    const f = document.activeElement && document.activeElement.closest && document.activeElement.closest(".dag .node");
+    const a = document.activeElement;
+    const f = a && a.closest && a.closest(".dag .node");
     focused = f ? f.dataset.i : null;
+    control = keyOf(a);
   });
   document.addEventListener("htmx:afterSwap", () => {
     init();
+    if (control) {
+      const c = document.querySelector("#live " + control);
+      if (c && !c.closest("[hidden]")) c.focus({ preventScroll: true });
+      control = null;
+    }
     const f = document.activeElement && document.activeElement.closest && document.activeElement.closest(".dag .node");
     if (f) trace(f.dataset.i);
   });
