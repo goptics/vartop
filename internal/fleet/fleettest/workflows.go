@@ -187,7 +187,8 @@ const (
 // SampleWorkflows are four workflows created before now (Unix ms), for
 // tests and screenshots: a diamond whose join is always, a running ETL
 // with a long edge, a saga compensated after a failure, and a cancelled
-// report. Each call returns new ones.
+// report. Their queues are on every backend the pages name: redisq,
+// sqliteq, in-memory and other storage. Each call returns new ones.
 func SampleWorkflows(now int64) []*Workflow {
 	const (
 		sec    = int64(1000)
@@ -197,10 +198,10 @@ func SampleWorkflows(now int64) []*Workflow {
 		return contract.TaskRecord{Name: name, QueueID: queue, JobID: name + "-1", State: state, Deps: deps}
 	}
 	diamond := []contract.TaskRecord{
-		t("fetch-image", "redisq:shop:fifo:{images}", contract.JobCompleted),
-		t("resize", "redisq:shop:fifo:{images}", contract.JobCompleted, "fetch-image"),
+		t("fetch-image", "sqliteq:9f86d081:fifo:images", contract.JobCompleted),
+		t("resize", "sqliteq:9f86d081:fifo:images", contract.JobCompleted, "fetch-image"),
 		t("scan-nsfw", "redisq:shop:prio:{moderation}", contract.JobFailed, "fetch-image"),
-		t("publish", "redisq:shop:fifo:{cdn}", contract.JobCompleted, "resize", "scan-nsfw"),
+		t("publish", "s3sync/cdn", contract.JobCompleted, "resize", "scan-nsfw"),
 	}
 	diamond[0].ResultSize, diamond[1].ResultSize = 48213, 9120
 	diamond[2].Reason = "classifier: model not loaded"
@@ -231,10 +232,10 @@ func SampleWorkflows(now int64) []*Workflow {
 	saga[3].Reason = "dependency failed"
 
 	report := []contract.TaskRecord{
-		t("gather", "memory:shop-a:reports", contract.JobCompleted),
-		t("aggregate", "memory:shop-a:reports", contract.JobCancelled, "gather"),
-		t("render-pdf", "memory:shop-a:reports", contract.JobCancelled, "aggregate"),
-		t("email", "memory:shop-a:emails", contract.JobCancelled, "render-pdf"),
+		t("gather", "memory:shop-a:fifo:1", contract.JobCompleted),
+		t("aggregate", "memory:shop-a:fifo:1", contract.JobCancelled, "gather"),
+		t("render-pdf", "memory:shop-a:fifo:1", contract.JobCancelled, "aggregate"),
+		t("email", "memory:shop-a:fifo:2", contract.JobCancelled, "render-pdf"),
 	}
 	for i := 1; i < 4; i++ {
 		report[i].Reason = "workflow cancelled"
