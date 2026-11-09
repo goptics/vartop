@@ -81,7 +81,7 @@ func TestPollOnceBuildsSnapshot(t *testing.T) {
 	pool := fleettest.StaticPool(t, b.URL, a.URL)
 
 	start := time.Now()
-	s := pollOnce(context.Background(), pool, newTracker(time.Second, false))
+	s := pollOnce(context.Background(), pool, newTracker(time.Second))
 	end := time.Now()
 
 	if s.At.Before(start) || s.At.After(end) {
@@ -95,7 +95,7 @@ func TestPollOnceBuildsSnapshot(t *testing.T) {
 		t.Fatalf("pods = %v, want sorted %v", gotEPs, wantEPs)
 	}
 	for i, p := range s.Pods {
-		// Not a Kubernetes server: numbered in endpoint order.
+		// Numbered in endpoint order.
 		if want := fmt.Sprintf("instance-%d", i+1); p.Label != want {
 			t.Errorf("%s: Label = %q, want %q", p.Key, p.Label, want)
 		}
@@ -133,7 +133,7 @@ func TestPollOnceSkipsWorkerGoneBeforeGet(t *testing.T) {
 		"w2": nil, // listed, then 404 on GET
 	})
 
-	pod := podByEndpoint(t, pollOnce(context.Background(), fleettest.StaticPool(t, srv.URL), newTracker(time.Second, false)), srv.URL)
+	pod := podByEndpoint(t, pollOnce(context.Background(), fleettest.StaticPool(t, srv.URL), newTracker(time.Second)), srv.URL)
 
 	if countCalls(f.Calls(), "GET /workers/w2") != 1 {
 		t.Fatalf("w2 was not fetched: calls %v", f.Calls())
@@ -160,7 +160,7 @@ func TestPollOnceWorkerFetchErrorMarksPod(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	pod := podByEndpoint(t, pollOnce(context.Background(), fleettest.StaticPool(t, srv.URL), newTracker(time.Second, false)), srv.URL)
+	pod := podByEndpoint(t, pollOnce(context.Background(), fleettest.StaticPool(t, srv.URL), newTracker(time.Second)), srv.URL)
 
 	// Not a 404: the worker may still exist, so the pod is unknown rather
 	// than healthy-without-w2.
@@ -178,7 +178,7 @@ func TestPollOnceSlowPodTimesOut(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	s := pollOnce(ctx, pool, newTracker(time.Second, true))
+	s := pollOnce(ctx, pool, newTracker(time.Second))
 	if elapsed := time.Since(start); elapsed >= 400*time.Millisecond {
 		t.Errorf("pollOnce took %v, want it bounded by the 100ms deadline", elapsed)
 	}
@@ -190,56 +190,18 @@ func TestPollOnceSlowPodTimesOut(t *testing.T) {
 	if pa.Err != "" || !slices.Equal(sampleNames(pa), []string{"orders"}) {
 		t.Errorf("fast pod: Err = %q, workers %v; want healthy with orders", pa.Err, sampleNames(pa))
 	}
-	// Labelled as on a Kubernetes server: captured after its requests, the
-	// pod name falls back to the instance that answered.
-	if pa.Label != "a" {
-		t.Errorf("fast pod Label = %q, want its instance %q", pa.Label, "a")
-	}
 }
 
 func TestPollOnceEscapesNames(t *testing.T) {
 	f, srv := fleettest.NewVarmq(t, "i", map[string]*fleettest.Worker{"a/b c": {Status: "Running"}})
 
-	pod := podByEndpoint(t, pollOnce(context.Background(), fleettest.StaticPool(t, srv.URL), newTracker(time.Second, false)), srv.URL)
+	pod := podByEndpoint(t, pollOnce(context.Background(), fleettest.StaticPool(t, srv.URL), newTracker(time.Second)), srv.URL)
 
 	if !slices.Contains(f.Calls(), "GET /workers/a%2Fb%20c") {
 		t.Errorf("calls = %v, want the escaped name", f.Calls())
 	}
 	if pod.Err != "" || pod.Workers["a/b c"] == nil {
 		t.Errorf("Err = %q, workers %v; want the sample under its raw name", pod.Err, sampleNames(pod))
-	}
-}
-
-func TestLabelCollisionsFallBack(t *testing.T) {
-	pods := []PodSnapshot{
-		{Key: "http://h:1/a", Label: "x"},
-		{Key: "http://h:1/b", Label: "x"},
-		{Key: "http://h:2", Label: "x"},
-		{Key: "http://h:3", Label: "y"},
-	}
-
-	dedupeLabels(pods)
-
-	got := make([]string, len(pods))
-	for i, p := range pods {
-		got[i] = p.Label
-	}
-	want := []string{"http://h:1/a", "http://h:1/b", "h:2", "y"}
-	if !slices.Equal(got, want) {
-		t.Errorf("labels = %q, want %q", got, want)
-	}
-}
-
-func TestLabelCollisionsFallBackOnVia(t *testing.T) {
-	pods := []PodSnapshot{
-		{Key: "#a", Via: "http://h:1/lb", Label: "x"},
-		{Key: "http://h:2", Via: "http://h:2", Label: "x"},
-	}
-
-	dedupeLabels(pods)
-
-	if got, want := []string{pods[0].Label, pods[1].Label}, []string{"h:1", "h:2"}; !slices.Equal(got, want) {
-		t.Errorf("labels = %q, want %q (host:port of the address each was reached through)", got, want)
 	}
 }
 

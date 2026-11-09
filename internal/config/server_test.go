@@ -127,7 +127,7 @@ func TestLoadRoundTripsDNSServerBlock(t *testing.T) {
 	if *got.DNS != *in.Servers["d"].DNS {
 		t.Fatalf("DNS = %+v, want %+v", *got.DNS, *in.Servers["d"].DNS)
 	}
-	if got.Token != "tok" || got.Interval != 4 || len(got.Endpoints) != 0 || got.Kubernetes != nil {
+	if got.Token != "tok" || got.Interval != 4 || len(got.Endpoints) != 0 {
 		t.Fatalf("unexpected server after round trip: %+v", got)
 	}
 	if out.DefaultServer != "d" {

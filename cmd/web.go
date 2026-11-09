@@ -233,10 +233,10 @@ func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(stri
 }
 
 // ownLease is this vartop as the lease records its collector: its pid, and
-// the environment collection depends on.
+// the config it collects with.
 func ownLease() store.Lease {
 	path, _ := config.Path() // "" when there is no config dir: the collector reads no config either
-	return store.Lease{PID: os.Getpid(), ConfigPath: path, Kubeconfig: os.Getenv("KUBECONFIG")}
+	return store.Lease{PID: os.Getpid(), ConfigPath: path}
 }
 
 // readConfig is the collector's Options.Config: the config, and where its
@@ -252,12 +252,12 @@ func readConfig() (*config.Config, string, error) {
 }
 
 // sameEnv reports whether the collectors of leases a and b collect in the
-// same environment: the same config path and KUBECONFIG. vartop web acts
+// same environment: the same config path. vartop web acts
 // on a server only while the collector collects in its environment (R31):
 // the token it sends must not go to endpoints discovered under another
 // config.
 func sameEnv(a, b store.Lease) bool {
-	return a.ConfigPath == b.ConfigPath && a.Kubeconfig == b.Kubeconfig
+	return a.ConfigPath == b.ConfigPath
 }
 
 // sameEnvAsOwn returns vartop web's check of a lease (R31): whether its

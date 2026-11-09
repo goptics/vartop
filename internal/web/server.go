@@ -80,7 +80,7 @@ type Source struct {
 	Config  func() (*config.Config, error)
 	Control *store.Control // the collector's lease, the servers' errors and pokes
 	// SameEnv reports whether a collector's lease is of this vartop's
-	// environment: its config file and KUBECONFIG (R31). Nil: every lease
+	// environment: its config file (R31). Nil: every lease
 	// is.
 	SameEnv func(store.Lease) bool
 }
@@ -326,7 +326,7 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 		return p, nil, false
 	}
 	p.Noun = fleet.NounFor(srv)
-	p.Pod = labelOf(srv, r.FormValue(p.Noun.Param))
+	p.Pod = r.FormValue(p.Noun.Param)
 	// The poller asks for what this page shows, its server and unit named,
 	// whatever the URL left out or carried besides; the path stays escaped.
 	p.Spans = spansOf(srv.HistorySpan())
@@ -407,18 +407,6 @@ func serverOf(cfg *config.Config, want string) string {
 		return keys[0]
 	}
 	return ""
-}
-
-// labelOf is the unit label a page's URL value names on srv: value
-// itself, but on Kubernetes a value shaped like a unit key — "#" and an
-// instance ID, or a URL, what pod= held before labels — which no pod name
-// is: then none, so that an old link shows the merged view. A POST takes
-// its value as it is (see bind).
-func labelOf(srv *config.Server, value string) string {
-	if srv.Kubernetes != nil && (strings.HasPrefix(value, "#") || strings.Contains(value, "://")) {
-		return ""
-	}
-	return value
 }
 
 // collecting reports whether a collector holds a fresh lease. A lease that

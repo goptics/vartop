@@ -48,7 +48,7 @@ type Options struct {
 	// size changes.
 	Config func() (*config.Config, string, error)
 	// BuildPool makes a server's pool; api.PoolFor when nil. It may hang
-	// (a Kubernetes credential plugin waiting for input): that holds up
+	// (a discovery source that blocks): that holds up
 	// its server only.
 	BuildPool func(*config.Server) (*api.Pool, error)
 	Lease     store.Lease      // what the lease is claimed as

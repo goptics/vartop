@@ -14,8 +14,8 @@ import (
 	"github.com/goptics/vartop/internal/store"
 )
 
-// The nouns of a Kubernetes server and of every other. Fixtures that name
-// no server pick one.
+// The instance noun every server has, and a "pod" one that fixtures use to
+// check that pages word themselves by the Noun they are given.
 var (
 	podNoun      = fleet.Noun{One: "pod", Many: "pods", Article: "a", Param: "pod"}
 	instanceNoun = fleet.Noun{One: "instance", Many: "instances", Article: "an", Param: "instance"}

@@ -70,7 +70,6 @@ func TestServerListShowsAllKindsAndStatus(t *testing.T) {
 	saveServersConfig(t, "live",
 		&config.Server{Name: "live", Endpoints: []string{healthy}, Token: "super-secret", Interval: 5, History: "7d"},
 		&config.Server{Name: "down", Endpoints: []string{dead}, Interval: 3},
-		&config.Server{Name: "kube", Kubernetes: &config.KubernetesRef{Context: "ctx", Namespace: "ns", Service: "varmq"}},
 		&config.Server{Name: "dnsy", DNS: &config.DNSRef{Host: "varmq.local", Port: 8080}},
 	)
 
@@ -83,7 +82,6 @@ func TestServerListShowsAllKindsAndStatus(t *testing.T) {
 		"Default Server: live",
 		"* live [Active]",
 		"  down [Inactive]",
-		"  kube [kubernetes ctx/ns]",
 		"  dnsy [dns varmq.local:8080]",
 		"Endpoint: " + healthy,
 		"Endpoint: " + dead,

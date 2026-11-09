@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -394,26 +392,6 @@ func TestPoolForDNSUnresolvable(t *testing.T) {
 	if err == nil {
 		pool.Close()
 		t.Fatal("expected error for unresolvable host, got nil")
-	}
-	if pool != nil {
-		t.Errorf("pool = %v, want nil on error", pool)
-	}
-}
-
-func TestPoolForKubernetesBadContext(t *testing.T) {
-	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
-	if err := os.WriteFile(kubeconfig, []byte("apiVersion: v1\nkind: Config\ncontexts: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("KUBECONFIG", kubeconfig)
-
-	pool, err := PoolFor(&config.Server{
-		Name:       "k8s",
-		Kubernetes: &config.KubernetesRef{Context: "nope", Namespace: "default", Service: "x"},
-	})
-	if err == nil {
-		pool.Close()
-		t.Fatal("expected error for unknown kube context, got nil")
 	}
 	if pool != nil {
 		t.Errorf("pool = %v, want nil on error", pool)

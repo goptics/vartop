@@ -199,6 +199,38 @@ func TestLoadOrOnboardRejectsCorruptConfig(t *testing.T) {
 	}
 }
 
+// TestLoadOrOnboardRejectsKubernetesConfig: a legacy kubernetes config is an
+// error, never a reason to onboard, which would overwrite the file.
+func TestLoadOrOnboardRejectsKubernetesConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	path := filepath.Join(dir, "vartop", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"servers":{"k":{"name":"k","kubernetes":{"context":"prod","namespace":"jobs","service":"varmq"}}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		cfg, err := loadOrOnboard()
+		if cfg != nil {
+			t.Errorf("loadOrOnboard() config = %+v, want nil", cfg)
+		}
+		return err
+	})
+	if !errors.Is(err, config.ErrKubernetesRemoved) {
+		t.Errorf("loadOrOnboard() error = %v, want ErrKubernetesRemoved", err)
+	}
+	if out != "" {
+		t.Errorf("loadOrOnboard() printed %q: onboarding started", out)
+	}
+	if data, _ := os.ReadFile(path); string(data) != body {
+		t.Errorf("config file now holds %q, want it untouched", data)
+	}
+}
+
 // TestWebCmdSilencesUsage: a runtime error (port in use, shutdown) is not a
 // usage mistake, so it must not print the usage text.
 func TestWebCmdSilencesUsage(t *testing.T) {
@@ -367,7 +399,7 @@ func TestWebLogsStoreNotices(t *testing.T) {
 }
 
 // TestWebSourceChecksEnv (R31): vartop web checks the collector's lease
-// against its own environment — its config file and KUBECONFIG.
+// against its own environment — its config file.
 func TestWebSourceChecksEnv(t *testing.T) {
 	isolate(t)
 	src, release, err := webSource()
@@ -390,14 +422,12 @@ func TestWebSourceChecksEnv(t *testing.T) {
 }
 
 // TestSameEnv (R31): two leases are of one environment when their config
-// path and KUBECONFIG agree, whatever their pid; vartop web's own lease is
-// of its own, KUBECONFIG set or not.
+// path agrees, whatever their pid; vartop web's own lease is of its own.
 func TestSameEnv(t *testing.T) {
 	isolate(t)
-	t.Setenv("KUBECONFIG", "/home/u/.kube/prod")
 	own := ownLease()
-	if own.Kubeconfig != "/home/u/.kube/prod" || own.ConfigPath == "" {
-		t.Fatalf("ownLease = %+v, want this environment's config path and KUBECONFIG", own)
+	if own.ConfigPath == "" {
+		t.Fatalf("ownLease = %+v, want this environment's config path", own)
 	}
 	with := func(edit func(*store.Lease)) store.Lease { l := own; edit(&l); return l }
 	for _, c := range []struct {
@@ -408,15 +438,13 @@ func TestSameEnv(t *testing.T) {
 		{"identical", own, true},
 		{"another pid", with(func(l *store.Lease) { l.PID++ }), true},
 		{"another config path", with(func(l *store.Lease) { l.ConfigPath = "/elsewhere/vartop/config.json" }), false},
-		{"another KUBECONFIG", with(func(l *store.Lease) { l.Kubeconfig = "/home/u/.kube/staging" }), false},
-		{"KUBECONFIG unset", with(func(l *store.Lease) { l.Kubeconfig = "" }), false},
 	} {
 		if got := sameEnv(c.l, own); got != c.want {
 			t.Errorf("%s: sameEnv = %v, want %v", c.name, got, c.want)
 		}
 	}
 	if !sameEnvAsOwn()(own) {
-		t.Error("sameEnvAsOwn refuses this vartop's own lease with KUBECONFIG set")
+		t.Error("sameEnvAsOwn refuses this vartop's own lease")
 	}
 }
 
@@ -646,7 +674,6 @@ func isolate(t *testing.T) string {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	dataDir := filepath.Join(home, "data")
 	t.Setenv("VARTOP_DATA_DIR", dataDir)
-	t.Setenv("KUBECONFIG", "")
 	return dataDir
 }
 

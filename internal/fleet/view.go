@@ -16,7 +16,7 @@ import (
 // writes to them.
 //
 // Terms used throughout (a "pod" is a unit, one varmq instance; the pages call
-// it by the server's Noun, "pod" on Kubernetes and "instance" elsewhere):
+// it "instance" via the server's Noun):
 //   - healthy pod: PodSnapshot.Err == "". Errored pods contribute nothing, not
 //     even workers they may still carry.
 //   - reporting pod (for a worker): healthy and has that worker.

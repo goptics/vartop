@@ -400,11 +400,6 @@ func threeVarmqs(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server) {
 	return varmqs, fakes
 }
 
-// kubernetesServer is discovered through Kubernetes, the one kind of server
-// whose units are pods. unitsFixture builds its pool, so no cluster is
-// reached; its pods are labelled by the instance that answered.
-var kubernetesServer = config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}
-
 // unitsFixture serves the web UI over a collector whose only server, "multi",
 // is a copy of server polling src's endpoints every second. It returns once
 // the first snapshot is in.

@@ -37,8 +37,8 @@ func WaitUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 	}
 }
 
-// StaticLabels is how a collector first labels the units of a non-Kubernetes
-// server over the endpoints urls: instance-1, instance-2, … in URL order.
+// StaticLabels is how a collector first labels a server's units
+// over the endpoints urls: instance-1, instance-2, … in URL order.
 func StaticLabels(urls ...string) map[string]string {
 	labels := make(map[string]string, len(urls))
 	for i, u := range slices.Sorted(slices.Values(urls)) {

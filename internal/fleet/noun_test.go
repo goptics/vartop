@@ -6,8 +6,8 @@ import (
 	"github.com/goptics/vartop/internal/config"
 )
 
-// The nouns of a Kubernetes server and of every other. Fixtures that name
-// no server pick one.
+// The instance noun every server has, and a "pod" one that fixtures use to
+// check that pages word themselves by the Noun they are given.
 var (
 	podNoun      = Noun{One: "pod", Many: "pods", Article: "a", Param: "pod"}
 	instanceNoun = Noun{One: "instance", Many: "instances", Article: "an", Param: "instance"}
@@ -19,7 +19,6 @@ func TestNounFor(t *testing.T) {
 		srv  *config.Server
 		want Noun
 	}{
-		{"kubernetes", &config.Server{Kubernetes: &config.KubernetesRef{Context: "prod", Namespace: "jobs", Service: "varmq"}}, podNoun},
 		{"static endpoints", &config.Server{Endpoints: []string{"http://a:1", "http://b:1"}}, instanceNoun},
 		{"dns", &config.Server{DNS: &config.DNSRef{Host: "varmq-headless", Port: 8080}}, instanceNoun},
 		{"nil", nil, instanceNoun},

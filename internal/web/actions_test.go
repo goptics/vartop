@@ -1128,7 +1128,6 @@ func TestActionResponsesUseNoun(t *testing.T) {
 		live       map[string]string // page the action came from → copy its #live carries
 	}{
 		{"static", config.Server{}, "instance", "pod", map[string]string{"/workers/emails": "Instances reporting:", "/": "Pending (max/instance)"}},
-		{"kubernetes", kubernetesServer, "pod", "instance", map[string]string{"/workers/emails": "Pods reporting:", "/": "Pending (max/pod)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := serveUnits(t, tc.server, threeFakes(t)...)
@@ -1349,7 +1348,6 @@ func TestOldFormPOSTSendsNothing(t *testing.T) {
 		names  string // a unit by the label the server gives it
 	}{
 		{"static", config.Server{}, "instance", "pod", "instance-1"},
-		{"kubernetes", kubernetesServer, "pod", "instance", "a"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			varmqs, fakes := threeVarmqs(t)
