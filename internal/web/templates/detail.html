@@ -21,10 +21,10 @@
 <h2 class="section" id="src-head">Sources <span class="sub">{{if gt $n 1}}{{$n}}, in the order the worker picks from them{{else}}what the worker pulls from{{end}}</span></h2>
 <div class="fan">
   <ol class="srcs">{{range .Nodes}}
-    <li>{{if .URL}}<a class="srcn" href="{{.URL}}">{{template "qname" .Queue}}{{template "prio" .}}</a>{{else}}<span class="srcn">{{if eq .Kind "topic"}}{{template "topic_icon"}}<span class="qnm">topic</span>{{else if .NoID}}<span class="qnm none">custom storage</span>{{else}}<span class="qnm">{{.Kind}}</span>{{end}}{{template "prio" .}}</span>{{end}}</li>{{end}}
+    <li>{{if .URL}}<a class="srcn" href="{{.URL}}">{{template "qname" .Queue}}{{template "prio" .}}</a>{{else}}<span class="srcn">{{if eq .Kind "topic"}}{{template "topic_icon"}}<span class="qnm">topic</span>{{else if eq .Kind "queue"}}<span class="qnm none">custom storage</span>{{else}}<span class="qnm">{{.Kind}}</span>{{end}}{{template "prio" .}}</span>{{end}}</li>{{end}}
   </ol>
   <div class="link" aria-hidden="true"></div>
-  <div class="wnode"><span class="nm"><span class="status {{$.Detail.Class}}"></span>{{$.Detail.Name}}</span>{{with .Label}}<small>{{.}}{{with $.WorkerSources.Hint}}: {{.}}{{end}}</small>{{end}}</div>
+  <div class="wnode"><span class="nm"><span class="status {{$.Detail.Class}}"></span>{{$.Detail.Name}}</span>{{with .Label}}<small>{{.}}</small>{{end}}</div>
 </div>
 {{if .Legacy}}<p class="sub srcnote">From <code>queue_ids</code>: this varmq (before API 1.5.0) does not say how the worker picks, or with what priorities.</p>{{end}}
 </section>{{end}}
