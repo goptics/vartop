@@ -166,6 +166,7 @@ type JobTab struct {
 // payload on one line, cut.
 type JobRow struct {
 	ID, LastError                      string
+	URL                                string // its job page, "" for none (see jobURL)
 	When, WhenISO, WhenFull, Preview   string
 	Errors                             []ErrorRow // oldest first
 	Attempts, N                        int        // N: its position in the state, from 1
@@ -325,7 +326,9 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 	}
 	v.From, v.Total = from, stateCount(g.Counts, v.State)
 	for i, j := range jobs {
-		v.Jobs = append(v.Jobs, jobRow(j, v.Offset+i+1))
+		row := jobRow(j, v.Offset+i+1)
+		row.URL = jobURL(g.ID, j.ID, p.Server)
+		v.Jobs = append(v.Jobs, row)
 	}
 	if v.Offset > 0 {
 		v.Prev = jobsURL(g.ID, p.Server, v.State, max(0, v.Offset-v.Limit), v.Limit)

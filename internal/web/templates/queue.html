@@ -1,5 +1,3 @@
-{{/* step_icon: the timeline icon of a job step: enqueued, started, finished or failed */}}
-{{define "step_icon"}}<svg class="ico" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false">{{if eq . "enqueued"}}<path d="M12 3v10M8 9l4 4 4-4M4 15v4h16v-4"/>{{else if eq . "started"}}<path class="fill" d="M8 5v14l11-7z"/>{{else if eq . "failed"}}<path d="M6 6l12 12M18 6 6 18"/>{{else if eq . "cancelled"}}<path d="M5 12h14"/>{{else}}<path d="M5 12.5 10 17 19 7"/>{{end}}</svg>{{end}}
 {{/* qstate: a queue's paused badge and its pause and resume buttons (QueueCtl) */}}
 {{define "qstate"}}<div id="qstate" class="qctl"{{if .OOB}} hx-swap-oob="outerHTML"{{end}}>{{if .Paused}}<span class="status paused"{{with .SinceFull}} title="paused at {{.}}"{{end}}>paused{{with .Since}} since <time datetime="{{$.SinceISO}}">{{.}}</time>{{end}}</span>{{end}}{{if .CanPause}}
   <form class="qact" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
@@ -8,8 +6,6 @@
     {{if .Resume}}<button type="button" hx-post="/queues/{{pathEscape .ID}}/actions/resume">Resume queue</button>{{end}}
   </form>{{else if .NoRoute}}<span class="sub">Pause and resume need varmq API 1.2.0 on an instance reporting this queue</span>{{end}}
 </div>{{end}}
-{{/* arrow: a 16px stroke arrow, "left" or "right" */}}
-{{define "arrow"}}<svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">{{if eq . "left"}}<path d="M13 8H3M7 4 3 8l4 4"/>{{else}}<path d="M3 8h10M9 4l4 4-4 4"/>{{end}}</svg>{{end}}
 {{define "content"}}{{with .Jobs}}<nav class="crumbs" aria-label="Breadcrumb"><a href="{{queuesURL $.Server}}">Queues</a><span aria-hidden="true">/</span><span aria-current="page">{{template "qname" ($.QName .Queue.ID)}}</span></nav>{{end}}
 {{with .Jobs}}{{$state := .State}}{{$q := $.QName .Queue.ID}}<header class="qhead">
   <h1 class="qtitle">{{template "qname" $q}}</h1>
@@ -32,7 +28,7 @@
   <li class="job state-{{$state}}"><details>
     <summary>
       <span class="dot" aria-hidden="true"></span>
-      {{with .ID}}<span class="id">{{.}}</span>{{else}}<span class="id none">(no ID yet)</span>{{end}}
+      {{if .URL}}<a class="id" href="{{.URL}}">{{.ID}}</a>{{else if .ID}}<span class="id">{{.ID}}</span>{{else}}<span class="id none">(no ID yet)</span>{{end}}
       {{if .When}}<time class="when" datetime="{{.WhenISO}}" title="{{.WhenFull}}">{{.When}}</time>{{end}}
       <svg class="chev ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M6 4l4 4-4 4"/></svg>
       {{if .Preview}}<span class="preview{{if .LastError}} err{{end}}">{{.Preview}}</span>{{end}}

@@ -30,8 +30,6 @@
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
-
-{{/* arrow: a 16px stroke arrow, "left" or "right" */}}
 {{define "arrow"}}<svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">{{if eq . "left"}}<path d="M13 8H3M7 4 3 8l4 4"/>{{else}}<path d="M3 8h10M9 4l4 4-4 4"/>{{end}}</svg>{{end}}
 
 {{define "content"}}<header class="pagehead"><h1>Workflows</h1><p class="sub">Task graphs over queues, newest first; each once, however many {{.Noun.Many}} report it</p></header>

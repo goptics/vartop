@@ -46,3 +46,13 @@
     <button type="submit" class="primary">Confirm cancel{{if .NoUndo}} without undo{{end}}</button>
   </form>
 </section>{{end}}
+{{define "job_confirm"}}<section class="confirm" aria-labelledby="confirm-head">
+  <h2 id="confirm-head">Confirm cancel of job <span class="mono">{{.ID}}</span> of queue {{template "qname" .Queue}} on {{.Server}}</h2>
+  <p>A waiting job never runs. A running job has its context cancelled: it stops only if its handler watches <code>Job.Context()</code>, else it finishes as usual. The page shows how it ended once you reload it.</p>
+  <p>Sent to the first of these {{.Noun.Many}} that has it: {{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span> {{end}}</p>
+  <form hx-post="{{.Ctl.Post}}" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+    {{template "server_field" .}}
+    <input type="hidden" name="confirm" value="1">
+    <button type="submit" class="primary">Confirm cancel</button>
+  </form>
+</section>{{end}}
