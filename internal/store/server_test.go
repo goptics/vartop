@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"compress/flate"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -825,5 +826,27 @@ func TestUndecodableRecords(t *testing.T) {
 	}
 	if n := strings.Count(log.String(), "cannot be decoded"); n != 1 {
 		t.Errorf("logged %d times, want once per file:\n%s", n, log)
+	}
+}
+
+// A row from before strategy and sources (and with the dropped submitted)
+// reads its queue_ids, no strategy and nil sources.
+func TestDecodeOlderWorkerRow(t *testing.T) {
+	var buf bytes.Buffer
+	zw, err := flate.NewWriter(&buf, flate.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = zw.Write([]byte(`{"u":[{"k":"http://a","w":{"w":{"t":0,"s":"Running","su":12,"co":9,"q":["redisq:fifo:{a}"]}}}]}`))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := decodeSnapshot(base.UnixMilli(), buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm := s.Pods[0].Workers["w"]
+	if !slices.Equal(sm.QueueIDs, []string{"redisq:fifo:{a}"}) || sm.Strategy != "" || sm.Sources != nil || sm.Metrics.Completed != 9 {
+		t.Errorf("older row = %+v", sm.WorkerDetails)
 	}
 }

@@ -867,8 +867,8 @@ func TestQueueNamesHostile(t *testing.T) {
 		if name == "worker" && (strings.Count(body, `class="srcn"`) != len(ids)+1 || !strings.Contains(body, `<small>&lt;script&gt;`)) {
 			t.Errorf("worker: sources not drawn:\n%s", body)
 		}
-		if name == "list" && strings.Count(body, `class="chip wchip"`) != len(ids) {
-			t.Errorf("list: %d worker chips, want %d", strings.Count(body, `class="chip wchip"`), len(ids))
+		if name == "list" && (strings.Count(body, `class="chip wchip"`) != len(ids) || !strings.Contains(body, `<a class="chip wchip" href="/workers/`+url.PathEscape(evil)+`?server=dev"`)) {
+			t.Errorf("list: %d worker chips, want %d, each to the escaped worker page", strings.Count(body, `class="chip wchip"`), len(ids))
 		}
 	}
 }
@@ -1109,7 +1109,10 @@ func TestWorkerSourcesPage(t *testing.T) {
 		memory = "memory:a:fifo:1"
 	)
 	_, fake := fleettest.NewVarmq(t, "a", fleettest.SourceWorkers(redis, sqlite, memory))
-	srv, _ := newTestServer(t, fake)
+	// b: an older varmq whose orders consumes one more queue
+	const extra = "redisq:fifo:{extra}"
+	_, old := fleettest.NewVarmq(t, "b", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 1, QueueIDs: []string{extra}}})
+	srv, _ := newTestServer(t, fake, old)
 	esc := func(id string) string { return "/queues/" + url.PathEscape(id) + "?server=multi" }
 
 	_, body := fetch(t, srv, "/workers/orders?server=multi", false)
@@ -1117,11 +1120,11 @@ func TestWorkerSourcesPage(t *testing.T) {
 	for _, m := range regexp.MustCompile(`<li><a class="srcn" href="([^"]+)"><span class="qn" title="[^"]+"><svg class="sico"[^>]*><path d="[^"]{0,12}[^"]*"/></svg><span class="sr">([^<]+)</span>`).FindAllStringSubmatch(body, -1) {
 		order = append(order, m[1]+" "+m[2])
 	}
-	if want := []string{esc(redis) + " Redis: ", esc(sqlite) + " SQLite: ", esc(memory) + " In memory: "}; !slices.Equal(order, want) {
+	if want := []string{esc(redis) + " Redis: ", esc(sqlite) + " SQLite: ", esc(memory) + " In memory: ", esc(extra) + " Redis: "}; !slices.Equal(order, want) {
 		t.Errorf("source nodes = %q, want %q", order, want)
 	}
 	for _, want := range []string{
-		`<h2 class="section" id="src-head">Sources <span class="sub">3, in the order the worker picks from them</span></h2>`,
+		`<h2 class="section" id="src-head">Sources <span class="sub">4, in the order the worker picks from them</span></h2>`,
 		`<span class="qnm">orders</span> <span class="qkind">FIFO</span></span><span class="prio" title="bind priority: lower picks first">p 1</span></a>`,
 		`<span class="prio" title="bind priority: lower picks first">p 5</span>`,
 		`<span class="qnm">orders #1</span>`, // in-memory: named by its worker
@@ -1172,9 +1175,10 @@ func TestWorkerSourcesLabel(t *testing.T) {
 	}{
 		{"", srcs, "", []string{"", ""}},
 		{"lifo_magic", srcs, "lifo_magic", []string{"", ""}},
-		{"priority", srcs, "Priority", []string{"p 2", ""}},
-		{"max_len", srcs, "Max length", []string{"", ""}},
+		{"priority", srcs, "Priority: lowest number first", []string{"p 2", ""}},
+		{"max_len", srcs, "Max length: longest queue first", []string{"", ""}},
 		{"min_len", srcs[:1], "Pulls directly", []string{""}},
+		{"priority", srcs[:1], "Pulls directly", []string{"p 2"}},
 	} {
 		v := Page{Server: "s", Detail: &fleet.DetailView{Strategy: c.strategy, Sources: c.srcs}}.WorkerSources()
 		var prio []string
@@ -1185,10 +1189,29 @@ func TestWorkerSourcesLabel(t *testing.T) {
 			t.Errorf("%q: label %q prio %q, want %q %q", c.strategy, v.Label, prio, c.label, c.prio)
 		}
 	}
+	// an older varmq does not say how it picks, even from one queue
+	if v := (Page{Detail: &fleet.DetailView{QueueIDs: []string{"a"}}}).WorkerSources(); v == nil || !v.Legacy || v.Label != "" || len(v.Nodes) != 1 {
+		t.Errorf("legacy, one queue: %+v, want one node, no label", v)
+	}
 	if v := (Page{Detail: &fleet.DetailView{}}).WorkerSources(); v != nil {
 		t.Errorf("no sources, no queue_ids: %+v, want none", v)
 	}
 	if v := (Page{Stale: "old", Detail: &fleet.DetailView{QueueIDs: []string{"a"}}}).WorkerSources(); v != nil {
 		t.Error("stale page: sources shown")
+	}
+}
+
+// workerChips leaves out a pod that is down: its workers' queue_ids are
+// the last it said, not now.
+func TestWorkerChipsSkipsDownPod(t *testing.T) {
+	w := smp("Running", 1, 0, 1, 0)
+	w.QueueIDs = []string{"q"}
+	down := okPod("http://b", map[string]*fleet.Sample{"old": w})
+	down.Err = "connection refused"
+	up := smp("Running", 1, 0, 1, 0)
+	up.QueueIDs = []string{"q"}
+	got := workerChips(snap(viewT0, okPod("http://a", map[string]*fleet.Sample{"new": up}), down), "dev")
+	if len(got["q"]) != 1 || got["q"][0].Name != "new" {
+		t.Errorf("chips = %+v, want only new", got["q"])
 	}
 }

@@ -1087,4 +1087,31 @@ func TestBuildDetailMergesSources(t *testing.T) {
 	if d, _ := BuildDetail([]*Snapshot{s}, "p2", "w", 0, instanceNoun); d.Strategy != "" || d.Sources != nil {
 		t.Errorf("older varmq = %q %+v", d.Strategy, d.Sources)
 	}
+
+	// mixed fleet: an older pod's queue_ids join as sources
+	legacy := smp("Running", 1, 0, 1, 0)
+	legacy.QueueIDs = []string{"c"}
+	newer := src(smp("Running", 1, 0, 1, 0), "priority", a)
+	newer.QueueIDs = []string{"a"}
+	mixed := snap(atTick(0), okPod("p0", map[string]*Sample{"w": legacy}), okPod("p1", map[string]*Sample{"w": newer}))
+	if d, _ := BuildDetail([]*Snapshot{mixed}, "", "w", 0, instanceNoun); !reflect.DeepEqual(d.Sources, []api.WorkerSource{a, {QueueID: "c", Kind: "queue"}}) {
+		t.Errorf("mixed fleet = %+v, want a then c", d.Sources)
+	}
+
+	// kind is part of the key: a topic and an ID-less queue both stay, in order
+	q := api.WorkerSource{Kind: "queue"}
+	kinds := snap(atTick(0), okPod("p0", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "round_robin", topic)}),
+		okPod("p1", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "round_robin", q)}))
+	if d, _ := BuildDetail([]*Snapshot{kinds}, "", "w", 0, instanceNoun); !reflect.DeepEqual(d.Sources, []api.WorkerSource{topic, q}) {
+		t.Errorf("topic + ID-less queue = %+v", d.Sources)
+	}
+
+	// the merge appends to a copy, never into the first pod's array
+	first := make([]api.WorkerSource, 1, 4)
+	first[0] = a
+	shared := snap(atTick(0), okPod("p0", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "priority", first...)}),
+		okPod("p1", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "priority", b)}))
+	if d, _ := BuildDetail([]*Snapshot{shared}, "", "w", 0, instanceNoun); len(d.Sources) != 2 || first[:2][1] != (api.WorkerSource{}) {
+		t.Errorf("merge wrote into the pod's sources: %+v, pod %+v", d.Sources, first[:2])
+	}
 }
