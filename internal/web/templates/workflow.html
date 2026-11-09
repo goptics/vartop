@@ -30,7 +30,7 @@
 {{define "task_facts"}}<dl class="kv">
   <dt>State</dt><dd>{{template "wf_state" .State}}{{if .Live}} <span class="sub">queued or running</span>{{end}}</dd>
   <dt>Queue</dt><dd>{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</dd>
-  <dt>Job ID</dt><dd>{{with .JobID}}<span class="mono">{{.}}</span>{{else}}—{{end}}</dd>
+  <dt>Job ID</dt><dd>{{if .JobURL}}<a class="mono" href="{{.JobURL}}">{{.JobID}}</a>{{else if .JobID}}<span class="mono">{{.JobID}}</span>{{else}}—{{end}}</dd>
   <dt>Result</dt><dd>{{or .Result "—"}}</dd>
   {{with .Reason}}<dt>Reason</dt><dd><code class="err">{{.}}</code></dd>{{end}}
 </dl>{{end}}
@@ -100,7 +100,7 @@
     <td data-label="State">{{template "wf_state" .State}}{{with .Reason}}<small class="reason">{{.}}</small>{{end}}</td>
     <td data-label="Depends on">{{range $i, $d := .Deps}}{{if $i}}, {{end}}<span class="mono">{{$d}}</span>{{else}}—{{end}}</td>
     <td data-label="Queue">{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</td>
-    <td data-label="Job ID">{{with .JobID}}<span class="mono">{{.}}</span>{{else}}—{{end}}</td>
+    <td data-label="Job ID">{{if .JobURL}}<a class="mono" href="{{.JobURL}}">{{.JobID}}</a>{{else if .JobID}}<span class="mono">{{.JobID}}</span>{{else}}—{{end}}</td>
     <td class="num" data-label="Result">{{or .Result "—"}}</td>
     <td data-label="Undo">{{with .Undo}}{{template "wf_state" .State}}{{else}}—{{end}}</td>
   </tr>{{end}}

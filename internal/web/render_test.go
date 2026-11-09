@@ -899,6 +899,16 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 			t.Errorf("workflow.js lacks %q", want)
 		}
 	}
+	// The job page's script: ticks the live spans from their server value.
+	jobJS, err := assets.ReadFile("static/job.js")
+	if err != nil {
+		t.Fatalf("job.js not embedded: %v", err)
+	}
+	for _, want := range []string{".dur[data-ms]", "dataset.ms", "performance.now", "setInterval"} {
+		if !strings.Contains(string(jobJS), want) {
+			t.Errorf("job.js lacks %q", want)
+		}
+	}
 	// The primary colour is varmq's logo teal, which the native controls
 	// (the concurrency slider, checkboxes) take too.
 	for _, want := range []string{"#0D0F14", "#E3E6ED", "prefers-color-scheme: light", ".mixed", "--accent: #44BF9E", "accent-color: var(--accent)"} {

@@ -275,3 +275,76 @@ func TestWorkflowFinal(t *testing.T) {
 		t.Error("an unknown state is final")
 	}
 }
+
+// GetJob sends each ID as one escaped segment, "." and ".." as %2E and
+// %2E%2E, and decodes the result; a real ServeMux routes each to the job
+// route with the ID as sent.
+func TestGetJobEscapesIDs(t *testing.T) {
+	var got []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /queues/{id}/jobs/{jobId}", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.EscapedPath()+" "+r.PathValue("id")+" "+r.PathValue("jobId"))
+		_, _ = w.Write([]byte(`{"id":"x","state":"completed","payload":{"a":1},"attempts":1,"result":{"ok":true}}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "")
+	for _, id := range []string{"a/b", "{x}", ".", "..", "wf:w:t"} {
+		j, ok, err := c.GetJob(context.Background(), "redisq:ns:fifo:{a/b}", id)
+		if err != nil || !ok || string(j.Result) != `{"ok":true}` {
+			t.Fatalf("%q: GetJob = %+v, ok %v, err %v", id, j, ok, err)
+		}
+	}
+	q := "/queues/redisq:ns:fifo:%7Ba%2Fb%7D/jobs/"
+	want := []string{
+		q + "a%2Fb redisq:ns:fifo:{a/b} a/b",
+		q + "%7Bx%7D redisq:ns:fifo:{a/b} {x}",
+		q + "%2E redisq:ns:fifo:{a/b} .",
+		q + "%2E%2E redisq:ns:fifo:{a/b} ..",
+		q + "wf:w:t redisq:ns:fifo:{a/b} wf:w:t",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("requests:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A route an older varmq lacks (router 404, 405) and storage without the
+// interface (501) are not ok, no error; a JSON 404 is an error, so the
+// caller asks the next unit.
+func TestGetJobAndCancelUnsupported(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		body   string
+		unsup  bool
+	}{
+		{http.StatusNotFound, "404 page not found\n", true},
+		{http.StatusMethodNotAllowed, "Method Not Allowed\n", true},
+		{http.StatusNotImplemented, `{"error":"storage can't read a job by id"}`, true},
+		{http.StatusNotFound, `{"error":"job not found"}`, false},
+		{http.StatusConflict, `{"error":"varmq: job already ended"}`, false},
+	} {
+		srv, _ := recordingServer(t, c.status, nil, c.body)
+		cl := NewClient(srv.URL, "")
+		_, ok, err := cl.GetJob(context.Background(), "q", "j")
+		if ok || (err == nil) != c.unsup {
+			t.Errorf("%d %s: GetJob ok %v err %v, want unsupported %v", c.status, c.body, ok, err, c.unsup)
+		}
+		ok, err = cl.CancelJob(context.Background(), "q", "j")
+		if ok || (err == nil) != c.unsup {
+			t.Errorf("%d %s: CancelJob ok %v err %v, want unsupported %v", c.status, c.body, ok, err, c.unsup)
+		}
+	}
+}
+
+// CancelJob PATCHes the cancel route of one job; 202 is ok.
+func TestCancelJob(t *testing.T) {
+	srv, reqs := recordingServer(t, http.StatusAccepted, nil, "")
+	ok, err := NewClient(srv.URL, "tok").CancelJob(context.Background(), "redisq:ns:fifo:{a/b}", "..")
+	if err != nil || !ok {
+		t.Fatalf("CancelJob = %v, %v", ok, err)
+	}
+	r := reqs()[0]
+	if r.Method != http.MethodPatch || r.EscapedPath != "/queues/redisq:ns:fifo:%7Ba%2Fb%7D/jobs/%2E%2E/actions/cancel" || r.Auth != "Bearer tok" {
+		t.Errorf("request = %+v", r)
+	}
+}

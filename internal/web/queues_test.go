@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -596,6 +597,9 @@ func TestWorkflowPage(t *testing.T) {
 		`<a class="node t-pending live" href="#task-4"`, "Cancel without undo",
 		`<a class="ql" href="/queues/redisq:shop:fifo:%7Betl%7D?server=multi"><span class="qn" title="redisq:shop:fifo:{etl}">`,
 		`<span class="qnm">etl</span> <span class="qkind">FIFO</span></span></a>`, `<text class="meta" x="30" y="42">pending · audit</text>`, `<title>audit-log · redisq:shop:fifo:{audit}</title>`,
+		// a task's job ID links to its job page, in the table and the panel
+		`<td data-label="Job ID"><a class="mono" href="/queues/redisq:shop:fifo:%7Betl%7D/jobs/extract-1?server=multi">extract-1</a></td>`,
+		`<dt>Job ID</dt><dd><a class="mono" href="/queues/redisq:shop:fifo:%7Betl%7D/jobs/extract-1?server=multi">extract-1</a></dd>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("running page lacks %q", want)
@@ -826,14 +830,247 @@ func TestQueueNamesHostile(t *testing.T) {
 	}
 	d, _ := fleet.BuildDetail([]*fleet.Snapshot{s}, "", evil, 0, instanceNoun)
 	jobs := &JobsView{Queue: groups[0], Ctl: QueueCtl{ID: ids[0]}, Workers: queueWorkers(s, ids[0], "dev")}
+	evilJSON, _ := json.Marshal(map[string]string{evil: evil})
+	job := jobView(groups[0], parseQueueID(ids[0]), evil, "dev", fleet.JobRead{Found: true, From: evil, Job: contract.JobRecord{ID: evil, State: contract.JobPending,
+		Payload: evilJSON, Result: evilJSON, EnqueuedAt: 1, Errors: []contract.JobError{{Attempt: 1, At: 2, Error: evil}}}}, viewT0)
+	if !job.Ctl.Cancel {
+		t.Fatal("hostile job: no cancel button to check")
+	}
 	for name, body := range map[string]string{
 		"list":    run(t, "queues", "layout", Page{Server: "dev", owners: ownersOf(s), Queues: &fleet.QueuesView{Groups: groups}}),
 		"page":    run(t, "queue", "layout", Page{Server: "dev", owners: ownersOf(s), Jobs: jobs}),
 		"worker":  run(t, "detail", "layout", Page{Server: "dev", owners: ownersOf(s), Detail: &d}),
 		"confirm": run(t, "confirm", "queue_confirm", QueueConfirmView{Action: "pause", Server: "dev", Queue: parseQueueID(ids[0]), Noun: instanceNoun}),
+		"job":     run(t, "job", "layout", Page{Server: "dev", owners: ownersOf(s), Job: job}),
+		"job confirm": run(t, "confirm", "job_confirm", JobConfirmView{Server: "dev", ID: evil, Queue: parseQueueID(ids[0]), Noun: instanceNoun, On: []string{evil},
+			Ctl: JobCtl{Server: "dev", QueueID: ids[0], ID: evil}}),
 	} {
 		if strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
 			t.Errorf("%s: a field rendered as markup", name)
 		}
+	}
+}
+
+// jobQueue is tenantID shared by a and b (c is an older varmq), holding
+// fleettest.SampleJobs, an ID with '/', '{' and '}', and one ".".
+func jobQueue(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server, *fleettest.Queue) {
+	t.Helper()
+	varmqs, fakes := threeVarmqs(t)
+	q := tenantQueue()
+	q.Jobs = fleettest.SampleJobs(time.Now().UnixMilli())
+	q.Jobs["pending"] = append(q.Jobs["pending"], `{"id":"a/b{c}","state":"pending","payload":1,"enqueued_at":1762228800000,"attempts":0}`,
+		`{"id":".","state":"pending","payload":2,"attempts":0}`)
+	for _, v := range varmqs[:2] {
+		setQueues(v, q)
+	}
+	return varmqs, fakes, q
+}
+
+// jobPage is the page of job id of tenantID on multi.
+func jobPage(id string) string { return tenantPath + "/jobs/" + url.PathEscape(id) + "?server=multi" }
+
+// The job page: header, timeline with spans, errors, payload, result; the
+// cancel button only while the job waits or runs; links from the queue's
+// list (none for "." or no ID), odd IDs one escaped segment end to end.
+func TestJobPage(t *testing.T) {
+	varmqs, fakes, _ := jobQueue(t)
+	srv, _ := newTestServer(t, fakes...)
+
+	status, body := fetch(t, srv, jobPage("fetch-image-1"), false)
+	for _, want := range []string{
+		`<a class="ql" href="` + tenantPath + `?server=multi"><span class="qn" title="` + tenantID + `">`,
+		`<h1 class="qid">fetch-image-1</h1><span class="jstate state-completed"><span class="dot" aria-hidden="true"></span>completed</span>`,
+		`data-copy="fetch-image-1"`, `<script src="/static/queue.js" defer>`, `<script src="/static/job.js" defer>`,
+		"<title>fetch-image-1 · tenant/orders · multi</title>",
+		`<span class="what">Waited</span><span class="dur">0.8s</span>`, `<span class="what">Ran</span><span class="dur">3.4s</span>`,
+		`<span class="what">Total</span><span class="dur">4.2s</span>`, "<dt>Took</dt>",
+		`<li class="step-finished"><svg`, `&#34;width&#34;: 1600`, `&#34;url&#34;: &#34;https://cdn.example.com/u/7f3a/raw.jpg&#34;`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("completed job lacks %q", want)
+		}
+	}
+	if status != http.StatusOK || strings.Contains(body, "Cancel job") || strings.Contains(body, "data-ms") {
+		t.Errorf("completed job = %d: a cancel button or a live span:\n%s", status, body)
+	}
+
+	_, body = fetch(t, srv, jobPage("ord-1027"), false)
+	for _, want := range []string{
+		`<li class="step-failed"><svg`, `<span class="what">Failed</span>`, "<dt>Attempts</dt><dd>2</dd>",
+		`<code class="err">dial tcp 10.0.3.7:5432: connect: connection refused</code></li><li><span class="what">Attempt 2</span>`,
+		"<p class=\"sub\">None.</p>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("failed job lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "Cancel job") {
+		t.Error("failed job: a cancel button")
+	}
+	_, body = fetch(t, srv, jobPage("ord-1035"), false)
+	if !strings.Contains(body, `<li class="step-started none">`) || !strings.Contains(body, `<span class="what">Cancelled</span>`) ||
+		!strings.Contains(body, `<span class="what">Waited</span><span class="dur">—</span>`) || strings.Contains(body, "Cancel job") {
+		t.Errorf("cancelled while waiting: no start, no spans to it, no button:\n%s", body)
+	}
+
+	_, body = fetch(t, srv, jobPage("ord-1039"), false)
+	if !strings.Contains(body, `<span class="what">Ran</span><span class="dur" data-ms="`) || !strings.Contains(body, "<dt>Running for</dt>") ||
+		!strings.Contains(body, `hx-post="`+tenantPath+`/jobs/ord-1039/actions/cancel">Cancel job</button>`) {
+		t.Errorf("running job: live span and cancel:\n%s", body)
+	}
+
+	// '/', '{', '}': one escaped segment to varmq and in the cancel post
+	odd := "a/b{c}"
+	status, body = fetch(t, srv, jobPage(odd), false)
+	if status != http.StatusOK || !strings.Contains(body, `<span class="what">Waited</span><span class="dur" data-ms="`) ||
+		!strings.Contains(body, `hx-post="`+tenantPath+`/jobs/a%2Fb%7Bc%7D/actions/cancel"`) {
+		t.Errorf("odd ID = %d:\n%s", status, body)
+	}
+	want := "GET " + tenantPath + "/jobs/a%2Fb%7Bc%7D"
+	if !slices.Contains(varmqs[0].Calls(), want) && !slices.Contains(varmqs[1].Calls(), want) {
+		t.Errorf("no sharer got %s", want)
+	}
+
+	// the list links each ID to its page; not "." (a browser drops it)
+	_, body = fetch(t, srv, tenantPath+"?server=multi", false)
+	for _, want := range []string{
+		`<a class="id" href="` + tenantPath + `/jobs/ord-1042?server=multi">ord-1042</a>`,
+		`<a class="id" href="` + tenantPath + `/jobs/a%2Fb%7Bc%7D?server=multi">a/b{c}</a>`,
+		`<span class="id">.</span>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("queue list lacks %q", want)
+		}
+	}
+
+	status, body = fetch(t, srv, jobPage("nope"), false)
+	if status != http.StatusNotFound || !strings.Contains(body, "No job <span class=\"mono\">nope</span> in this queue") || !strings.Contains(body, "may no longer keep") {
+		t.Errorf("unknown job = %d:\n%s", status, body)
+	}
+	if status, body := fetch(t, srv, "/queues/nope/jobs/x?server=multi", false); status != http.StatusNotFound || !strings.Contains(body, `Queue &#34;nope&#34; not found`) {
+		t.Errorf("unknown queue = %d:\n%s", status, body)
+	}
+	if strings.Contains(body, testToken) {
+		t.Error("the page carries the token")
+	}
+}
+
+// Every unit without the route (older varmq, storage without JobReader):
+// said so, not "not found"; an in-memory queue's missing job names
+// WithEndedJobs.
+func TestJobPageUnsupportedAndMemory(t *testing.T) {
+	varmqs, fakes, q := jobQueue(t)
+	srv, _ := newTestServer(t, fakes...)
+	varmqs[0].Mu.Lock()
+	q.JobStatus = http.StatusNotImplemented
+	varmqs[0].Mu.Unlock()
+	status, body := fetch(t, srv, jobPage("ord-1042"), false)
+	if status != http.StatusOK || !strings.Contains(body, "can read one job. That needs varmq API 1.4.0") || strings.Contains(body, "No job") {
+		t.Errorf("unsupported = %d:\n%s", status, body)
+	}
+
+	const mem = "memory:a:fifo:1"
+	varmqs[0].Mu.Lock()
+	varmqs[0].Queues = map[string]*fleettest.Queue{mem: {Summary: `{"id":"` + mem + `","counts":{"pending":0,"processing":0,"completed":0,"failed":0},"totals":{"submitted":0,"completed":0,"failed":0}}`}}
+	varmqs[0].Mu.Unlock()
+	status, body = fetch(t, srv, "/queues/"+mem+"/jobs/r-1?server=multi", false)
+	if status != http.StatusNotFound || !strings.Contains(body, "An in-memory queue keeps a job only while it waits or runs") || !strings.Contains(body, "<code>WithEndedJobs</code>") {
+		t.Errorf("in-memory missing job = %d:\n%s", status, body)
+	}
+}
+
+// jobSpans: a missing time, or two out of order, is "—", never negative;
+// a waiting or running job's span runs to now, live.
+func TestJobSpans(t *testing.T) {
+	const now = 100_000
+	for _, c := range []struct {
+		name               string
+		j                  contract.JobRecord
+		waited, ran, total JobSpan
+	}{
+		{"completed", contract.JobRecord{State: contract.JobCompleted, EnqueuedAt: 1000, StartedAt: 1800, FinishedAt: 5200},
+			JobSpan{"0.8s", 800, false}, JobSpan{"3.4s", 3400, false}, JobSpan{"4.2s", 4200, false}},
+		{"pending", contract.JobRecord{State: contract.JobPending, EnqueuedAt: 40_000},
+			JobSpan{"1m 00s", 60_000, true}, JobSpan{Text: "—"}, JobSpan{"1m 00s", 60_000, true}},
+		{"running", contract.JobRecord{State: contract.JobProcessing, EnqueuedAt: 40_000, StartedAt: 90_000},
+			JobSpan{"50s", 50_000, false}, JobSpan{"10s", 10_000, true}, JobSpan{"1m 00s", 60_000, true}},
+		{"in-memory running: no times", contract.JobRecord{State: contract.JobProcessing, Attempts: 1},
+			JobSpan{Text: "—"}, JobSpan{Text: "—"}, JobSpan{Text: "—"}},
+		{"cancelled waiting", contract.JobRecord{State: contract.JobCancelled, EnqueuedAt: 1000, FinishedAt: 3000},
+			JobSpan{Text: "—"}, JobSpan{Text: "—"}, JobSpan{"2.0s", 2000, false}},
+		{"no enqueued", contract.JobRecord{State: contract.JobFailed, StartedAt: 1000, FinishedAt: 2000},
+			JobSpan{Text: "—"}, JobSpan{"1.0s", 1000, false}, JobSpan{Text: "—"}},
+		{"clocks out of order", contract.JobRecord{State: contract.JobCompleted, EnqueuedAt: 5000, StartedAt: 4000, FinishedAt: 3000},
+			JobSpan{Text: "—"}, JobSpan{Text: "—"}, JobSpan{Text: "—"}},
+		{"enqueued after now", contract.JobRecord{State: contract.JobPending, EnqueuedAt: now + 1},
+			JobSpan{Text: "—"}, JobSpan{Text: "—"}, JobSpan{Text: "—"}},
+	} {
+		w, r, tot := jobSpans(c.j, now)
+		if w != c.waited || r != c.ran || tot != c.total {
+			t.Errorf("%s: waited %+v ran %+v total %+v, want %+v %+v %+v", c.name, w, r, tot, c.waited, c.ran, c.total)
+		}
+	}
+	for _, id := range []string{"", ".", ".."} {
+		if u := jobURL("q", id, "s"); u != "" {
+			t.Errorf("jobURL(%q) = %q, want none", id, u)
+		}
+	}
+	if u := jobURL("redisq:fifo:{a/b}", "x.y", "s"); u != "/queues/redisq:fifo:%7Ba%2Fb%7D/jobs/x.y?server=s" {
+		t.Errorf("jobURL = %q", u)
+	}
+}
+
+// A unit that fails, with none holding the job, is the page's banner, not
+// "not found" (the job may be on it); the ID "." read as %2E is shown, not
+// offered a cancel (a browser cannot post to it); a unit that cannot read
+// one job, beside one that says not found, is named as where it may be.
+func TestJobPageFailuresAndOddIDs(t *testing.T) {
+	varmqs, fakes, _ := jobQueue(t)
+	srv, _ := newTestServer(t, fakes...)
+
+	status, body := fetch(t, srv, tenantPath+"/jobs/%2E?server=multi", false)
+	if status != http.StatusOK || !strings.Contains(body, `<h1 class="qid">.</h1><span class="jstate state-pending">`) || strings.Contains(body, "Cancel job") {
+		t.Errorf("job . = %d:\n%s", status, body)
+	}
+	want := "GET " + tenantPath + "/jobs/%2E"
+	if !slices.Contains(varmqs[0].Calls(), want) && !slices.Contains(varmqs[1].Calls(), want) {
+		t.Errorf("no sharer got %s", want)
+	}
+
+	// a fails (500), b has no such job: one storage each now
+	failing, empty := tenantQueue(), tenantQueue()
+	failing.JobStatus = http.StatusInternalServerError
+	setQueues(varmqs[0], failing)
+	setQueues(varmqs[1], empty)
+	status, body = fetch(t, srv, jobPage("ord-1042"), false)
+	if status != http.StatusOK || !strings.Contains(body, `<p class="banner">`+tenantID+`: API error (status 500)`) || strings.Contains(body, "No job") {
+		t.Errorf("failing unit = %d:\n%s", status, body)
+	}
+
+	// b serves no one-job read (router 404), a has no such job
+	varmqs[0].Mu.Lock()
+	failing.JobStatus = 0
+	varmqs[0].Mu.Unlock()
+	varmqs[1].Mu.Lock()
+	empty.JobStatus = http.StatusNotFound
+	varmqs[1].Mu.Unlock()
+	b := fleettest.StaticLabels(fakes[0].URL, fakes[1].URL, fakes[2].URL)[fakes[1].URL]
+	status, body = fetch(t, srv, jobPage("ord-1042"), false)
+	if status != http.StatusNotFound || !strings.Contains(body, "No job") || !strings.Contains(body, "It may be on "+b+": it cannot read one job") {
+		t.Errorf("partly unsupported = %d:\n%s", status, body)
+	}
+}
+
+// A result over maxPayload once indented is cut, and labelled so.
+func TestJobResultCut(t *testing.T) {
+	big, _ := json.Marshal(map[string]string{"blob": strings.Repeat("x", maxPayload)})
+	g := fleet.QueueGroup{QueueSummary: api.QueueSummary{ID: "q"}}
+	v := jobView(g, parseQueueID("q"), "j", "dev", fleet.JobRead{Found: true, Job: contract.JobRecord{ID: "j", State: contract.JobCompleted, Payload: []byte("1"), Result: big}}, viewT0)
+	if !v.ResultCut || len(v.Result) != maxPayload {
+		t.Fatalf("result cut %v, %d bytes, want cut at %d", v.ResultCut, len(v.Result), maxPayload)
+	}
+	body := run(t, "job", "layout", Page{Server: "dev", Job: v})
+	if !strings.Contains(body, `<h2 id="rs-head">Result <span class="sub">(first 64 KiB)</span></h2>`) || len(body) > 2*maxPayload {
+		t.Errorf("cut result: no label, or %d bytes rendered", len(body))
 	}
 }

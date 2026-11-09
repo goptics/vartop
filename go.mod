@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/goptics/varmq/contract v0.6.0
+	github.com/goptics/varmq/contract v0.7.0
 	github.com/pterm/pterm v0.12.83
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.54.0

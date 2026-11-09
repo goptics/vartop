@@ -333,6 +333,7 @@ func TestPOSTWithoutHXRequest(t *testing.T) {
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
 		{tenantPath + "/actions/pause", multi("confirm", "1")},
 		{"/workflows/w/actions/cancel", multi("at", "1", "confirm", "1")},
+		{tenantPath + "/jobs/order-42/actions/cancel", multi("confirm", "1")},
 	} {
 		if resp, _ := post(t, srv, c.path, c.form, false); resp.StatusCode != http.StatusForbidden {
 			t.Errorf("POST %s without HX-Request = %d, want 403", c.path, resp.StatusCode)
@@ -360,6 +361,7 @@ func TestCrossOriginPOST(t *testing.T) {
 			{"/bulk/pause", multi("names", "orders", "confirm", "1")},
 			{tenantPath + "/actions/pause", multi("confirm", "1")},
 			{"/workflows/w/actions/cancel", multi("at", "1", "confirm", "1")},
+			{tenantPath + "/jobs/order-42/actions/cancel", multi("confirm", "1")},
 		} {
 			req := postRequest(t, srv, c.path, c.form)
 			for k, v := range headers {
@@ -387,6 +389,7 @@ func TestGETOnMutatingRoute(t *testing.T) {
 		"/workers/orders/concurrency?server=multi&n=3",
 		"/bulk/pause?server=multi&names=orders&confirm=1",
 		tenantPath + "/actions/pause?server=multi&confirm=1",
+		tenantPath + "/jobs/order-42/actions/cancel?server=multi&confirm=1",
 		"/workflows/w/actions/cancel?server=multi&at=1&confirm=1",
 	} {
 		for _, hx := range []bool{false, true} {
@@ -1251,6 +1254,8 @@ func TestActionRefusedWhenStale(t *testing.T) {
 		{"/queues/q/actions/resume", multi("confirm", "1")},
 		{"/workflows/w/actions/cancel", multi("at", "1")},
 		{"/workflows/w/actions/cancel", multi("at", "1", "undo", "false", "confirm", "1")},
+		{"/queues/q/jobs/j/actions/cancel", multi()},
+		{"/queues/q/jobs/j/actions/cancel", multi("confirm", "1")},
 	} {
 		start := time.Now()
 		resp, body := post(t, f.srv, c.path, c.form, true)
@@ -1586,5 +1591,69 @@ func TestWorkflowCancel(t *testing.T) {
 	}
 	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])) - sent; n != 0 {
 		t.Errorf("%d PATCHes for an ambiguous ID, want none", n)
+	}
+}
+
+// A job's cancel: the confirm panel sends nothing; confirmed, the first
+// unit that has the job takes it (202) and no other is asked; an ended job
+// is "already ended"; storage that cannot cancel is "not supported"; an
+// unknown action or queue is refused, nothing sent.
+func TestJobCancel(t *testing.T) {
+	varmqs, fakes, q := jobQueue(t)
+	srv, _ := newTestServer(t, fakes...)
+	path := tenantPath + "/jobs/a%2Fb%7Bc%7D/actions/cancel"
+
+	resp, body := post(t, srv, path, multi(), true)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `Confirm cancel of job <span class="mono">a/b{c}</span> of queue <span class="qn" title="`+tenantID+`">`) ||
+		!strings.Contains(body, `<form hx-post="`+path+`" hx-target="#results"`) || !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) ||
+		!strings.Contains(body, `<input type="hidden" name="server" value="multi">`) || !strings.Contains(body, "it stops only if its handler watches") {
+		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
+	}
+	noPatches(t, varmqs...)
+
+	resp, body = post(t, srv, path, multi("confirm", "1"), true)
+	if resp.StatusCode != http.StatusOK || strings.Count(body, `<li class="ok">`) != 1 || !strings.Contains(body, `<span class="outcome">ok (cancel requested)</span>`) {
+		t.Errorf("cancel = %d:\n%s", resp.StatusCode, body)
+	}
+	if n := len(patches(varmqs[0])) + len(patches(varmqs[1])); n != 1 {
+		t.Errorf("%d PATCHes, want one: shared storage, the first unit takes it", n)
+	}
+	noPatches(t, varmqs[2])
+	if strings.Contains(body, testToken) {
+		t.Error("the response carries the token")
+	}
+
+	_, body = post(t, srv, path, multi("confirm", "1"), true)
+	if !strings.Contains(body, `<li class="nochange">`) || !strings.Contains(body, "no change (already ended)") {
+		t.Errorf("cancel of an ended job:\n%s", body)
+	}
+	if _, body := fetch(t, srv, jobPage("a/b{c}"), false); strings.Contains(body, "Cancel job") || !strings.Contains(body, "state-cancelled") {
+		t.Errorf("cancelled job page still offers cancel:\n%s", body)
+	}
+
+	varmqs[0].Mu.Lock()
+	q.CancelStatus = http.StatusNotImplemented
+	varmqs[0].Mu.Unlock()
+	_, body = post(t, srv, tenantPath+"/jobs/ord-1042/actions/cancel", multi("confirm", "1"), true)
+	if strings.Count(body, "failed (not supported by this instance)") != 2 {
+		t.Errorf("storage that cannot cancel:\n%s", body)
+	}
+
+	sent := len(patches(varmqs[0])) + len(patches(varmqs[1]))
+	for _, c := range []struct {
+		path   string
+		status int
+		msg    string
+	}{
+		{tenantPath + "/jobs/ord-1042/actions/retry", http.StatusBadRequest, "want cancel"},
+		{"/queues/nope/jobs/ord-1042/actions/cancel", http.StatusConflict, "no longer reported"},
+	} {
+		resp, body := post(t, srv, c.path, multi("confirm", "1"), true)
+		if resp.StatusCode != c.status || !strings.Contains(body, c.msg) {
+			t.Errorf("POST %s = %d %q, want %d with %q", c.path, resp.StatusCode, body, c.status, c.msg)
+		}
+	}
+	if n := len(patches(varmqs[0])) + len(patches(varmqs[1])); n != sent {
+		t.Errorf("%d PATCHes after the refusals", n-sent)
 	}
 }

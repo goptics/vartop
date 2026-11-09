@@ -293,6 +293,7 @@ type TaskView struct {
 	Live          bool
 	Queue         QueueName
 	QueueURL      string
+	JobURL        string // its job's page, "" for none (see jobURL)
 	QueueShort    string // Queue's name as a node shows it, cut
 	JobID, Reason string
 	Result        string // stored result size, "" for none
@@ -429,6 +430,7 @@ func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, r
 	if t.QueueID != "" {
 		v.QueueShort = cut(v.Queue.Name, maxNodeQueue)
 		v.QueueURL = jobsURL(t.QueueID, server, "", 0, defaultJobLimit)
+		v.JobURL = jobURL(t.QueueID, t.JobID, server)
 	}
 	if t.ResultSize > 0 {
 		v.Result = byteSize(t.ResultSize)

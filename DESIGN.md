@@ -239,7 +239,7 @@ Small, consistent corners: 4px (focus ring, range segment, tooltip), 6px (contro
 Brand (20px three-line SVG mark in accent, wordmark 16px/650). Nav: Dashboard, Instance grid, Queues, Workflows (three linked nodes), each with a 16px stroke icon; Workflows always shown (a note on the page when no instance serves the routes, not a probe per page); links `subtle`, hover and current `raised` + `fg`, current icon teal. Scope: server and instance pickers together (`#pick-server`, `#pick-unit`). `#status`: health with 7px dot (ok / warn / bad by healthy share), refresh interval, "updated" (warn when stale), optional `.note`.
 
 ### Page header
-`h1` + `.sub` scope line on one baseline, wrapping. Worker and job pages add breadcrumbs (`/` separator, 13px, `subtle`).
+`h1` + `.sub` scope line on one baseline, wrapping. Worker, queue and job pages add breadcrumbs (`/` separator, 13px, `subtle`).
 
 ### Stat strip
 One `panel` (8px, hairline) holding auto-fit tiles (min 150px) split by hairlines (each tile draws left+top edge pulled 1px under the frame). Tile: label heading, display number, sparkline at foot. `.hot` (failed > 0): number and onset line in `bad`. Onset line: "since 15:04" under the failed number. Status tile lists status counts as status dots. Worker page counters use the same strip without sparklines. Above them, a "Queues" line: each queue the worker's `queue_ids` hold, as a queue name link; hidden when stale or without `queue_ids`.
@@ -303,6 +303,13 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Errors:** per attempt, bad 7% fill, bad 30% edge, 6px; mono 12px, pre-wrap.
 - **Payload:** ground well, hairline, 6px, mono 12px, max 24em, scrolls, focusable.
 - **Pager:** Previous / numbered pages / Next with 14px SVG arrows (workflow list: Previous / "N–M" / Next, no total); buttons 6px bordered `panel`; numbers borderless `subtle`, current `raised` + border + 600; `…` gap.
+
+### One-job page
+- **Header:** breadcrumb Queues / queue name (link) / mono job ID; `h1.qid` mono ID + state badge (`.jstate`: pill, `line-strong` edge, state dot as in the tabs, capitalized); Copy ID + full Queue ID 12px `subtle`; `dl.facts`: Waiting for / Running for / Took, Attempts, Read from. `#jobctl`: danger "Cancel job" only while pending or processing; confirm panel, then results ("cancel requested", "already ended", "not supported by this instance"). Cancel is cooperative: the badge stays as read.
+- **Timeline panel:** the job list's step icons, a span row between each pair (Waited, Ran: label 13px `subtle`, value `fg`/500, on the connector), "Total" under a hairline (600). Missing time or out of order: `—`, never negative. Live spans (`data-ms`) tick each second in `job.js` from the server's value plus the browser's monotonic clock; without JS the render-time value stands. Errors under it.
+- **Data:** Payload and Result panels (`panel`, hairline, 8px), each a `.payload` well; Result "None." with a 64 KiB note on a completed job. Two columns from 900px (timeline 1fr, data 1.3fr), stacked below.
+- **Not found:** `.empty` dashed panel: no such job on any instance reporting the queue, then why (in-memory: ended jobs gone without `WithEndedJobs`; shared storage: record dropped), link back. Every instance without the route: one `.empty` line naming varmq API 1.4.0.
+- **Links in:** queue list rows (the mono ID alone is the link; the rest of the row expands it), workflow task table and task panel Job IDs. No link for IDs `.`, `..` or none.
 
 ### Workflows list
 - **State tabs:** the `.states` strip as `.wfstates`: All + every `WorkflowState`, label only (varmq counts none), columns `max-content`, scrolls sideways when narrow. State words: `_` read as a space ("compensation failed"); unknown states shown as sent, hollow `subtle` dot.

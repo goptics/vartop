@@ -1,0 +1,52 @@
+{{/* dur: a timeline span (JobSpan); a live one carries its ms for job.js to tick */}}
+{{define "dur"}}<span class="dur"{{if .Live}} data-ms="{{.Ms}}"{{end}}>{{.Text}}</span>{{end}}
+{{/* jobctl: a job's cancel button (JobCtl), only while it waits or runs */}}
+{{define "jobctl"}}<div id="jobctl" class="qctl">{{if .Cancel}}
+  <form class="qact" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+    {{template "server_field" .}}
+    <button type="button" class="danger" hx-post="{{.Post}}">Cancel job</button>
+  </form>{{end}}
+</div>{{end}}
+{{define "content"}}{{with .Job}}<nav class="crumbs" aria-label="Breadcrumb"><a href="{{queuesURL $.Server}}">Queues</a><span aria-hidden="true">/</span><a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a><span aria-hidden="true">/</span><span aria-current="page" class="mono">{{.ID}}</span></nav>
+<header class="qhead jobhead">
+  <div class="wftitle"><h1 class="qid">{{.ID}}</h1>{{if .Found}}<span class="jstate state-{{.State}}"><span class="dot" aria-hidden="true"></span>{{.State}}</span>{{end}}</div>
+  <p class="qfull">{{with .ID}}<button type="button" class="copy" data-copy="{{.}}" hidden>Copy ID</button>{{end}} <span>in queue <code class="mono">{{.Queue.ID}}</code></span></p>
+  {{if .Found}}<dl class="facts">
+    <div><dt>{{if eq .State "pending"}}Waiting for{{else if eq .State "processing"}}Running for{{else}}Took{{end}}</dt><dd>{{template "dur" .Total}}</dd></div>
+    <div><dt>Attempts</dt><dd>{{.Row.Attempts}}</dd></div>
+    <div><dt>Read from</dt><dd>{{.From}}</dd></div>
+  </dl>
+  {{template "jobctl" .Ctl}}{{end}}
+</header>
+<div id="results" aria-live="polite"></div>
+{{if .Found}}{{$end := "finished"}}{{if eq .State "failed" "cancelled"}}{{$end = .State}}{{end}}<div class="jobpage">
+  <section class="panel" aria-labelledby="tl-head">
+    <h2 id="tl-head">Timeline</h2>
+    <ol class="timeline jtl">
+      <li class="step-enqueued{{if not .Row.Enqueued}} none{{end}}">{{template "step_icon" "enqueued"}}<span class="what">Enqueued</span>{{if .Row.Enqueued}}<time datetime="{{.Row.EnqueuedISO}}">{{.Row.Enqueued}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+      <li class="gap"><span class="what">Waited</span>{{template "dur" .Waited}}</li>
+      <li class="step-started{{if not .Row.Started}} none{{end}}">{{template "step_icon" "started"}}<span class="what">Started</span>{{if .Row.Started}}<time datetime="{{.Row.StartedISO}}">{{.Row.Started}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+      <li class="gap"><span class="what">Ran</span>{{template "dur" .Ran}}</li>
+      <li class="step-{{$end}}{{if not .Row.Finished}} none{{end}}">{{template "step_icon" $end}}<span class="what">{{if eq $end "cancelled"}}Cancelled{{else if eq $end "failed"}}Failed{{else}}Finished{{end}}</span>{{if .Row.Finished}}<time datetime="{{.Row.FinishISO}}">{{.Row.Finished}}</time>{{else}}<span class="sub">—</span>{{end}}</li>
+    </ol>
+    <p class="total"><span class="what">Total</span>{{template "dur" .Total}}</p>
+    {{with .Row.Errors}}<h2>Errors <span class="sub">oldest first</span></h2>
+    <ol class="errors">{{range .}}<li><span class="what">Attempt {{.Attempt}}</span>{{if .At}}<time datetime="{{.AtISO}}">{{.At}}</time>{{end}}<code class="err">{{.Error}}</code></li>{{end}}</ol>{{end}}
+  </section>
+  <div class="jobdata">
+    <section class="panel" aria-labelledby="pl-head">
+      <h2 id="pl-head">Payload{{if .Row.Cut}} <span class="sub">(first 64 KiB)</span>{{end}}</h2>
+      <pre class="payload" tabindex="0">{{or .Row.Payload "null"}}</pre>
+    </section>
+    <section class="panel" aria-labelledby="rs-head">
+      <h2 id="rs-head">Result{{if .ResultCut}} <span class="sub">(first 64 KiB)</span>{{end}}</h2>
+      {{with .Result}}<pre class="payload" tabindex="0">{{.}}</pre>{{else}}<p class="sub">None{{if eq .State "completed"}}: the worker returned none, or it is over 64 KiB (varmq leaves those out){{end}}.</p>{{end}}
+    </section>
+  </div>
+</div>
+{{else if .NoRoute}}<p class="empty">No {{$.Noun.One}} reporting this queue can read one job. That needs varmq API 1.4.0, and storage that reads a job by ID.</p>
+{{else if not $.Banner}}<div class="empty"><p>No job <span class="mono">{{.ID}}</span> in this queue on any {{$.Noun.One}} that reports it.</p>
+<p>{{if .Memory}}An in-memory queue keeps a job only while it waits or runs, on the {{$.Noun.One}} that runs it. Once it ends it is gone, unless the queue keeps ended jobs (<code>WithEndedJobs</code>).{{else}}Its storage may no longer keep the record of an ended job.{{end}}</p>
+<p><a href="{{.QueueURL}}">Back to the queue</a></p></div>
+{{with .Unsupported}}<p class="pods">It may be on {{range $i, $l := .}}{{if $i}}, {{end}}{{$l}}{{end}}: {{if eq (len .) 1}}it cannot{{else}}they cannot{{end}} read one job (varmq API 1.4.0).</p>{{end}}{{end}}
+{{end}}{{end}}

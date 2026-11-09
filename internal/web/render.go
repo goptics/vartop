@@ -77,6 +77,7 @@ type Page struct {
 	Detail       *fleet.DetailView
 	Queues       *fleet.QueuesView
 	Jobs         *JobsView
+	Job          *JobView
 	WorkflowList *WorkflowsView
 	Workflow     *WorkflowView
 
@@ -150,6 +151,7 @@ var funcs = template.FuncMap{
 	"workerURL":     workerURL,
 	"queuesURL":     queuesURL,
 	"jobsURL":       jobsURL,
+	"jobURL":        jobURL,
 	"workflowsURL":  workflowsURL,
 	"workflowURL":   workflowURL,
 	"domID":         fleet.DOMID,
@@ -169,10 +171,10 @@ var funcs = template.FuncMap{
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",
-// "detail", "queues", "queue", "workflows", "workflow", "results" and
+// "detail", "queues", "queue", "job", "workflows", "workflow", "results" and
 // "confirm" (layout.html + <key>.html). Entry points:
 //
-//   - dashboard, grid, detail, queues, queue, workflows, workflow:
+//   - dashboard, grid, detail, queues, queue, job, workflows, workflow:
 //     ExecuteTemplate(w, "layout", Page) renders the
 //     full document. The dashboard and detail sets also define "live_oob"
 //     (Page): the #live region as an out-of-band swap, for action responses.
@@ -183,10 +185,11 @@ var funcs = template.FuncMap{
 //   - results: ExecuteTemplate(w, "results", ResultsView).
 //   - confirm: ExecuteTemplate(w, "confirm", ConfirmView), and
 //     "queue_confirm" (QueueConfirmView) for a queue action,
-//     "workflow_confirm" (WorkflowConfirmView) for a workflow cancel.
+//     "workflow_confirm" (WorkflowConfirmView) for a workflow cancel,
+//     "job_confirm" (JobConfirmView) for a job cancel.
 func parseTemplates() (map[string]*template.Template, error) {
 	sets := make(map[string]*template.Template)
-	for _, name := range []string{"dashboard", "grid", "detail", "queues", "queue", "workflows", "workflow", "results", "confirm"} {
+	for _, name := range []string{"dashboard", "grid", "detail", "queues", "queue", "job", "workflows", "workflow", "results", "confirm"} {
 		t, err := template.New(name).Funcs(funcs).ParseFS(assets, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse %s template: %w", name, err)
