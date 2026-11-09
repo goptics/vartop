@@ -218,11 +218,12 @@ func CancelJob(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, 
 		r := ActionResult{Pod: g.labels[i], Key: key, Tip: u.Tip(), Outcome: "ok", Msg: "cancel requested"}
 		ok, err := c.CancelJob(ctx, g.ID, jobID)
 		var apiErr *api.APIError
+		ended := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 		switch {
 		case err == nil && !ok:
 			r.Outcome, r.Msg = "failed", "not supported by this "+n.One
 		case err == nil:
-		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict:
+		case ended:
 			r.Outcome, r.Msg = "no change", "already ended"
 		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound && apiErr.Message == "queue not found":
 			r.Outcome, r.Msg = "no change", "queue not on this "+n.One+" now"
@@ -234,7 +235,7 @@ func CancelJob(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, 
 			r.Outcome, r.Msg = "failed", err.Error()
 		}
 		out = append(out, r)
-		if r.Outcome == "ok" || r.Msg == "already ended" {
+		if err == nil && ok || ended {
 			break
 		}
 	}
