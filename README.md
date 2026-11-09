@@ -44,7 +44,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 
 - **Fleet dashboard.** Completed per second, failed per minute, pending jobs and workers by status, with a 10-minute trend per worker.
 - **Instance grid.** Every worker on every instance at a glance: status, busy/concurrency, pending.
-- **Worker page.** A graph of the queues and topics it pulls from, in the order it picks them, with priorities and its strategy (VarMQ API 1.5.0). Totals and success rate. Two charts (completed /s, failed /s) with axes and a hover readout. Each chart has its own **1h | 24h** switch, plus **7d** and **30d** as far as the server's `history` reaches.
+- **Worker page.** A graph of the queues and topics it pulls from, sorted by priority, with its strategy (VarMQ API 1.5.0). Totals and success rate. Two charts (completed /s, failed /s) with axes and a hover readout. Each chart has its own **1h | 24h** switch, plus **7d** and **30d** as far as the server's `history` reaches.
 - **Queues.** One row per Queue ID: its name, backend icon and kind, its counts, and the workers that pull from it. A paused queue shows a **paused** badge. A queue's page lists its jobs, one tab per state.
 - **Workflows** (VarMQ API 1.3.0). Every workflow, newest first, with its state, tasks ended and duration. A workflow that several instances report shows once. Its task graph is laid out left to right, with pan and zoom. Hover a task to trace what it waits for and what waits on it. Click it for its queue, job, reason, result size and undo job. A running workflow's page follows it live.
 - **Job page** (VarMQ API 1.4.0). A job's state and a timeline of how long it waited and ran, with timers that tick while it does. Each failed attempt's error, its payload and its result. Linked from a queue's job list and a workflow's tasks.
@@ -54,7 +54,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 **Act**
 
 - **Pause, resume, restart, stop**, and a concurrency slider, on every instance or on one; pause or resume several workers at once.
-- **Pause or resume a queue** (VarMQ API 1.2.0), after a confirm. vartop sends it to every instance that reports the queue.
+- **Pause or resume a queue** (VarMQ API 1.2.0), after a confirm. vartop sends it to every instance that reports the queue and serves the pause route.
 - **Cancel a workflow**, with or without its undo jobs, after a confirm.
 - **Cancel a job** that waits or runs, after a confirm. Cooperative: a running job stops only if its handler watches its context.
 - **The same from the CLI**, fanned out to every endpoint concurrently, one result line each.
@@ -84,8 +84,8 @@ vartop then calls `http://<instance>:8080/varmq`. The API is unauthenticated by 
 
 **VarMQ v1.11.0 or later** for every page. It serves REST API 1.5.0. The dashboard, the instance grid and the worker actions work with any VarMQ that serves the REST API. With an older VarMQ, the newer pages show less, and each says which API version it needs:
 
-- **Before API 1.5.0:** a worker page draws its sources from the worker's `queue_ids`, without its strategy or priorities.
-- **Before API 1.4.0:** there is no job page and no job cancel.
+- **Before API 1.5.0 (from 1.4.0):** a worker page draws its sources from the worker's `queue_ids`, without its strategy or priorities.
+- **Before API 1.4.0:** there is no job page and no job cancel. A worker page has no sources graph. The queue list names instances, not workers, and the queue page has no workers table. In-memory queues show as *in-memory #n*.
 - **Before API 1.3.0:** the Workflows page says that no instance serves the workflow routes.
 - **Before API 1.2.0:** a queue has no paused badge, and no pause or resume.
 - **Queue storage that does not report its jobs:** the Queues page says it has no queue data.
@@ -163,7 +163,7 @@ Every worker on every instance: spot the one instance that is idle, stuck or beh
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/queues-dark.png">
-  <img alt="The queue list: one row per queue with its backend icon, name and kind, its namespace, its pending, processing, completed, failed and submitted counts, and its workers; the emails queue is paused" src="docs/images/queues-light.png">
+  <img alt="The queue list: one row per queue, with its name, kind, namespace, job counts and workers. The emails queue is paused." src="docs/images/queues-light.png">
 </picture>
 
 **Queues** lists every queue that the instances report, one row per Queue ID. A queue in shared storage, such as Redis, shows once, however many instances report it. Each row shows the queue's name, a backend icon and its kind (FIFO or Priority). The counts are the queue's own: vartop never adds them up across instances. **Workers** names each worker that pulls from the queue, with a link to its page. A paused queue shows a **paused** badge.
@@ -174,7 +174,7 @@ Click a queue for its page. It lists the workers on the queue, and its jobs in o
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/job-dark.png">
-  <img alt="A job page: job ord-1039 is processing, with its attempts, the instance it was read from and a Cancel job button; a timeline of enqueued, waited, started and ran; its payload; no result yet" src="docs/images/job-light.png">
+  <img alt="A job page: job ord-1039 is processing, with a Cancel job button. A timeline shows how long it waited and ran, beside its payload." src="docs/images/job-light.png">
 </picture>
 
 Click a job for its page. It shows the job's state, its attempts and the instance it was read from. The timeline shows when the job was enqueued, started and finished, and how long it waited and ran. While the job waits or runs, those timers tick. Each failed attempt shows its error, and the payload and the result show beside the timeline.
@@ -187,7 +187,7 @@ Click a job for its page. It shows the job's state, its attempts and the instanc
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/workflow-dark.png">
-  <img alt="A running workflow's page: its state, the instances that report it, tasks ended 3 of 7, the Cancel workflow and Cancel without undo buttons, its task graph from extract to report, and the table of its tasks" src="docs/images/workflow-light.png">
+  <img alt="A running workflow's page: 3 of 7 tasks ended, the two cancel buttons, and its task graph from extract to report. A table lists its tasks." src="docs/images/workflow-light.png">
 </picture>
 
 A workflow's page draws its tasks as a graph. vartop lays it out: each task sits in the column of its longest path from a root. Edges into an *always* task are dashed, and a task with an undo job is marked **undo**. Drag to pan. Ctrl or Cmd + scroll (or pinch, or the buttons) zooms. Tab to a task and press Enter, or click it, for its details. The table below lists every task, with a link to each job. While the workflow runs, the page refreshes at each poll, and it stops once the workflow ends.
@@ -340,11 +340,11 @@ flowchart LR
     cli(["vartop action<br/>vartop concurrency"]) -->|"direct"| service
 ```
 
-`vartop web` runs a **collector** for each configured server. At every interval it polls each instance's REST API and works out each worker's rates. It writes the result to that server's file in a local SQLite store. The dashboard, the instance grid and the worker pages read only that store. Every browser tab therefore sees the same numbers, and switching servers is instant. The queue, job and workflow pages read VarMQ live, from the vartop process, at each request. An action from the page goes to VarMQ from the vartop process, with the server's token. The CLI does not use the store: `vartop action` and `vartop concurrency` call each configured or discovered endpoint directly.
+`vartop web` runs a **collector** for each configured server. At every interval it polls each instance's REST API and works out each worker's rates. It writes the result to that server's file in a local SQLite store. The dashboard, the instance grid and the worker pages read only that store. Every browser tab therefore sees the same numbers, and switching servers is instant. The queue, job and workflow pages read VarMQ live, from the vartop process, at each request. They ask the instances in the current snapshot. An action from the page goes to VarMQ from the vartop process, with the server's token. The CLI does not use the store: `vartop action` and `vartop concurrency` call each configured or discovered endpoint directly.
 
 ### Collection
 
-`vartop web` polls **every configured server** while it runs, not only the one on screen, and writes what it sees to a local SQLite store with 24 hours of polls, and each worker's rates for the server's `history`. Its pages read that store. When it stops, collection stops too: nothing keeps running in the background.
+`vartop web` polls **every configured server** while it runs, not only the one on screen. It writes what it sees to a local SQLite store: 24 hours of polls, and each worker's rates for the server's `history`. Its dashboard, grid and worker pages read that store. When it stops, collection stops too: nothing keeps running in the background.
 
 - **It follows the config file.** Adding, editing or removing a server (with `vartop server add` in another terminal, say) takes effect within a few seconds. Deleting `config.json` stops all collection, as if every server were removed; the servers' files stay for 24 hours after their last write, so putting the config back within a day resumes the history. A config that stops parsing or validating while vartop web runs changes nothing: it keeps collecting with the last good one and logs the error. (A broken config keeps vartop web from starting.)
 - **One collector per data directory.** A second `vartop web` on the same machine (on another `--port`) does not collect: it logs *another vartop is collecting into this data directory; this one shows what it collects, and takes over once it stops* and shows what the first one collects. Within about 5 seconds of the first one stopping (about 11 if it crashed), it collects itself.
@@ -495,7 +495,7 @@ vartop
 │       ├── render.go       # Template loading, page model, chart axes
 │       ├── templates/      # HTML pages (htmx-driven, server-rendered)
 │       └── static/         # Embedded CSS, page scripts (chart hover, job timers, queue page, workflow graph) and vendored htmx
-├── docs/                   # Design spec, and the README's screenshots
+├── docs/                   # The README's screenshots
 ├── main.go                 # Entry point
 ├── Makefile                # Build, run, clean, test targets
 ├── go.mod
@@ -514,7 +514,7 @@ vartop
 | `GET` | `/workers/{name}` | Worker details & runtime metrics | 1.0.0 |
 | `PATCH` | `/workers/{name}/actions/{action}` | Pause, resume, restart, stop | 1.0.0 |
 | `PATCH` | `/workers/{name}/config/concurrency/{n}` | Update concurrency pool size | 1.0.0 |
-| `GET` | `/queues` | List the queues, with counts and paused | 1.0.0 |
+| `GET` | `/queues` | List the queues, with counts (`paused` since 1.2.0) | 1.0.0 |
 | `GET` | `/queues/{id}/jobs` | One page of a queue's jobs in one state | 1.0.0 |
 | `PATCH` | `/queues/{id}/actions/{action}` | Pause or resume a queue | 1.2.0 |
 | `GET` | `/workflows` | One page of workflows, newest first | 1.3.0 |
