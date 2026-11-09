@@ -119,7 +119,7 @@ func fullSnapshot(round bool) *fleet.Snapshot {
 			{
 				Key: direct, Via: direct, Instance: "inst-a", Label: "instance-1",
 				Workers: map[string]*fleet.Sample{
-					"emails":  sample(snapAt, 120, "emails", "inst-a", direct, 1000, 4, r(12.34567, 12.346), r(0.0004, 0), true),
+					"emails":  withQueues(sample(snapAt, 120, "emails", "inst-a", direct, 1000, 4, r(12.34567, 12.346), r(0.0004, 0), true), "redisq:prio:{emails}", "memory:inst-a:fifo:1"),
 					"reports": sample(snapAt, 95, "reports", "inst-a", direct, 50, 0, 0, 0, false),
 					"moved":   sample(snapAt, 140, "moved", "inst-z", "http://10.0.0.9:8080/varmq", 7, 1, 0, 0, true),
 					"anon":    sample(snapAt, 77, "anon", "", direct, 9, 0, r(1.0/3, 0.333), 0, true),
@@ -149,6 +149,12 @@ func fullSnapshot(round bool) *fleet.Snapshot {
 		Err:    "",
 		Source: "3f2a9c41d07e8b56",
 	}
+}
+
+// withQueues sets s's QueueIDs.
+func withQueues(s *fleet.Sample, ids ...string) *fleet.Sample {
+	s.QueueIDs = ids
+	return s
 }
 
 func TestRoundTrip(t *testing.T) {
