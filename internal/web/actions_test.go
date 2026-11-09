@@ -187,9 +187,14 @@ func TestActionPartialFailureIs200(t *testing.T) {
 }
 
 func TestActionResponsesNeverCarryToken(t *testing.T) {
-	_, _, aSrv, bSrv := twoFakes(t)
+	fa, fb, aSrv, bSrv := twoFakes(t)
 	dead := httptest.NewServer(http.NotFoundHandler())
 	dead.Close() // refuses connections: its result is a transport error
+	// the dead unit reports no queue: b drops the queue PATCH instead
+	drop := pausableTenant()
+	drop.ActionDrop = true
+	setQueues(fa, pausableTenant())
+	setQueues(fb, drop)
 	srv, _ := newTestServer(t, aSrv, bSrv, dead)
 
 	for _, c := range []struct {
@@ -202,10 +207,16 @@ func TestActionResponsesNeverCarryToken(t *testing.T) {
 		{"/bulk/pause", multi("names", "orders"), false},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1"), true},
 		{"/workers/orders/actions/pause", url.Values{"server": {"other"}}, false},
+		{tenantPath + "/actions/pause", multi(), false},
+		{tenantPath + "/actions/pause", multi("confirm", "1"), true},
 	} {
 		resp, body := post(t, srv, c.path, c.form, true)
 		if c.failed && !strings.Contains(body, `<li class="failed">`) {
 			t.Errorf("POST %s %v: the dead pod's failure is not rendered; the test would miss a token in it", c.path, c.form)
+		}
+		// b's dropped connection: a transport error, not a bad answer
+		if c.failed && strings.HasPrefix(c.path, tenantPath) && !strings.Contains(body, `/actions/pause&#34;: EOF)`) {
+			t.Errorf("POST %s: no transport error rendered:\n%s", c.path, body)
 		}
 		if strings.Contains(body, testToken) {
 			t.Errorf("POST %s %v: body contains the token", c.path, c.form)
@@ -223,18 +234,32 @@ func TestActionResponsesNeverCarryToken(t *testing.T) {
 // PATCHes already under way must still complete on every pod, or an action
 // would be half-applied with no results shown.
 func TestMutationsFinishWhenBrowserAborts(t *testing.T) {
+	worker := func(done func(fleettest.Worker) bool) func(*fleettest.Varmq) bool {
+		return func(f *fleettest.Varmq) bool {
+			w, _ := f.Worker("orders")
+			return done(w)
+		}
+	}
 	for _, c := range []struct {
 		path string
 		form url.Values
-		done func(fleettest.Worker) bool
+		done func(*fleettest.Varmq) bool
 	}{
-		{"/workers/orders/actions/stop", multi(), func(w fleettest.Worker) bool { return w.Status == "Stopped" }},
-		{"/workers/orders/concurrency", multi("n", "9"), func(w fleettest.Worker) bool { return w.Concurrency == 9 }},
-		{"/bulk/pause", multi("names", "orders", "confirm", "1"), func(w fleettest.Worker) bool { return w.Status == "Paused" }},
+		{"/workers/orders/actions/stop", multi(), worker(func(w fleettest.Worker) bool { return w.Status == "Stopped" })},
+		{"/workers/orders/concurrency", multi("n", "9"), worker(func(w fleettest.Worker) bool { return w.Concurrency == 9 })},
+		{"/bulk/pause", multi("names", "orders", "confirm", "1"), worker(func(w fleettest.Worker) bool { return w.Status == "Paused" })},
+		{tenantPath + "/actions/pause", multi("confirm", "1"), func(f *fleettest.Varmq) bool {
+			f.Mu.Lock()
+			q := f.Queues[tenantID]
+			f.Mu.Unlock()
+			return q.Paused()
+		}},
 	} {
 		t.Run(strings.TrimPrefix(c.path, "/"), func(t *testing.T) {
 			t.Parallel()
 			fa, fb, aSrv, bSrv := twoFakes(t)
+			setQueues(fa, pausableTenant()) // one each: b's own flag shows b's PATCH done
+			setQueues(fb, pausableTenant())
 			srv, _ := newTestServer(t, aSrv, bSrv)
 			fb.Mu.Lock()
 			fb.Delay = time.Second // b answers slowly; it drops the request if vartop gives up on it
@@ -258,10 +283,7 @@ func TestMutationsFinishWhenBrowserAborts(t *testing.T) {
 			}
 
 			for _, f := range []*fleettest.Varmq{fa, fb} {
-				fleettest.WaitUntil(t, 3*time.Second, "orders changed on "+f.Instance, func() bool {
-					w, _ := f.Worker("orders")
-					return c.done(w)
-				})
+				fleettest.WaitUntil(t, 3*time.Second, "changed on "+f.Instance, func() bool { return c.done(f) })
 			}
 		})
 	}
@@ -297,6 +319,7 @@ func TestActionRejectsUnknown(t *testing.T) {
 
 func TestPOSTWithoutHXRequest(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
+	setQueues(fa, pausableTenant())
 	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, c := range []struct {
@@ -306,6 +329,7 @@ func TestPOSTWithoutHXRequest(t *testing.T) {
 		{"/workers/orders/actions/pause", multi()},
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+		{tenantPath + "/actions/pause", multi("confirm", "1")},
 	} {
 		if resp, _ := post(t, srv, c.path, c.form, false); resp.StatusCode != http.StatusForbidden {
 			t.Errorf("POST %s without HX-Request = %d, want 403", c.path, resp.StatusCode)
@@ -316,6 +340,7 @@ func TestPOSTWithoutHXRequest(t *testing.T) {
 
 func TestCrossOriginPOST(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
+	setQueues(fa, pausableTenant())
 	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, headers := range []map[string]string{
@@ -330,6 +355,7 @@ func TestCrossOriginPOST(t *testing.T) {
 			{"/workers/orders/actions/pause", multi()},
 			{"/workers/orders/concurrency", multi("n", "9")},
 			{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+			{tenantPath + "/actions/pause", multi("confirm", "1")},
 		} {
 			req := postRequest(t, srv, c.path, c.form)
 			for k, v := range headers {
@@ -349,12 +375,14 @@ func TestCrossOriginPOST(t *testing.T) {
 
 func TestGETOnMutatingRoute(t *testing.T) {
 	fa, fb, aSrv, bSrv := twoFakes(t)
+	setQueues(fa, pausableTenant())
 	srv, _ := newTestServer(t, aSrv, bSrv)
 
 	for _, path := range []string{
 		"/workers/orders/actions/pause?server=multi",
 		"/workers/orders/concurrency?server=multi&n=3",
 		"/bulk/pause?server=multi&names=orders&confirm=1",
+		tenantPath + "/actions/pause?server=multi&confirm=1",
 	} {
 		for _, hx := range []bool{false, true} {
 			if status, _ := fetch(t, srv, path, hx); status != http.StatusMethodNotAllowed {
@@ -371,19 +399,21 @@ func TestNonPOSTMethodsNeedHTMX(t *testing.T) {
 	_, _, aSrv, bSrv := twoFakes(t)
 	srv, _ := newTestServer(t, aSrv, bSrv)
 
-	for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodDelete} {
-		for _, hx := range []bool{false, true} {
-			req, err := http.NewRequest(method, srv.URL+"/workers/orders/actions/pause", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := http.StatusForbidden
-			if hx {
-				req.Header.Set("HX-Request", "true")
-				want = http.StatusMethodNotAllowed
-			}
-			if resp, _ := send(t, srv, req); resp.StatusCode != want {
-				t.Errorf("%s (hx %v) = %d, want %d", method, hx, resp.StatusCode, want)
+	for _, path := range []string{"/workers/orders/actions/pause", tenantPath + "/actions/pause"} {
+		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodDelete} {
+			for _, hx := range []bool{false, true} {
+				req, err := http.NewRequest(method, srv.URL+path, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := http.StatusForbidden
+				if hx {
+					req.Header.Set("HX-Request", "true")
+					want = http.StatusMethodNotAllowed
+				}
+				if resp, _ := send(t, srv, req); resp.StatusCode != want {
+					t.Errorf("%s %s (hx %v) = %d, want %d", method, path, hx, resp.StatusCode, want)
+				}
 			}
 		}
 	}
@@ -1212,6 +1242,8 @@ func TestActionRefusedWhenStale(t *testing.T) {
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
+		{"/queues/q/actions/pause", multi()},
+		{"/queues/q/actions/resume", multi("confirm", "1")},
 	} {
 		start := time.Now()
 		resp, body := post(t, f.srv, c.path, c.form, true)

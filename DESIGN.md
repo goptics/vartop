@@ -167,7 +167,7 @@ Cool neutral greys, one teal accent, four state hues. Light values are the `-lig
 - **Ok Green** (`ok`): active status, healthy count, ok result, finished step, completed tab.
 - **Amber** (`warn`): processing tab, started step, no-change result, absent badge, stale freshness, banners, confirm-panel edge, Restart button text.
 - **Coral Red** (`bad`): stopped status, failed series, hot stat tile, errors, failed tab and step, down grid column tint (6%), Stop button text.
-- **Periwinkle** (`paused`): paused status only.
+- **Periwinkle** (`paused`): paused status only (worker status, queue paused badge).
 
 ### Neutral
 - **Ground** (`bg`): page, payload well, chart tooltip.
@@ -224,7 +224,7 @@ Six-step scale: 12 / 13 / 14 / 16 / 20 / 28px (`--fs-1`..`--fs-6`).
 
 Flat. No drop or offset shadows anywhere, dialogs included (the only modal is the browser's native confirm box). Depth is tonal: `bg` < `panel` < `raised`, separated by 1px hairlines. Sticky elements (rail, state tabs, bulk bar, grid headers) rely on opaque fills, not shadows.
 
-Inset box-shadow appears only as a stroke, three places: hollow status dot (`inset 0 0 0 1.5px`), current range segment ring (`inset 0 0 0 1px line-strong`), current state-tab underline (`inset 0 -2px 0 accent`).
+Inset box-shadow appears only as a stroke, four places: hollow status dot (`inset 0 0 0 1.5px`; also the cancelled job-state dot and timeline icon, in `bad`), current range segment ring (`inset 0 0 0 1px line-strong`), current state-tab underline (`inset 0 -2px 0 accent`).
 
 ### Named Rules
 **The Flat Rule.** A surface is lifted by a step in tone and a hairline, never by a blur.
@@ -254,6 +254,7 @@ Inside `.table-wrap` panel. Head `raised`, 12px/500 `subtle`; cells 8px 12px, ha
 
 ### Badge / chip
 - **Badge:** warn pill, warn 14% tint, 12px/500; "absent on N instances".
+- **Queue paused:** not a badge: the paused status dot + "paused" (12px/500 in the queues list Queue ID cell, title = paused at; "paused since HH:MM" on the job page).
 - **Chip:** neutral pill, `raised` + hairline, 12px; instance names a queue is reported by.
 
 ### Segmented range switch
@@ -270,7 +271,7 @@ Sticky header row and worker column. Cell: status dot (label hidden for active, 
 
 ### Buttons and controls
 Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtle` + fill `line`, active nudges 1px down, disabled 50%. Primary: teal fill. Warn / danger: tinted text only (danger hover border `bad`). Range slider and number input share the `controls` panel (`.controls input[name="n"]` kept in sync by `detail.js`).
-- **Gap:** Restart and Stop use the native `hx-confirm` box, not the confirm panel; only bulk actions use the panel.
+- **Gap:** Restart and Stop use the native `hx-confirm` box, not the confirm panel; only bulk actions and queue pause/resume use the panel.
 
 ### Confirm panel
 `panel`, border warn 45% into `line`, 8px, 14px. Title 16px, one `subtle` line, a table of worker x instance ("not on this instance" in `subtle`), right-aligned teal "Confirm <action>".
@@ -287,9 +288,10 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 
 ### Job page
 - **Header:** mono queue ID (20px/600), "Reported by" chips.
-- **State tabs:** one sticky strip, four equal columns split by hairlines; label (capitalized, state dot: processing warn, completed ok, failed bad, pending `subtle`) over 20px count; current `raised` + 2px teal underline.
+- **Queue controls** (`#qstate`, under the header): paused status dot ("paused since"), default buttons "Pause queue" / "Resume queue" (Resume alone when every instance says paused, Pause alone when none does, both when mixed or unknown); hidden, with a `subtle` line, when no instance reports `paused` (varmq < API 1.2.0). Confirm panel lists instance x sent, then results; `#qstate` refreshed out of band.
+- **State tabs:** one sticky strip, five equal columns split by hairlines (scrolls sideways under 640px); label (capitalized, state dot: processing warn, completed ok, failed bad, cancelled hollow `bad` ring, pending `subtle`) over 20px count, `—` in `subtle` when varmq does not count the state (cancelled); current `raised` + 2px teal underline.
 - **Job list:** one panel; list head (state word, "N–M of T"); rows are `<details>`: dot, mono ID 14px/600 (italic `subtle` "(no ID yet)"), time right, 14px chevron rotating 90deg (.15s, off under reduced motion); second line mono preview (bad-tinted when last error), attempts right. Hover/open accent 7%.
-- **Timeline:** 20px circular SVG step icons tinted 18% (enqueued teal, started warn, finished ok, failed bad), 1px connector; unreached step hollow dashed at 60%.
+- **Timeline:** 20px circular SVG step icons tinted 18% (enqueued teal, started warn, finished ok, failed bad; cancelled: dash on a hollow `bad` ring, labelled "Cancelled"), 1px connector; unreached step hollow dashed at 60%.
   - **Gap:** shows absolute times, not durations between steps.
 - **Errors:** per attempt, bad 7% fill, bad 30% edge, 6px; mono 12px, pre-wrap.
 - **Payload:** ground well, hairline, 6px, mono 12px, max 24em, scrolls, focusable.
@@ -301,7 +303,7 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Do** use `accent` only for selection, focus, current, completed; `bad` for failed series, `subtle` for load fill.
 - **Do** group related numbers in one hairline-split panel (8px radius, 1px `line`).
 - **Do** set every number in tabular figures and right-align numeric columns.
-- **Do** mark uncertain status (transitional, unknown, mixed) with a hollow dot.
+- **Do** mark uncertain status (transitional, unknown, mixed) with a hollow dot. One exception, in `bad`: the cancelled job state (stopped before it ran, not failed).
 - **Do** draw icons as inline SVG (`.ico`: stroke currentColor, 1.5, round caps/joins), `aria-hidden`.
 - **Do** keep tables scrolling inside their wrapper and stack worker/queue rows under 640px.
 - **Do** check every new text colour for >= 4.5:1 on `bg`, `panel`, `raised` in both themes.
@@ -313,4 +315,4 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Don't** use mono outside IDs, payloads, errors, endpoints.
 - **Don't** put state colours on decoration, or teal on anything with a second meaning.
 - **Don't** use gradients (the load bar's hard-stop `linear-gradient` is a fill meter, not a gradient), card soup, or terminal styling.
-- **Don't** rename htmx ids or detail.js hooks: `page`, `live`, `poller`, `status`, `banner`, `banner-merged`, `bulk`, `errors`, `results`, `pick-server`, `pick-unit`; `.history`, `.tip`, `.hit`, `.cross`, `.controls input[name="n"]`.
+- **Don't** rename htmx ids or detail.js hooks: `page`, `live`, `poller`, `status`, `banner`, `banner-merged`, `bulk`, `errors`, `results`, `qstate`, `pick-server`, `pick-unit`; `.history`, `.tip`, `.hit`, `.cross`, `.controls input[name="n"]`.

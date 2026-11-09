@@ -12,19 +12,34 @@ import (
 	"github.com/goptics/vartop/internal/config"
 )
 
-// JobStates are the Job States in the order the UI lists them.
-var JobStates = []contract.JobState{contract.JobPending, contract.JobProcessing, contract.JobCompleted, contract.JobFailed}
+// JobStates are the Job States in the order the UI lists them. Cancelled
+// last: varmq reserves it (spec 1.3.0); its counts have no cancelled field
+// and its jobs route may refuse the state.
+var JobStates = []contract.JobState{contract.JobPending, contract.JobProcessing, contract.JobCompleted, contract.JobFailed, contract.JobCancelled}
 
 // QueueSummary matches an entry of GET /queues (spec QueueSummary): Counts
 // and Totals, or Err when the storage could not be read. The contract has
 // no type for it: contract.QueueStats has no ID or error, and its Counts
 // and Totals are always present.
+//
+// Paused is nil when the server does not report it: varmq before API 1.2.0,
+// which has no queue pause route either. PausedAt: Unix ms on the storage's
+// clock, set only while paused.
 type QueueSummary struct {
-	ID     string              `json:"id"`
-	Counts *contract.JobCounts `json:"counts,omitempty"`
-	Totals *contract.JobTotals `json:"totals,omitempty"`
-	Err    string              `json:"error,omitempty"`
+	ID       string              `json:"id"`
+	Counts   *contract.JobCounts `json:"counts,omitempty"`
+	Totals   *contract.JobTotals `json:"totals,omitempty"`
+	Paused   *bool               `json:"paused,omitempty"`
+	PausedAt int64               `json:"paused_at,omitempty"`
+	Err      string              `json:"error,omitempty"`
 }
+
+// IsPaused reports whether q says it is paused.
+func (q QueueSummary) IsPaused() bool { return q.Paused != nil && *q.Paused }
+
+// CanPause reports whether q's server serves the queue pause route: it
+// reports paused (API 1.2.0+).
+func (q QueueSummary) CanPause() bool { return q.Paused != nil }
 
 // unsupported reports whether err says the server does not serve the route:
 // an older varmq, or a backend with no QueueInspector (404 or 405 from the
@@ -59,6 +74,43 @@ func (c *Client) ListJobs(ctx context.Context, id string, state contract.JobStat
 		return nil, false, err
 	}
 	return jobs, true, nil
+}
+
+// QueueAction sends PATCH /queues/{id}/actions/{action} (pause or resume)
+// and returns the queue's entry as the server answers it, once the flag is
+// stored. Errors are *APIError as sent: 404 (queue not bound here, or no
+// such route on an older varmq), 405, 501 (storage cannot pause), 503.
+func (c *Client) QueueAction(ctx context.Context, id, action string) (QueueSummary, error) {
+	var q QueueSummary
+	// PathEscape: one path segment, as ListJobs.
+	path := "/queues/" + url.PathEscape(id) + "/actions/" + url.PathEscape(action)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.endpoint+path, nil)
+	if err != nil {
+		return q, err
+	}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return q, fmt.Errorf("failed to %s queue %s on %s: %w", action, id, config.ShortOrigin(c.endpoint), err)
+	}
+	return q, c.handleResponse(resp, &q)
+}
+
+// QueueActionUnsupported reports whether err is a server saying it cannot
+// pause or resume the queue: no such route (an older varmq: the router's
+// plain-text 404, or a 405) or storage that cannot pause (501). A JSON 404
+// ("queue not found") is not: the server has the route but not the queue.
+func QueueActionUnsupported(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	case http.StatusNotFound:
+		return apiErr.Message == http.StatusText(http.StatusNotFound) // no {"error":...} body
+	}
+	return false
 }
 
 // getJSON GETs path and decodes the JSON answer into target. what names the

@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/url"
@@ -17,7 +18,8 @@ import (
 
 // The queue pages read varmq live, on GET: the jobs of a queue are paged
 // and too many to collect, and its counts are read with them so that they
-// agree. They are read-only: no job is retried, removed or purged.
+// agree. The one write is a queue's pause and resume (queueAction); no job
+// is retried, removed or purged.
 
 const (
 	defaultJobLimit = 50   // the spec's default page
@@ -39,18 +41,51 @@ func queueConfigChangedMsg(server string) string {
 // JobsView is the job page of one queue: a page of its jobs in State,
 // read from the unit From.
 type JobsView struct {
-	Queue  fleet.QueueGroup
-	State  contract.JobState
-	Tabs   []JobTab
-	Jobs   []JobRow
-	From   string
-	Offset int
-	Limit  int
-	Total  int64 // the count of State, -1: not known
+	Queue fleet.QueueGroup
+	Ctl   QueueCtl
+	State contract.JobState
+	// Unlisted: the server refused to list State (varmq main answers 400
+	// for cancelled, a state its spec reserves).
+	Unlisted bool
+	Tabs     []JobTab
+	Jobs     []JobRow
+	From     string
+	Offset   int
+	Limit    int
+	Total    int64 // the count of State, -1: not known
 	// Prev and Next are the URLs of the pages around this one, "" at an end.
 	Prev, Next string
 	// Pages are the numbered page links, when Total is known; a zero N is a gap.
 	Pages []PageLink
+}
+
+// QueueCtl is the paused badge and the pause and resume buttons of a queue's
+// page (#qstate), and, with OOB, the same as an out-of-band swap for an
+// action response. Since, SinceFull and SinceISO say when it was paused
+// ("" when not known). CanPause: some unit reporting it serves the pause
+// route; NoRoute: the units read the queue and none does (older varmq).
+// Pause and Resume: which buttons show — Resume alone when every unit says
+// paused, Pause alone when none does, both when they differ or one says
+// nothing.
+type QueueCtl struct {
+	Server, ID                 string
+	Paused, CanPause, NoRoute  bool
+	Pause, Resume              bool
+	Since, SinceFull, SinceISO string
+	OOB                        bool
+}
+
+// queueCtl is the QueueCtl of queue g on server.
+func queueCtl(g fleet.QueueGroup, server string) QueueCtl {
+	q := g.QueueSummary
+	all, none := g.PauseState()
+	c := QueueCtl{Server: server, ID: q.ID, Paused: q.IsPaused(), CanPause: q.CanPause(), NoRoute: q.Err == "" && !q.CanPause(),
+		Pause: !all, Resume: !none}
+	if c.Paused && q.PausedAt > 0 {
+		c.Since = shortTime(time.UnixMilli(q.PausedAt), time.Now())
+		c.SinceFull, c.SinceISO = msTime(q.PausedAt)
+	}
+	return c
 }
 
 // PageLink is one numbered link of the pager.
@@ -234,12 +269,18 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 	for _, s := range api.JobStates {
 		v.Tabs = append(v.Tabs, JobTab{State: s, URL: jobsURL(g.ID, p.Server, s, 0, v.Limit), Count: stateCount(g.Counts, s), Current: s == v.State})
 	}
+	v.Ctl = queueCtl(g, p.Server)
 	if g.Err != "" {
 		p.Banner = g.ID + ": " + g.Err
 		return v
 	}
 	jobs, from, err := fleet.FetchJobs(r.Context(), g, v.State, v.Offset, v.Limit)
-	if err != nil {
+	var apiErr *api.APIError
+	switch {
+	case err != nil && v.State == contract.JobCancelled && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest:
+		v.Unlisted = true // not a failure: this varmq does not list the state
+		return v
+	case err != nil:
 		p.Banner = g.ID + ": " + err.Error()
 		return v
 	}
@@ -259,7 +300,8 @@ func (h *handler) jobs(r *http.Request, p *Page, g fleet.QueueGroup) *JobsView {
 	return v
 }
 
-// stateCount is c's count of state, -1 without counts.
+// stateCount is c's count of state, -1 without counts or for a state they
+// do not count (cancelled: spec 1.3.0 counts have no such field).
 func stateCount(c *contract.JobCounts, state contract.JobState) int64 {
 	if c == nil {
 		return -1
@@ -271,8 +313,62 @@ func stateCount(c *contract.JobCounts, state contract.JobState) int64 {
 		return c.Processing
 	case contract.JobCompleted:
 		return c.Completed
+	case contract.JobFailed:
+		return c.Failed
 	}
-	return c.Failed
+	return -1
+}
+
+// queueActions are the actions a queue route accepts.
+var queueActions = []string{"pause", "resume"}
+
+// QueueConfirmView is the confirmation panel of a queue action: Action on
+// queue ID of Server, sent to each of Units (a unit that does not serve the
+// route is sent nothing).
+type QueueConfirmView struct {
+	Action, Server, ID string
+	Noun               fleet.Noun
+	Units              []fleet.QueueUnit
+}
+
+// queueAction pauses or resumes queue id on every unit of the form's
+// server that reports it (see fleet.QueueAct). As an action on workers, it
+// is refused unless the server's newest snapshot may be acted on (bind).
+// Without confirm=1 it only answers the confirmation panel and calls
+// nothing. The answer is the results, and the page's #qstate out of band,
+// as the units answered the action (see fleet.QueueAct).
+func (h *handler) queueAction(w http.ResponseWriter, r *http.Request) {
+	id, action := r.PathValue("id"), r.PathValue("action")
+	if !slices.Contains(queueActions, action) {
+		badRequest(w, "unknown queue action: want pause or resume")
+		return
+	}
+	t, ok := h.bind(w, r)
+	if !ok {
+		return
+	}
+	clients := fleet.ClientsFor(t.latest, t.srv.Token)
+	label := fleet.UnitLabel(t.latest)
+	g, found := fleet.GroupQueues(fleet.FetchQueues(r.Context(), clients, label)).Group(id)
+	switch {
+	case !found:
+		conflict(w, "Queue "+strconv.Quote(id)+" is no longer reported by any "+t.noun.One+" — reload")
+		return
+	case g.Err != "" && !g.CanPause():
+		conflict(w, "cannot read queue "+strconv.Quote(id)+": "+g.Err)
+		return
+	case !g.CanPause():
+		badRequest(w, "no "+t.noun.One+" reporting this queue supports pause and resume (varmq API 1.2.0)")
+		return
+	}
+	if r.PostFormValue("confirm") != "1" {
+		h.fragments(w, fragment{"confirm", "queue_confirm", QueueConfirmView{Action: action, Server: t.key, ID: id, Noun: t.noun, Units: g.Units()}})
+		return
+	}
+	results, after := fleet.QueueAct(mutationCtx(r), g, fleet.UnitsOf(t.latest), t.noun, action)
+	ctl := queueCtl(after, t.key)
+	ctl.OOB = true
+	h.fragments(w, fragment{"results", "results", ResultsView{Results: results, Noun: t.noun}}, fragment{"queue", "qstate", ctl})
 }
 
 func jobRow(j contract.JobRecord, n int) JobRow {

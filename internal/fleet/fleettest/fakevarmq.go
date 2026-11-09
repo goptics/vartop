@@ -63,6 +63,7 @@ func NewVarmq(t *testing.T, instance string, workers map[string]*Worker) (*Varmq
 	mux.HandleFunc("PATCH /workers/{name}/config/concurrency/{n}", f.concurrency)
 	mux.HandleFunc("GET /queues", f.queues)
 	mux.HandleFunc("GET /queues/{id}/jobs", f.jobs)
+	mux.HandleFunc("PATCH /queues/{id}/actions/{action}", f.queueAction)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isList := r.Method == http.MethodGet && r.URL.Path == "/workers"
@@ -240,11 +241,39 @@ func (f *Varmq) mutate(w http.ResponseWriter, name string, change func(*Worker) 
 	}
 }
 
-// fakeSummary is the GET /workers entry for a worker; a nil worker has only a name.
-// Queue is one queue as a Varmq serves it, as spec-shaped JSON.
+// Queue is one queue as a Varmq serves it, as spec-shaped JSON. Several
+// Varmqs may share one Queue: its storage, the pause flag included.
 type Queue struct {
 	Summary string              // its GET /queues entry, a QueueSummary object
 	Jobs    map[string][]string // Job objects by Job State, in the order served
+	// ActionStatus, when non-zero, makes PATCH /queues/{id}/actions/*
+	// reply with it, changing nothing: 404 as the router's plain text (an
+	// older varmq), others with {"error":"..."}.
+	ActionStatus int
+	// ActionErr, when set, makes a queue action store the flag, then answer
+	// 200 {"id":...,"error":ActionErr}: varmq when re-reading the queue fails.
+	ActionErr string
+	// ActionDrop closes the connection on a queue action: a transport error.
+	ActionDrop bool
+	// JobsStatus, when non-zero, makes GET /queues/{id}/jobs reply with it
+	// and {"error":"..."}.
+	JobsStatus int
+
+	mu sync.Mutex // guards Summary across the Varmqs sharing it
+}
+
+// summary is q's GET /queues entry.
+func (q *Queue) summary() json.RawMessage {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return json.RawMessage(q.Summary)
+}
+
+// Paused reports whether q's entry says paused.
+func (q *Queue) Paused() bool {
+	var e struct{ Paused bool }
+	_ = json.Unmarshal(q.summary(), &e)
+	return e.Paused
 }
 
 func (f *Varmq) queues(w http.ResponseWriter, _ *http.Request) {
@@ -257,9 +286,60 @@ func (f *Varmq) queues(w http.ResponseWriter, _ *http.Request) {
 	ids := slices.Sorted(maps.Keys(f.Queues))
 	out := make([]json.RawMessage, len(ids))
 	for i, id := range ids {
-		out[i] = json.RawMessage(f.Queues[id].Summary)
+		out[i] = f.Queues[id].summary()
 	}
 	writeFakeJSON(w, http.StatusOK, out)
+}
+
+// queueAction pauses or resumes a queue as varmq's handleQueueAction does:
+// idempotent, paused_at kept on a repeat pause, the entry in reply.
+func (f *Varmq) queueAction(w http.ResponseWriter, r *http.Request) {
+	f.Mu.Lock()
+	var q *Queue
+	if f.Queues != nil {
+		q = f.Queues[r.PathValue("id")]
+	}
+	f.Mu.Unlock()
+	switch {
+	case f.Queues == nil:
+		http.NotFound(w, nil)
+		return
+	case q == nil:
+		writeFakeError(w, http.StatusNotFound, "queue not found")
+		return
+	case q.ActionStatus == http.StatusNotFound:
+		http.NotFound(w, nil)
+		return
+	case q.ActionStatus != 0:
+		writeFakeError(w, q.ActionStatus, http.StatusText(q.ActionStatus))
+		return
+	case q.ActionDrop:
+		if c, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = c.Close()
+		}
+		return
+	}
+	action := r.PathValue("action")
+	if action != "pause" && action != "resume" {
+		writeFakeError(w, http.StatusBadRequest, "unknown action")
+		return
+	}
+	q.mu.Lock()
+	var e map[string]any
+	_ = json.Unmarshal([]byte(q.Summary), &e)
+	if action == "resume" {
+		e["paused"] = false
+		delete(e, "paused_at")
+	} else if e["paused"] != true {
+		e["paused"], e["paused_at"] = true, time.Now().UnixMilli()
+	}
+	b, _ := json.Marshal(e)
+	q.Summary = string(b)
+	if q.ActionErr != "" {
+		b, _ = json.Marshal(map[string]any{"id": e["id"], "error": q.ActionErr})
+	}
+	q.mu.Unlock()
+	writeFakeJSON(w, http.StatusOK, json.RawMessage(b))
 }
 
 func (f *Varmq) jobs(w http.ResponseWriter, r *http.Request) {
@@ -274,14 +354,20 @@ func (f *Varmq) jobs(w http.ResponseWriter, r *http.Request) {
 		writeFakeError(w, http.StatusNotFound, "queue not found")
 		return
 	}
+	if q.JobsStatus != 0 {
+		writeFakeError(w, q.JobsStatus, http.StatusText(q.JobsStatus))
+		return
+	}
 	state := r.URL.Query().Get("state")
 	offset, err1 := strconv.Atoi(cmp.Or(r.URL.Query().Get("offset"), "0"))
 	limit, err2 := strconv.Atoi(cmp.Or(r.URL.Query().Get("limit"), "50"))
-	if !slices.Contains([]string{"pending", "processing", "completed", "failed"}, state) || err1 != nil || err2 != nil || offset < 0 || limit < 1 || limit > 1000 {
+	_, listsCancelled := q.Jobs["cancelled"] // a varmq that lists it (spec 1.3.0)
+	known := slices.Contains([]string{"pending", "processing", "completed", "failed"}, state) || state == "cancelled" && listsCancelled
+	if !known || err1 != nil || err2 != nil || offset < 0 || limit < 1 || limit > 1000 {
 		writeFakeError(w, http.StatusBadRequest, "invalid state, offset or limit")
 		return
 	}
-	all := q.Jobs[state]
+	all := q.Jobs[state] // Jobs: changed only under f.Mu
 	page := all[min(offset, len(all)):min(offset+limit, len(all))]
 	out := make([]json.RawMessage, len(page))
 	for i, j := range page {
@@ -290,6 +376,7 @@ func (f *Varmq) jobs(w http.ResponseWriter, r *http.Request) {
 	writeFakeJSON(w, http.StatusOK, out)
 }
 
+// fakeSummary is the GET /workers entry for a worker; a nil worker has only a name.
 func fakeSummary(name string, fw *Worker) map[string]any {
 	if fw == nil {
 		fw = &Worker{}
