@@ -632,3 +632,30 @@ func TestCancelJob(t *testing.T) {
 		t.Errorf("none takes it: results =\n%+v\nwant\n%+v", res, want)
 	}
 }
+
+// A unit that fails (5xx) gives way to the next, which has the job; a
+// cancel goes on past a unit that fails to the one that takes it.
+func TestFetchAndCancelJobPastFailure(t *testing.T) {
+	const id = "memory:x:fifo:1"
+	failing := memQueue(id, nil)
+	failing.JobStatus, failing.CancelStatus = http.StatusInternalServerError, http.StatusServiceUnavailable
+	_, a := queueFake(t, "a", map[string]*fleettest.Queue{id: failing})
+	fb, b := queueFake(t, "b", map[string]*fleettest.Queue{id: memQueue(id, fleettest.SampleJobs(1762228800000))})
+	clients := []*api.Client{api.NewClient(a.URL, ""), api.NewClient(b.URL, "")}
+	g, _ := GroupQueues(FetchQueues(context.Background(), clients, byInstance)).Group(id)
+
+	if r := FetchJob(context.Background(), g, "ord-1042"); !r.Found || r.From != "b" || r.Err != nil {
+		t.Errorf("FetchJob past a 500 = %+v, want found on b", r)
+	}
+	res := CancelJob(context.Background(), g, nil, instanceNoun, "ord-1042")
+	want := []ActionResult{
+		{Pod: "a", Key: a.URL, Tip: a.URL, Outcome: "failed", Msg: "Service Unavailable"},
+		{Pod: "b", Key: b.URL, Tip: b.URL, Outcome: "ok", Msg: "cancel requested"},
+	}
+	if !slices.Equal(res, want) {
+		t.Errorf("results =\n%+v\nwant\n%+v", res, want)
+	}
+	if !slices.Contains(fb.Calls(), "PATCH /queues/memory:x:fifo:1/jobs/ord-1042/actions/cancel") {
+		t.Errorf("b calls %v", fb.Calls())
+	}
+}

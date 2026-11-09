@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -829,11 +830,20 @@ func TestQueueNamesHostile(t *testing.T) {
 	}
 	d, _ := fleet.BuildDetail([]*fleet.Snapshot{s}, "", evil, 0, instanceNoun)
 	jobs := &JobsView{Queue: groups[0], Ctl: QueueCtl{ID: ids[0]}, Workers: queueWorkers(s, ids[0], "dev")}
+	evilJSON, _ := json.Marshal(map[string]string{evil: evil})
+	job := jobView(groups[0], parseQueueID(ids[0]), evil, "dev", fleet.JobRead{Found: true, From: evil, Job: contract.JobRecord{ID: evil, State: contract.JobPending,
+		Payload: evilJSON, Result: evilJSON, EnqueuedAt: 1, Errors: []contract.JobError{{Attempt: 1, At: 2, Error: evil}}}}, viewT0)
+	if !job.Ctl.Cancel {
+		t.Fatal("hostile job: no cancel button to check")
+	}
 	for name, body := range map[string]string{
 		"list":    run(t, "queues", "layout", Page{Server: "dev", owners: ownersOf(s), Queues: &fleet.QueuesView{Groups: groups}}),
 		"page":    run(t, "queue", "layout", Page{Server: "dev", owners: ownersOf(s), Jobs: jobs}),
 		"worker":  run(t, "detail", "layout", Page{Server: "dev", owners: ownersOf(s), Detail: &d}),
 		"confirm": run(t, "confirm", "queue_confirm", QueueConfirmView{Action: "pause", Server: "dev", Queue: parseQueueID(ids[0]), Noun: instanceNoun}),
+		"job":     run(t, "job", "layout", Page{Server: "dev", owners: ownersOf(s), Job: job}),
+		"job confirm": run(t, "confirm", "job_confirm", JobConfirmView{Server: "dev", ID: evil, Queue: parseQueueID(ids[0]), Noun: instanceNoun, On: []string{evil},
+			Ctl: JobCtl{Server: "dev", QueueID: ids[0], ID: evil}}),
 	} {
 		if strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
 			t.Errorf("%s: a field rendered as markup", name)
@@ -1007,5 +1017,60 @@ func TestJobSpans(t *testing.T) {
 	}
 	if u := jobURL("redisq:fifo:{a/b}", "x.y", "s"); u != "/queues/redisq:fifo:%7Ba%2Fb%7D/jobs/x.y?server=s" {
 		t.Errorf("jobURL = %q", u)
+	}
+}
+
+// A unit that fails, with none holding the job, is the page's banner, not
+// "not found" (the job may be on it); the ID "." read as %2E is shown, not
+// offered a cancel (a browser cannot post to it); a unit that cannot read
+// one job, beside one that says not found, is named as where it may be.
+func TestJobPageFailuresAndOddIDs(t *testing.T) {
+	varmqs, fakes, _ := jobQueue(t)
+	srv, _ := newTestServer(t, fakes...)
+
+	status, body := fetch(t, srv, tenantPath+"/jobs/%2E?server=multi", false)
+	if status != http.StatusOK || !strings.Contains(body, `<h1 class="qid">.</h1><span class="jstate state-pending">`) || strings.Contains(body, "Cancel job") {
+		t.Errorf("job . = %d:\n%s", status, body)
+	}
+	want := "GET " + tenantPath + "/jobs/%2E"
+	if !slices.Contains(varmqs[0].Calls(), want) && !slices.Contains(varmqs[1].Calls(), want) {
+		t.Errorf("no sharer got %s", want)
+	}
+
+	// a fails (500), b has no such job: one storage each now
+	failing, empty := tenantQueue(), tenantQueue()
+	failing.JobStatus = http.StatusInternalServerError
+	setQueues(varmqs[0], failing)
+	setQueues(varmqs[1], empty)
+	status, body = fetch(t, srv, jobPage("ord-1042"), false)
+	if status != http.StatusOK || !strings.Contains(body, `<p class="banner">`+tenantID+`: API error (status 500)`) || strings.Contains(body, "No job") {
+		t.Errorf("failing unit = %d:\n%s", status, body)
+	}
+
+	// b serves no one-job read (router 404), a has no such job
+	varmqs[0].Mu.Lock()
+	failing.JobStatus = 0
+	varmqs[0].Mu.Unlock()
+	varmqs[1].Mu.Lock()
+	empty.JobStatus = http.StatusNotFound
+	varmqs[1].Mu.Unlock()
+	b := fleettest.StaticLabels(fakes[0].URL, fakes[1].URL, fakes[2].URL)[fakes[1].URL]
+	status, body = fetch(t, srv, jobPage("ord-1042"), false)
+	if status != http.StatusNotFound || !strings.Contains(body, "No job") || !strings.Contains(body, "It may be on "+b+": it cannot read one job") {
+		t.Errorf("partly unsupported = %d:\n%s", status, body)
+	}
+}
+
+// A result over maxPayload once indented is cut, and labelled so.
+func TestJobResultCut(t *testing.T) {
+	big, _ := json.Marshal(map[string]string{"blob": strings.Repeat("x", maxPayload)})
+	g := fleet.QueueGroup{QueueSummary: api.QueueSummary{ID: "q"}}
+	v := jobView(g, parseQueueID("q"), "j", "dev", fleet.JobRead{Found: true, Job: contract.JobRecord{ID: "j", State: contract.JobCompleted, Payload: []byte("1"), Result: big}}, viewT0)
+	if !v.ResultCut || len(v.Result) != maxPayload {
+		t.Fatalf("result cut %v, %d bytes, want cut at %d", v.ResultCut, len(v.Result), maxPayload)
+	}
+	body := run(t, "job", "layout", Page{Server: "dev", Job: v})
+	if !strings.Contains(body, `<h2 id="rs-head">Result <span class="sub">(first 64 KiB)</span></h2>`) || len(body) > 2*maxPayload {
+		t.Errorf("cut result: no label, or %d bytes rendered", len(body))
 	}
 }
