@@ -564,7 +564,7 @@ func TestWorkflowPage(t *testing.T) {
 		`<h1 class="qid">` + fleettest.RunningID + `</h1>`, "Running for", "refresh every 1s",
 		`<a class="node t-pending live" href="#task-4"`, "Cancel without undo",
 		`<a class="ql" href="/queues/redisq:shop:fifo:%7Betl%7D?server=multi"><span class="qn" title="redisq:shop:fifo:{etl}">`,
-		`<span class="qnm">etl</span> <span class="qkind">FIFO</span></span></a>`, `<text class="meta" x="30" y="42">pending · audit</text>`,
+		`<span class="qnm">etl</span> <span class="qkind">FIFO</span></span></a>`, `<text class="meta" x="30" y="42">pending · audit</text>`, `<title>audit-log · redisq:shop:fifo:{audit}</title>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("running page lacks %q", want)
