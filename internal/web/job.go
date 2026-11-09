@@ -38,7 +38,7 @@ type JobView struct {
 	Memory   bool
 	From     string
 	// Unsupported labels the units reporting the queue that cannot read
-	// one job, when some can.
+	// one job (the page names them only when some can).
 	Unsupported []string
 
 	State string
@@ -100,10 +100,7 @@ func jobSpans(j contract.JobRecord, now int64) (waited, ran, total JobSpan) {
 // jobView is the view of job r read of queue g on server, at now.
 func jobView(g fleet.QueueGroup, q QueueName, jobID, server string, r fleet.JobRead, now time.Time) *JobView {
 	v := &JobView{Queue: q, QueueURL: jobsURL(g.ID, server, "", 0, defaultJobLimit), ID: jobID,
-		Found: r.Found, NoRoute: r.NoRoute(g), Memory: q.Backend == "memory", From: r.From}
-	if len(r.Unsupported) < len(g.Clients) {
-		v.Unsupported = r.Unsupported
-	}
+		Found: r.Found, NoRoute: r.NoRoute(g), Memory: q.Backend == "memory", From: r.From, Unsupported: r.Unsupported}
 	if !r.Found {
 		return v
 	}

@@ -460,9 +460,8 @@ a.ql:hover .qnm { color: var(--accent); text-decoration: underline; }
 .jobpage .panel > p.sub { margin: 0; }
 .dur { font-variant-numeric: tabular-nums; }
 .jtl li.gap { min-height: 28px; }
-.jtl li.gap .what { font-size: var(--fs-2); }
 .jtl li.gap::after { top: 0; }
-.jtl li.gap .what { grid-column: 2; }
+.jtl li.gap .what { grid-column: 2; font-size: var(--fs-2); }
 .jtl li.gap .dur { color: var(--fg); font-weight: 500; }
 .total { display: grid; grid-template-columns: 20px 5.5em minmax(0, 1fr); gap: 8px; margin: 0; padding-top: 10px; border-top: 1px solid var(--line); }
 .total .what { grid-column: 2; color: var(--subtle); }

@@ -96,9 +96,10 @@ func (c *Client) QueueAction(ctx context.Context, id, action string) (QueueSumma
 }
 
 // QueueActionUnsupported reports whether err is a server saying it cannot
-// pause or resume the queue: no such route (an older varmq: the router's
-// plain-text 404, or a 405) or storage that cannot pause (501). A JSON 404
-// ("queue not found") is not: the server has the route but not the queue.
+// serve a queue or job route: no such route (an older varmq: the router's
+// plain-text 404, or a 405) or storage without the interface (501: cannot
+// pause, read or cancel one job). A JSON 404 ("queue not found", "job not
+// found") is not: the server has the route but not the queue or job.
 func QueueActionUnsupported(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -129,11 +130,11 @@ func jobPath(id, jobID string) string {
 
 // GetJob fetches GET /queues/{id}/jobs/{jobId} (API 1.4.0): one job, its
 // result included. ok is false, with no error, when the server does not
-// serve it (see JobRouteUnsupported). A JSON 404 (queue or job not found
+// serve it (see QueueActionUnsupported). A JSON 404 (queue or job not found
 // on this instance) is an *APIError: another instance may have it.
 func (c *Client) GetJob(ctx context.Context, id, jobID string) (job contract.JobRecord, ok bool, err error) {
 	if err := c.getJSON(ctx, jobPath(id, jobID), "read job "+jobID+" of "+id, &job); err != nil {
-		if JobRouteUnsupported(err) {
+		if QueueActionUnsupported(err) {
 			return job, false, nil
 		}
 		return job, false, err
@@ -143,7 +144,7 @@ func (c *Client) GetJob(ctx context.Context, id, jobID string) (job contract.Job
 
 // CancelJob sends PATCH /queues/{id}/jobs/{jobId}/actions/cancel (API
 // 1.4.0). nil: 202, cancel requested. ok is false, with no error, when the
-// server does not serve it (see JobRouteUnsupported). Other errors are
+// server does not serve it (see QueueActionUnsupported). Other errors are
 // *APIError as sent: 404 (queue, or an in-memory queue's job, not here),
 // 409 (the job already ended), 503.
 func (c *Client) CancelJob(ctx context.Context, id, jobID string) (ok bool, err error) {
@@ -156,18 +157,13 @@ func (c *Client) CancelJob(ctx context.Context, id, jobID string) (ok bool, err 
 		return false, fmt.Errorf("failed to cancel job %s of %s on %s: %w", jobID, id, config.ShortOrigin(c.endpoint), err)
 	}
 	if err := c.handleResponse(resp, nil); err != nil {
-		if JobRouteUnsupported(err) {
+		if QueueActionUnsupported(err) {
 			return false, nil
 		}
 		return false, err
 	}
 	return true, nil
 }
-
-// JobRouteUnsupported reports whether err says the server cannot serve a
-// one-job route: as QueueActionUnsupported, no such route (varmq before
-// API 1.4.0) or storage without the interface (501).
-func JobRouteUnsupported(err error) bool { return QueueActionUnsupported(err) }
 
 // getJSON GETs path and decodes the JSON answer into target. what names the
 // call in a transport error ("failed to <what>").

@@ -74,7 +74,7 @@ func NewVarmq(t *testing.T, instance string, workers map[string]*Worker) (*Varmq
 	mux.HandleFunc("GET /queues", f.queues)
 	mux.HandleFunc("GET /queues/{id}/jobs", f.jobs)
 	mux.HandleFunc("GET /queues/{id}/jobs/{jobId}", f.job)
-	mux.HandleFunc("PATCH /queues/{id}/jobs/{jobId}/actions/{action}", f.jobAction)
+	mux.HandleFunc("PATCH /queues/{id}/jobs/{jobId}/actions/cancel", f.jobCancel)
 	mux.HandleFunc("PATCH /queues/{id}/actions/{action}", f.queueAction)
 	mux.HandleFunc("GET /workflows", f.workflows)
 	mux.HandleFunc("GET /workflows/{id}", f.workflow)
@@ -466,10 +466,10 @@ func (f *Varmq) job(w http.ResponseWriter, r *http.Request) {
 	writeFakeJSON(w, http.StatusOK, json.RawMessage(q.Jobs[st][i]))
 }
 
-// jobAction serves PATCH /queues/{id}/jobs/{jobId}/actions/cancel as an
+// jobCancel serves PATCH /queues/{id}/jobs/{jobId}/actions/cancel as an
 // in-memory queue does: a waiting or running job is cancelled at once
 // (202), an ended one is 409, an unknown one 404.
-func (f *Varmq) jobAction(w http.ResponseWriter, r *http.Request) {
+func (f *Varmq) jobCancel(w http.ResponseWriter, r *http.Request) {
 	f.Mu.Lock()
 	defer f.Mu.Unlock()
 	q := f.jobQueue(w, r, func(q *Queue) int { return q.CancelStatus })
@@ -478,10 +478,6 @@ func (f *Varmq) jobAction(w http.ResponseWriter, r *http.Request) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if r.PathValue("action") != "cancel" {
-		writeFakeError(w, http.StatusBadRequest, "unknown action")
-		return
-	}
 	st, i, ok := q.findJob(r.PathValue("jobId"))
 	switch {
 	case !ok:
