@@ -5,12 +5,10 @@
 </div>
 {{if and .QueueIDs (not $.Stale)}}<p class="wqueues"><span class="sub">Queues</span>{{range .QueueIDs}} <a class="ql" href="{{jobsURL . $.Server "" 0 50}}">{{template "qname" ($.QName .)}}</a>{{end}}</p>{{end}}
 <section class="counters" aria-label="Counters">{{if $.Stale}}
-  <div class="card"><h2>Submitted</h2><p class="big">—</p></div>
   <div class="card"><h2>Completed</h2><p class="big">—</p></div>
   <div class="card"><h2>Successful</h2><p class="big">—</p></div>
   <div class="card failed"><h2>Failed</h2><p class="big">—</p></div>
   <div class="card"><h2>Success rate</h2><p class="big">—</p></div>{{else}}
-  <div class="card"><h2>Submitted</h2><p class="big">{{.Submitted}}</p></div>
   <div class="card"><h2>Completed</h2><p class="big">{{.Completed}}</p></div>
   <div class="card"><h2>Successful</h2><p class="big">{{.Successful}}</p></div>
   <div class="card failed{{if gt .Failed 0}} hot{{end}}"><h2>Failed</h2><p class="big">{{.Failed}}</p></div>

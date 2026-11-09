@@ -112,7 +112,7 @@ type GridView struct {
 // DetailView is screen C.
 type DetailView struct {
 	Name, Status, Class, StatusTip           string
-	Submitted, Completed, Successful, Failed uint64
+	Completed, Successful, Failed            uint64
 	SuccessRate                              string      // "99.5%" or "—"
 	ConcurrencyStart, ConcurrencyMax         int         // start = max current per-pod; max = max(64, 2*start)
 	Completed1h, Failed1h                    []Point     // per second
@@ -303,7 +303,6 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 		if p.Err != "" || sm == nil {
 			continue
 		}
-		d.Submitted += sm.Metrics.Submitted
 		d.Completed += sm.Metrics.Completed
 		d.Successful += sm.Metrics.Successful
 		d.Failed += sm.Metrics.Failed

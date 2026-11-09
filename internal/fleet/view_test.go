@@ -715,15 +715,15 @@ func TestBuildGridAlignsCells(t *testing.T) {
 }
 
 func TestBuildDetail(t *testing.T) {
-	counters := func(sm *Sample, submitted, completed, ok, failed uint64) *Sample {
-		sm.Metrics.Submitted, sm.Metrics.Completed, sm.Metrics.Successful, sm.Metrics.Failed = submitted, completed, ok, failed
+	counters := func(sm *Sample, completed, ok, failed uint64) *Sample {
+		sm.Metrics.Completed, sm.Metrics.Successful, sm.Metrics.Failed = completed, ok, failed
 		return sm
 	}
 	iv := 5 * time.Second
 
 	s := snap(atTick(0),
-		okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 10, 8, 6, 2)}),
-		okPod("p1", map[string]*Sample{"orders": counters(smp("Idle", 8, 0, 8, 0), 1, 1, 1, 0)}),
+		okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 8, 6, 2)}),
+		okPod("p1", map[string]*Sample{"orders": counters(smp("Idle", 8, 0, 8, 0), 1, 1, 0)}),
 		okPod("p2", map[string]*Sample{"billing": smp("Running", 2, 0, 2, 0)}),
 	)
 	d, ok := BuildDetail([]*Snapshot{s}, "", "orders", iv, podNoun)
@@ -736,8 +736,8 @@ func TestBuildDetail(t *testing.T) {
 	if want := "p0: Running\np1: Idle"; d.StatusTip != want {
 		t.Errorf("StatusTip = %q, want %q", d.StatusTip, want)
 	}
-	if d.Submitted != 11 || d.Completed != 9 || d.Successful != 7 || d.Failed != 2 {
-		t.Errorf("counters = %d/%d/%d/%d, want 11/9/7/2 (summed over reporting pods)", d.Submitted, d.Completed, d.Successful, d.Failed)
+	if d.Completed != 9 || d.Successful != 7 || d.Failed != 2 {
+		t.Errorf("counters = %d/%d/%d, want 9/7/2 (summed over reporting pods)", d.Completed, d.Successful, d.Failed)
 	}
 	if d.SuccessRate != "77.8%" {
 		t.Errorf("SuccessRate = %q, want 77.8%% (7/9)", d.SuccessRate)
@@ -756,7 +756,7 @@ func TestBuildDetail(t *testing.T) {
 	}
 
 	// 6 ok / 2 failed on one pod.
-	one := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 8, 8, 6, 2)}))
+	one := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 8, 6, 2)}))
 	if d, _ = BuildDetail([]*Snapshot{one}, "", "orders", iv, podNoun); d.SuccessRate != "75.0%" {
 		t.Errorf("SuccessRate = %q, want 75.0%%", d.SuccessRate)
 	}
@@ -780,7 +780,7 @@ func TestBuildDetail(t *testing.T) {
 
 	// Pod filter narrows counters, status and the pod list.
 	d, ok = BuildDetail([]*Snapshot{s}, "p1", "orders", iv, podNoun)
-	if !ok || d.Status != "Idle" || d.Submitted != 1 || len(d.Pods) != 1 || d.Pods[0].Key != "p1" {
+	if !ok || d.Status != "Idle" || len(d.Pods) != 1 || d.Pods[0].Key != "p1" {
 		t.Errorf("p1 detail = %+v ok=%v", d, ok)
 	}
 

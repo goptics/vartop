@@ -683,7 +683,7 @@ func detailPage() Page {
 	p.Dashboard = nil
 	p.Detail = &fleet.DetailView{
 		Name: "a/b c", Status: "Running", Class: "active", StatusTip: "a: Running",
-		Submitted: 10, Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
+		Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
 		ConcurrencyStart: 4, ConcurrencyMax: 64,
 		Completed1h: []fleet.Point{ptAt(atTick(0), 1), ptAt(atTick(1), 2)}, Failed1h: []fleet.Point{ptAt(atTick(0), 0), ptAt(atTick(1), 0)},
 		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}}, QueueIDs: []string{"redisq:fifo:{orders}"},
