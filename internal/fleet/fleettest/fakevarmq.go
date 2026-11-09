@@ -73,6 +73,8 @@ func NewVarmq(t *testing.T, instance string, workers map[string]*Worker) (*Varmq
 	mux.HandleFunc("PATCH /workers/{name}/config/concurrency/{n}", f.concurrency)
 	mux.HandleFunc("GET /queues", f.queues)
 	mux.HandleFunc("GET /queues/{id}/jobs", f.jobs)
+	mux.HandleFunc("GET /queues/{id}/jobs/{jobId}", f.job)
+	mux.HandleFunc("PATCH /queues/{id}/jobs/{jobId}/actions/{action}", f.jobAction)
 	mux.HandleFunc("PATCH /queues/{id}/actions/{action}", f.queueAction)
 	mux.HandleFunc("GET /workflows", f.workflows)
 	mux.HandleFunc("GET /workflows/{id}", f.workflow)
@@ -258,7 +260,7 @@ func (f *Varmq) mutate(w http.ResponseWriter, name string, change func(*Worker) 
 // Varmqs may share one Queue: its storage, the pause flag included.
 type Queue struct {
 	Summary string              // its GET /queues entry, a QueueSummary object
-	Jobs    map[string][]string // Job objects by Job State, in the order served
+	Jobs    map[string][]string // Job objects by Job State, in the order served; a cancel moves one to "cancelled"
 	// ActionStatus, when non-zero, makes PATCH /queues/{id}/actions/*
 	// reply with it, changing nothing: 404 as the router's plain text (an
 	// older varmq), others with {"error":"..."}.
@@ -271,8 +273,13 @@ type Queue struct {
 	// JobsStatus, when non-zero, makes GET /queues/{id}/jobs reply with it
 	// and {"error":"..."}.
 	JobsStatus int
+	// JobStatus and CancelStatus, when non-zero, make GET
+	// /queues/{id}/jobs/{jobId} and its cancel reply with it: 404 as the
+	// router's plain text (varmq before API 1.4.0), others with
+	// {"error":"..."} (501: storage without JobReader or JobCanceller).
+	JobStatus, CancelStatus int
 
-	mu sync.Mutex // guards Summary across the Varmqs sharing it
+	mu sync.Mutex // guards Summary, and Jobs while served, across the Varmqs sharing it
 }
 
 // summary is q's GET /queues entry.
@@ -371,6 +378,8 @@ func (f *Varmq) jobs(w http.ResponseWriter, r *http.Request) {
 		writeFakeError(w, q.JobsStatus, http.StatusText(q.JobsStatus))
 		return
 	}
+	q.mu.Lock() // Jobs: a cancel changes them, on any Varmq sharing q
+	defer q.mu.Unlock()
 	state := r.URL.Query().Get("state")
 	offset, err1 := strconv.Atoi(cmp.Or(r.URL.Query().Get("offset"), "0"))
 	limit, err2 := strconv.Atoi(cmp.Or(r.URL.Query().Get("limit"), "50"))
@@ -380,13 +389,152 @@ func (f *Varmq) jobs(w http.ResponseWriter, r *http.Request) {
 		writeFakeError(w, http.StatusBadRequest, "invalid state, offset or limit")
 		return
 	}
-	all := q.Jobs[state] // Jobs: changed only under f.Mu
+	all := q.Jobs[state]
 	page := all[min(offset, len(all)):min(offset+limit, len(all))]
 	out := make([]json.RawMessage, len(page))
 	for i, j := range page {
-		out[i] = json.RawMessage(j)
+		out[i] = listed(j)
 	}
 	writeFakeJSON(w, http.StatusOK, out)
+}
+
+// listed is Job object j as a list page serves it: result left out,
+// result_size its length.
+func listed(j string) json.RawMessage {
+	var m map[string]json.RawMessage
+	if json.Unmarshal([]byte(j), &m) != nil || m["result"] == nil {
+		return json.RawMessage(j)
+	}
+	m["result_size"], _ = json.Marshal(len(m["result"]))
+	delete(m, "result")
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// findJob is the state and index in q.Jobs of the job with ID id; ok false
+// when none. Hold q.mu.
+func (q *Queue) findJob(id string) (state string, i int, ok bool) {
+	for st, jobs := range q.Jobs {
+		for i, j := range jobs {
+			var e struct{ ID string }
+			if json.Unmarshal([]byte(j), &e) == nil && e.ID == id {
+				return st, i, true
+			}
+		}
+	}
+	return "", 0, false
+}
+
+// jobQueue is the queue of r's {id} for a one-job route, or answers as
+// varmq does and returns nil: no queue routes, no such queue, status.
+// Hold f.Mu.
+func (f *Varmq) jobQueue(w http.ResponseWriter, r *http.Request, status func(*Queue) int) *Queue {
+	if f.Queues == nil {
+		http.NotFound(w, nil)
+		return nil
+	}
+	q := f.Queues[r.PathValue("id")]
+	switch {
+	case q == nil:
+		writeFakeError(w, http.StatusNotFound, "queue not found")
+	case status(q) == http.StatusNotFound:
+		http.NotFound(w, nil)
+	case status(q) != 0:
+		writeFakeError(w, status(q), http.StatusText(status(q)))
+	default:
+		return q
+	}
+	return nil
+}
+
+// job serves GET /queues/{id}/jobs/{jobId} (API 1.4.0): the job, result
+// and all.
+func (f *Varmq) job(w http.ResponseWriter, r *http.Request) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	q := f.jobQueue(w, r, func(q *Queue) int { return q.JobStatus })
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	st, i, ok := q.findJob(r.PathValue("jobId"))
+	if !ok {
+		writeFakeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	writeFakeJSON(w, http.StatusOK, json.RawMessage(q.Jobs[st][i]))
+}
+
+// jobAction serves PATCH /queues/{id}/jobs/{jobId}/actions/cancel as an
+// in-memory queue does: a waiting or running job is cancelled at once
+// (202), an ended one is 409, an unknown one 404.
+func (f *Varmq) jobAction(w http.ResponseWriter, r *http.Request) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	q := f.jobQueue(w, r, func(q *Queue) int { return q.CancelStatus })
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if r.PathValue("action") != "cancel" {
+		writeFakeError(w, http.StatusBadRequest, "unknown action")
+		return
+	}
+	st, i, ok := q.findJob(r.PathValue("jobId"))
+	switch {
+	case !ok:
+		writeFakeError(w, http.StatusNotFound, "job not found")
+		return
+	case st != "pending" && st != "processing":
+		writeFakeError(w, http.StatusConflict, "varmq: job already ended")
+		return
+	}
+	var m map[string]any
+	_ = json.Unmarshal([]byte(q.Jobs[st][i]), &m)
+	m["state"], m["finished_at"] = "cancelled", time.Now().UnixMilli()
+	b, _ := json.Marshal(m)
+	q.Jobs[st] = slices.Delete(slices.Clone(q.Jobs[st]), i, i+1)
+	q.Jobs["cancelled"] = append([]string{string(b)}, q.Jobs["cancelled"]...)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// SampleJobs are jobs in every state, keyed by state as Queue.Jobs, with
+// times before now (Unix ms), for tests and screenshots: two pending, one
+// running, two completed (one with a result: fetch-image-1, the first task
+// of SampleWorkflows' diamond), one failed after two attempts, one
+// cancelled while it waited (no start time).
+func SampleJobs(now int64) map[string][]string {
+	const sec = int64(1000)
+	j := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	return map[string][]string{
+		"pending": {
+			j(map[string]any{"id": "ord-1042", "state": "pending", "payload": map[string]any{"order": 1042, "sku": "TEE-BLK-M", "qty": 2}, "enqueued_at": now - 14*sec, "attempts": 0}),
+			j(map[string]any{"id": "ord-1043", "state": "pending", "payload": map[string]any{"order": 1043, "sku": "MUG-WHT", "qty": 1}, "enqueued_at": now - 3*sec, "attempts": 0}),
+		},
+		"processing": {
+			j(map[string]any{"id": "ord-1039", "state": "processing", "payload": map[string]any{"order": 1039, "sku": "HOOD-GRY-L", "qty": 1, "gift": true}, "enqueued_at": now - 95*sec, "started_at": now - 41*sec, "attempts": 1}),
+		},
+		"completed": {
+			j(map[string]any{"id": "fetch-image-1", "state": "completed", "payload": map[string]any{"url": "https://cdn.example.com/u/7f3a/raw.jpg"}, "enqueued_at": now - 12*60*sec, "started_at": now - 12*60*sec + 840, "finished_at": now - 12*60*sec + 4210, "attempts": 1,
+				"result": map[string]any{"bytes": 48213, "width": 1600, "height": 1200, "etag": "\"9b2cf535f27731c974343645a3985328\""}}),
+			j(map[string]any{"id": "ord-1031", "state": "completed", "payload": map[string]any{"order": 1031, "sku": "CAP-RED", "qty": 3}, "enqueued_at": now - 20*60*sec, "started_at": now - 20*60*sec + 120, "finished_at": now - 20*60*sec + 1830, "attempts": 1}),
+		},
+		"failed": {
+			j(map[string]any{"id": "ord-1027", "state": "failed", "payload": map[string]any{"order": 1027, "sku": "TEE-WHT-S", "qty": 1}, "enqueued_at": now - 55*60*sec, "started_at": now - 54*60*sec, "finished_at": now - 54*60*sec + 30*sec, "attempts": 2,
+				"errors": []map[string]any{
+					{"attempt": 1, "at": now - 55*60*sec + 31*sec, "error": "dial tcp 10.0.3.7:5432: connect: connection refused"},
+					{"attempt": 2, "at": now - 54*60*sec + 30*sec, "error": "payment gateway: context deadline exceeded after 30s"},
+				}}),
+		},
+		"cancelled": {
+			j(map[string]any{"id": "ord-1035", "state": "cancelled", "payload": map[string]any{"order": 1035, "sku": "SOCK-BLU", "qty": 4}, "enqueued_at": now - 30*60*sec, "finished_at": now - 29*60*sec, "attempts": 0}),
+		},
+	}
 }
 
 // fakeSummary is the GET /workers entry for a worker; a nil worker has only a name.
