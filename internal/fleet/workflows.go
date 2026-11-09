@@ -13,8 +13,9 @@ import (
 )
 
 // The workflow routes (varmq API 1.3.0) read live, as the queue routes do.
-// A durable workflow lives in a storage several instances bind: each lists
-// it, the same record. An in-memory one lives in one process. Records are
+// A durable workflow lives in a store several instances register (varmq
+// API 1.5.1: redisq/sqliteq NewWorkflowStore): each lists it, the same
+// record. An in-memory one lives in one process. Records are
 // grouped by ID and created_at: the same pair from several units is one
 // workflow they share; the same ID created at another time is another one
 // (an in-memory workflow of another process), shown on its own row.

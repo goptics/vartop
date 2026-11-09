@@ -13,7 +13,7 @@ import (
 )
 
 // Workflow is one workflow as a Varmq serves it (spec WorkflowRecord).
-// Several Varmqs may share one: a durable store they all bind.
+// Several Varmqs may share one: a durable store they all register.
 type Workflow struct {
 	mu           sync.Mutex
 	rec          contract.WorkflowRecord

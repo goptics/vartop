@@ -101,9 +101,9 @@ func RouteMissing(err error) bool {
 		apiErr.StatusCode == http.StatusNotFound && apiErr.Message == http.StatusText(http.StatusNotFound)
 }
 
-// WorkflowAmbiguous reports whether err is a 409: more than one storage
-// bound on that instance holds a workflow with the ID; nothing was read or
-// cancelled.
+// WorkflowAmbiguous reports whether err is a 409: more than one workflow
+// store registered on that instance holds a workflow with the ID; nothing
+// was read or cancelled.
 func WorkflowAmbiguous(err error) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
