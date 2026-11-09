@@ -345,8 +345,43 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .qfull { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 6px 0 0; color: var(--subtle); font-size: var(--fs-1); }
 .qfull code { min-width: 0; overflow-wrap: anywhere; }
 .qfull .copy { padding: 1px 8px; font-size: var(--fs-1); }
-.wqueues { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0 0 16px; }
-.wqueues .sub { font-size: var(--fs-2); }
+/* worker page: its sources fan into it (no JS): a node per source in pick
+   order, edges into one bus, an arrow to the worker; stacked under 640px */
+.fan {
+  --edge: color-mix(in srgb, var(--subtle) 70%, transparent);
+  display: grid; grid-template-columns: minmax(0, max-content) 44px minmax(0, max-content); align-items: center; justify-content: start;
+  margin: 0 0 8px; padding: 14px 16px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-3);
+}
+.srcs { margin: 0; padding: 0; list-style: none; min-width: 0; }
+.srcs li { position: relative; display: flex; align-items: center; padding: 5px 0; }
+.srcs li::after { content: ""; flex: 1 0 24px; border-top: 1.5px solid var(--edge); }
+.srcs li::before { content: ""; position: absolute; right: 0; top: 0; bottom: 0; border-right: 1.5px solid var(--edge); }
+.srcs li:first-child::before { top: 50%; }
+.srcs li:last-child::before { bottom: 50%; }
+.srcs li:only-child::before { display: none; }
+.srcn { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; max-width: 100%; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-3); color: var(--fg); text-decoration: none; }
+a.srcn:hover, a.srcn:focus-visible { border-color: var(--accent); }
+a.srcn:hover .qnm { color: var(--accent); text-decoration: underline; }
+.srcn .qnm.none { color: var(--subtle); font-style: italic; }
+.prio { padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; background: var(--raised); color: var(--subtle); font-size: var(--fs-1); font-variant-numeric: tabular-nums; }
+.fan .link { position: relative; border-top: 1.5px solid var(--edge); }
+.fan .link::after { content: ""; position: absolute; right: -1px; top: -6px; border: 5px solid transparent; border-right: 0; border-left: 7px solid var(--edge); }
+.wnode { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 10px 14px; background: var(--panel); border: 1.5px solid var(--accent); border-radius: var(--r-3); }
+.wnode .nm { display: flex; align-items: center; gap: 8px; font-weight: 600; overflow-wrap: anywhere; }
+.wnode small { color: var(--subtle); font-size: var(--fs-1); }
+.srcnote { margin: 0 0 16px; }
+.sources { margin: 0 0 16px; }
+@media (max-width: 640px) {
+  .fan { grid-template-columns: minmax(0, 1fr); justify-content: stretch; }
+  .srcs li { padding: 5px 0 5px 24px; }
+  .srcs li::after { position: absolute; left: 8px; top: 50%; width: 16px; }
+  .srcs li::before { left: 8px; right: auto; border-right: 0; border-left: 1.5px solid var(--edge); }
+  .srcs li:last-child::before { bottom: 0; }
+  .srcs li:only-child::before { display: block; top: 50%; bottom: 0; }
+  .fan .link { width: 0; height: 18px; margin-left: 8px; border-top: 0; border-left: 1.5px solid var(--edge); }
+  .fan .link::after { right: auto; top: auto; left: -6px; bottom: -1px; border: 5px solid transparent; border-bottom: 0; border-top: 7px solid var(--edge); }
+  .wnode { justify-self: start; max-width: 100%; }
+}
 a.ql { color: var(--fg); text-decoration: none; }
 a.ql:hover .qnm { color: var(--accent); text-decoration: underline; }
 
@@ -374,6 +409,10 @@ a.ql:hover .qnm { color: var(--accent); text-decoration: underline; }
 .queues .name .status { margin-left: 8px; font-family: var(--sans); font-size: var(--fs-1); font-weight: 500; white-space: nowrap; }
 .chip { display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--raised); color: var(--fg); font-size: var(--fs-1); }
 .queues .on .chip { margin: 2px 4px 2px 0; }
+.queues .on .sub { font-size: var(--fs-1); }
+a.wchip { text-decoration: none; }
+a.wchip:hover { border-color: var(--accent); color: var(--accent); }
+.readfrom { margin: 4px 0 0; color: var(--subtle); font-size: var(--fs-1); }
 .states {
   position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0 0 12px; overflow: hidden;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-3);

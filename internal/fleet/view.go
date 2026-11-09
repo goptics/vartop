@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/goptics/vartop/internal/api"
 )
 
 // This file turns snapshots into the view models the templates render. All
@@ -111,13 +113,40 @@ type GridView struct {
 
 // DetailView is screen C.
 type DetailView struct {
-	Name, Status, Class, StatusTip           string
-	Submitted, Completed, Successful, Failed uint64
-	SuccessRate                              string      // "99.5%" or "—"
-	ConcurrencyStart, ConcurrencyMax         int         // start = max current per-pod; max = max(64, 2*start)
-	Completed1h, Failed1h                    []Point     // per second
-	Pods                                     []PodColumn // pods reporting this worker
-	QueueIDs                                 []string    // its queue_ids on those pods, sorted, each once
+	Name, Status, Class, StatusTip   string
+	Completed, Successful, Failed    uint64
+	SuccessRate                      string      // "99.5%" or "—"
+	ConcurrencyStart, ConcurrencyMax int         // start = max current per-pod; max = max(64, 2*start)
+	Completed1h, Failed1h            []Point     // per second
+	Pods                             []PodColumn // pods reporting this worker
+	QueueIDs                         []string    // its queue_ids on those pods, sorted, each once
+	// Strategy and Sources: how it picks and what it pulls from (varmq
+	// API 1.5.0), merged over its pods (see mergeSources). Sources nil:
+	// no pod sent them (older varmq); QueueIDs is all there is.
+	Strategy string
+	Sources  []api.WorkerSource
+}
+
+// mergeSources merges pods' sources: the first pod's in its priority order,
+// then each source another pod has and it lacks (same kind and Queue ID),
+// in that pod's order. Strategy is the first pod's that sends one. Pods
+// that differ are not told apart: one worker name, one view.
+func mergeSources(d *DetailView, sm *Sample) {
+	if sm.Sources == nil {
+		return
+	}
+	if d.Strategy == "" {
+		d.Strategy = sm.Strategy
+	}
+	if d.Sources == nil {
+		d.Sources = slices.Clone(sm.Sources)
+		return
+	}
+	for _, s := range sm.Sources {
+		if !slices.ContainsFunc(d.Sources, func(o api.WorkerSource) bool { return o.Kind == s.Kind && o.QueueID == s.QueueID }) {
+			d.Sources = append(d.Sources, s)
+		}
+	}
 }
 
 // StatusClass maps a varmq worker status to its colour class. Anything varmq
@@ -303,12 +332,19 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 		if p.Err != "" || sm == nil {
 			continue
 		}
-		d.Submitted += sm.Metrics.Submitted
 		d.Completed += sm.Metrics.Completed
 		d.Successful += sm.Metrics.Successful
 		d.Failed += sm.Metrics.Failed
 		d.Pods = append(d.Pods, PodColumn{Key: p.Key, Label: p.Label, Err: p.Err, Tip: p.Tip()})
 		d.QueueIDs = append(d.QueueIDs, sm.QueueIDs...)
+		mergeSources(&d, sm)
+	}
+	// A pod of an older varmq says only queue_ids: its queues join as
+	// sources, so a mixed fleet draws them all.
+	for _, id := range d.QueueIDs {
+		if d.Sources != nil && !slices.ContainsFunc(d.Sources, func(s api.WorkerSource) bool { return s.QueueID == id }) {
+			d.Sources = append(d.Sources, api.WorkerSource{QueueID: id, Kind: "queue"})
+		}
 	}
 	slices.Sort(d.QueueIDs)
 	d.QueueIDs = slices.Compact(d.QueueIDs)

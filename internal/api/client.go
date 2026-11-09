@@ -47,15 +47,33 @@ type WorkerSummary struct {
 	Instance string   `json:"-"` // varmq instance that served it (InstanceHeader), if reported
 }
 
-// WorkerDetails matches the extended API response of GET /workers/{name}
+// WorkerDetails matches the extended API response of GET /workers/{name}.
+// Metrics has no submitted: varmq API 1.1.0 dropped it (a queue's is its
+// totals.submitted under GET /queues).
 type WorkerDetails struct {
 	WorkerSummary
+	// Strategy: how the worker picks the next of its Sources (varmq API
+	// 1.5.0): priority, round_robin, max_len, min_len, or one varmq adds
+	// later; "" from an older varmq.
+	Strategy string `json:"strategy,omitempty"`
+	// Sources: the queues and topic subscriptions it pulls from, in pick
+	// order (varmq API 1.5.0); nil from an older varmq.
+	Sources []WorkerSource `json:"sources,omitempty"`
 	Metrics struct {
-		Submitted  uint64 `json:"submitted"`
 		Completed  uint64 `json:"completed"`
 		Successful uint64 `json:"successful"`
 		Failed     uint64 `json:"failed"`
 	} `json:"metrics"`
+}
+
+// WorkerSource is one source a worker pulls from (spec WorkerSource):
+// QueueID "" for a topic subscription or storage with no Queue ID; Kind
+// queue or topic (or one varmq adds later); Priority nil when none was set
+// (the lowest).
+type WorkerSource struct {
+	QueueID  string `json:"queue_id"`
+	Kind     string `json:"kind"`
+	Priority *int64 `json:"priority,omitempty"`
 }
 
 // APIError represents an error response from the varmq server.

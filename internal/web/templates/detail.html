@@ -1,21 +1,33 @@
+{{/* topic_icon: a topic subscription's 24-unit filled glyph: a broadcast */}}
+{{define "topic_icon"}}<svg class="sico" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM7.05 7.05a7 7 0 0 0 0 9.9l1.41-1.41a5 5 0 0 1 0-7.08zM16.95 7.05l-1.41 1.41a5 5 0 0 1 0 7.08l1.41 1.41a7 7 0 0 0 0-9.9zM4.22 4.22a11 11 0 0 0 0 15.56l1.42-1.42a9 9 0 0 1 0-12.72zM19.78 4.22l-1.42 1.42a9 9 0 0 1 0 12.72l1.42 1.42a11 11 0 0 0 0-15.56z"/></svg>{{end}}
+{{/* prio: a source's priority chip (SourceNode), when it has one */}}
+{{define "prio"}}{{with .Priority}}<span class="prio" title="bind priority: lower picks first">{{.}}</span>{{end}}{{end}}
 {{define "live_body"}}{{with .Detail}}
 <div class="detail-head">
   <h1>{{.Name}}</h1>
   {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{end}}
 </div>
-{{if and .QueueIDs (not $.Stale)}}<p class="wqueues"><span class="sub">Queues</span>{{range .QueueIDs}} <a class="ql" href="{{jobsURL . $.Server "" 0 50}}">{{template "qname" ($.QName .)}}</a>{{end}}</p>{{end}}
 <section class="counters" aria-label="Counters">{{if $.Stale}}
-  <div class="card"><h2>Submitted</h2><p class="big">—</p></div>
   <div class="card"><h2>Completed</h2><p class="big">—</p></div>
   <div class="card"><h2>Successful</h2><p class="big">—</p></div>
   <div class="card failed"><h2>Failed</h2><p class="big">—</p></div>
   <div class="card"><h2>Success rate</h2><p class="big">—</p></div>{{else}}
-  <div class="card"><h2>Submitted</h2><p class="big">{{.Submitted}}</p></div>
   <div class="card"><h2>Completed</h2><p class="big">{{.Completed}}</p></div>
   <div class="card"><h2>Successful</h2><p class="big">{{.Successful}}</p></div>
   <div class="card failed{{if gt .Failed 0}} hot{{end}}"><h2>Failed</h2><p class="big">{{.Failed}}</p></div>
   <div class="card"><h2>Success rate</h2><p class="big">{{.SuccessRate}}</p></div>{{end}}
 </section>
+{{with $.WorkerSources}}{{$n := len .Nodes}}<section class="sources" aria-labelledby="src-head">
+<h2 class="section" id="src-head">Sources <span class="sub">{{if gt $n 1}}{{$n}}, by priority; the strategy picks among them{{else}}what the worker pulls from{{end}}</span></h2>
+<div class="fan">
+  <ol class="srcs">{{range .Nodes}}
+    <li>{{if .URL}}<a class="srcn" href="{{.URL}}">{{template "qname" .Queue}}{{template "prio" .}}</a>{{else}}<span class="srcn">{{if eq .Kind "topic"}}{{template "topic_icon"}}<span class="qnm">topic</span>{{else if eq .Kind "queue"}}<span class="qnm none">custom storage</span>{{else}}<span class="qnm">{{.Kind}}</span>{{end}}{{template "prio" .}}</span>{{end}}</li>{{end}}
+  </ol>
+  <div class="link" aria-hidden="true"></div>
+  <div class="wnode"><span class="nm"><span class="status {{$.Detail.Class}}"></span>{{$.Detail.Name}}</span>{{with .Label}}<small>{{.}}</small>{{end}}</div>
+</div>
+{{if .Legacy}}<p class="sub srcnote">From <code>queue_ids</code>: this varmq (before API 1.5.0) does not say how the worker picks, or with what priorities.</p>{{end}}
+</section>{{end}}
 <figure class="chart">{{$c := history .Completed1h historyWindow $.Interval 720 120}}{{$peak := $c.Peak}}{{with $.CompletedDay}}{{$c = history .Points .Span .Step 720 120}}{{$peak = .Peak}}{{end}}
   <figcaption>Completed /s <span class="peak">peak {{tickLabel $peak}}/s</span>{{template "range_switch" (rangeSwitch $ "completed")}}</figcaption>
   {{template "history" $c}}

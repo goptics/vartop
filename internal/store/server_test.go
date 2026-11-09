@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"compress/flate"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/fleet"
 )
 
@@ -94,7 +96,7 @@ func sample(snapAt time.Time, offMs int64, name, instance, origin string, comple
 	s.Name, s.Status, s.Concurrency = name, "running", 8
 	s.NumProcessing, s.NumPending, s.NumIdleWorkers = 3, 120, 5
 	s.Instance, s.Origin = instance, origin
-	s.Metrics.Submitted, s.Metrics.Completed, s.Metrics.Successful, s.Metrics.Failed = completed+120, completed, completed-failed, failed
+	s.Metrics.Completed, s.Metrics.Successful, s.Metrics.Failed = completed, completed-failed, failed
 	return s
 }
 
@@ -119,7 +121,7 @@ func fullSnapshot(round bool) *fleet.Snapshot {
 			{
 				Key: direct, Via: direct, Instance: "inst-a", Label: "instance-1",
 				Workers: map[string]*fleet.Sample{
-					"emails":  withQueues(sample(snapAt, 120, "emails", "inst-a", direct, 1000, 4, r(12.34567, 12.346), r(0.0004, 0), true), "redisq:prio:{emails}", "memory:inst-a:fifo:1"),
+					"emails":  withSources(withQueues(sample(snapAt, 120, "emails", "inst-a", direct, 1000, 4, r(12.34567, 12.346), r(0.0004, 0), true), "redisq:prio:{emails}", "memory:inst-a:fifo:1")),
 					"reports": sample(snapAt, 95, "reports", "inst-a", direct, 50, 0, 0, 0, false),
 					"moved":   sample(snapAt, 140, "moved", "inst-z", "http://10.0.0.9:8080/varmq", 7, 1, 0, 0, true),
 					"anon":    sample(snapAt, 77, "anon", "", direct, 9, 0, r(1.0/3, 0.333), 0, true),
@@ -149,6 +151,15 @@ func fullSnapshot(round bool) *fleet.Snapshot {
 		Err:    "",
 		Source: "3f2a9c41d07e8b56",
 	}
+}
+
+// withSources sets s's strategy and sources (varmq API 1.5.0): a queue
+// with a priority, an in-memory one and a topic without.
+func withSources(s *fleet.Sample) *fleet.Sample {
+	one := int64(1)
+	s.Strategy = "priority"
+	s.Sources = []api.WorkerSource{{QueueID: "redisq:prio:{emails}", Kind: "queue", Priority: &one}, {QueueID: "memory:inst-a:fifo:1", Kind: "queue"}, {Kind: "topic"}}
+	return s
 }
 
 // withQueues sets s's QueueIDs.
@@ -815,5 +826,27 @@ func TestUndecodableRecords(t *testing.T) {
 	}
 	if n := strings.Count(log.String(), "cannot be decoded"); n != 1 {
 		t.Errorf("logged %d times, want once per file:\n%s", n, log)
+	}
+}
+
+// A row from before strategy and sources (and with the dropped submitted)
+// reads its queue_ids, no strategy and nil sources.
+func TestDecodeOlderWorkerRow(t *testing.T) {
+	var buf bytes.Buffer
+	zw, err := flate.NewWriter(&buf, flate.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = zw.Write([]byte(`{"u":[{"k":"http://a","w":{"w":{"t":0,"s":"Running","su":12,"co":9,"q":["redisq:fifo:{a}"]}}}]}`))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := decodeSnapshot(base.UnixMilli(), buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm := s.Pods[0].Workers["w"]
+	if !slices.Equal(sm.QueueIDs, []string{"redisq:fifo:{a}"}) || sm.Strategy != "" || sm.Sources != nil || sm.Metrics.Completed != 9 {
+		t.Errorf("older row = %+v", sm.WorkerDetails)
 	}
 }

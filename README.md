@@ -44,7 +44,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 
 - **Fleet dashboard.** Completed per second, failed per minute, pending jobs and workers by status, with a 10-minute trend per worker.
 - **Instance grid.** Every worker on every instance at a glance: status, busy/concurrency, pending.
-- **Worker page.** Totals and success rate, and two charts (completed /s, failed /s), each with its own **1h | 24h** switch, plus **7d** and **30d** as far as the server's `history` reaches, axes and a hover readout.
+- **Worker page.** The queues and topics it pulls from, fanning into it in the order it picks them, with priorities and its strategy (varmq API 1.5.0). Totals and success rate, and two charts (completed /s, failed /s), each with its own **1h | 24h** switch, plus **7d** and **30d** as far as the server's `history` reaches, axes and a hover readout.
 - **Workflows** (varmq API 1.3.0). Every workflow, newest first, once however many instances report it, with its state, tasks ended and duration; its task graph laid out left to right: pan and zoom, hover a task to trace what it waits for and what waits on it, click it for its queue, job, reason, result size and undo job. A running workflow's page follows it live.
 - **One job** (varmq API 1.4.0). Its state, a timeline with how long it waited and ran (ticking while it does), each failed attempt's error, its payload and result. Linked from a queue's job list and a workflow's tasks.
 - **History that survives restarts.** 24 hours of polls, and up to 30 days of each worker's rates per server, in a local SQLite store.
@@ -128,7 +128,7 @@ The page above. One row per worker, merged across every instance (or one instanc
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/worker-dark.png">
-  <img alt="A worker page: submitted, completed, successful, failed and success rate; a 7-day completed/s chart with a daily rhythm; a 24-hour failed/s chart; the concurrency slider and the pause, resume, restart and stop buttons" src="docs/images/worker-light.png">
+  <img alt="A worker page: completed, successful, failed and success rate; a 7-day completed/s chart with a daily rhythm; a 24-hour failed/s chart; the concurrency slider and the pause, resume, restart and stop buttons" src="docs/images/worker-light.png">
 </picture>
 
 Click a worker for its totals and success rate, its two charts, and its controls. Each chart has its own span: **1h** from the stored polls, **24h** from 5-minute buckets, and **7d**, **30d** (or the server's own [`history`](#schema), like `14d`) merged into longer steps. Hovering a chart shows how many instances answered and, on 1h, the poll's time and value; on longer spans, the exact window, its average and its peak:

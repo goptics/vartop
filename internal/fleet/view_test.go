@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/goptics/vartop/internal/api"
 )
 
 var viewT0 = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
@@ -715,15 +717,15 @@ func TestBuildGridAlignsCells(t *testing.T) {
 }
 
 func TestBuildDetail(t *testing.T) {
-	counters := func(sm *Sample, submitted, completed, ok, failed uint64) *Sample {
-		sm.Metrics.Submitted, sm.Metrics.Completed, sm.Metrics.Successful, sm.Metrics.Failed = submitted, completed, ok, failed
+	counters := func(sm *Sample, completed, ok, failed uint64) *Sample {
+		sm.Metrics.Completed, sm.Metrics.Successful, sm.Metrics.Failed = completed, ok, failed
 		return sm
 	}
 	iv := 5 * time.Second
 
 	s := snap(atTick(0),
-		okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 10, 8, 6, 2)}),
-		okPod("p1", map[string]*Sample{"orders": counters(smp("Idle", 8, 0, 8, 0), 1, 1, 1, 0)}),
+		okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 8, 6, 2)}),
+		okPod("p1", map[string]*Sample{"orders": counters(smp("Idle", 8, 0, 8, 0), 1, 1, 0)}),
 		okPod("p2", map[string]*Sample{"billing": smp("Running", 2, 0, 2, 0)}),
 	)
 	d, ok := BuildDetail([]*Snapshot{s}, "", "orders", iv, podNoun)
@@ -736,8 +738,8 @@ func TestBuildDetail(t *testing.T) {
 	if want := "p0: Running\np1: Idle"; d.StatusTip != want {
 		t.Errorf("StatusTip = %q, want %q", d.StatusTip, want)
 	}
-	if d.Submitted != 11 || d.Completed != 9 || d.Successful != 7 || d.Failed != 2 {
-		t.Errorf("counters = %d/%d/%d/%d, want 11/9/7/2 (summed over reporting pods)", d.Submitted, d.Completed, d.Successful, d.Failed)
+	if d.Completed != 9 || d.Successful != 7 || d.Failed != 2 {
+		t.Errorf("counters = %d/%d/%d, want 9/7/2 (summed over reporting pods)", d.Completed, d.Successful, d.Failed)
 	}
 	if d.SuccessRate != "77.8%" {
 		t.Errorf("SuccessRate = %q, want 77.8%% (7/9)", d.SuccessRate)
@@ -756,7 +758,7 @@ func TestBuildDetail(t *testing.T) {
 	}
 
 	// 6 ok / 2 failed on one pod.
-	one := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 8, 8, 6, 2)}))
+	one := snap(atTick(0), okPod("p0", map[string]*Sample{"orders": counters(smp("Running", 8, 0, 8, 0), 8, 6, 2)}))
 	if d, _ = BuildDetail([]*Snapshot{one}, "", "orders", iv, podNoun); d.SuccessRate != "75.0%" {
 		t.Errorf("SuccessRate = %q, want 75.0%%", d.SuccessRate)
 	}
@@ -780,7 +782,7 @@ func TestBuildDetail(t *testing.T) {
 
 	// Pod filter narrows counters, status and the pod list.
 	d, ok = BuildDetail([]*Snapshot{s}, "p1", "orders", iv, podNoun)
-	if !ok || d.Status != "Idle" || d.Submitted != 1 || len(d.Pods) != 1 || d.Pods[0].Key != "p1" {
+	if !ok || d.Status != "Idle" || len(d.Pods) != 1 || d.Pods[0].Key != "p1" {
 		t.Errorf("p1 detail = %+v ok=%v", d, ok)
 	}
 
@@ -1056,5 +1058,60 @@ func TestDetailSeriesBoundedToTheHour(t *testing.T) {
 		if !pts[0].At.Equal(since) || !pts[len(pts)-1].At.Equal(newestAt) {
 			t.Errorf("%s spans %v to %v, want the hour from %v to %v", what, pts[0].At, pts[len(pts)-1].At, since, newestAt)
 		}
+	}
+}
+
+// A worker's sources merge over its pods: the first pod's in priority order,
+// then what others add (same kind and Queue ID once); its strategy is the
+// first pod's. A pod of an older varmq adds none; with no pod sending
+// them, Sources is nil.
+func TestBuildDetailMergesSources(t *testing.T) {
+	one := int64(1)
+	src := func(sm *Sample, strategy string, s ...api.WorkerSource) *Sample {
+		sm.Strategy, sm.Sources = strategy, s
+		return sm
+	}
+	a, b, topic := api.WorkerSource{QueueID: "a", Kind: "queue", Priority: &one}, api.WorkerSource{QueueID: "b", Kind: "queue"}, api.WorkerSource{Kind: "topic"}
+	s := snap(atTick(0),
+		okPod("p0", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "priority", a, topic)}),
+		okPod("p1", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "round_robin", b, a)}),
+		okPod("p2", map[string]*Sample{"w": smp("Running", 1, 0, 1, 0)}),
+	)
+	d, ok := BuildDetail([]*Snapshot{s}, "", "w", 0, instanceNoun)
+	if !ok || d.Strategy != "priority" || !reflect.DeepEqual(d.Sources, []api.WorkerSource{a, topic, b}) {
+		t.Errorf("merged = %q %+v", d.Strategy, d.Sources)
+	}
+	if d, _ := BuildDetail([]*Snapshot{s}, "p1", "w", 0, instanceNoun); d.Strategy != "round_robin" || !reflect.DeepEqual(d.Sources, []api.WorkerSource{b, a}) {
+		t.Errorf("one pod = %q %+v", d.Strategy, d.Sources)
+	}
+	if d, _ := BuildDetail([]*Snapshot{s}, "p2", "w", 0, instanceNoun); d.Strategy != "" || d.Sources != nil {
+		t.Errorf("older varmq = %q %+v", d.Strategy, d.Sources)
+	}
+
+	// mixed fleet: an older pod's queue_ids join as sources
+	legacy := smp("Running", 1, 0, 1, 0)
+	legacy.QueueIDs = []string{"c"}
+	newer := src(smp("Running", 1, 0, 1, 0), "priority", a)
+	newer.QueueIDs = []string{"a"}
+	mixed := snap(atTick(0), okPod("p0", map[string]*Sample{"w": legacy}), okPod("p1", map[string]*Sample{"w": newer}))
+	if d, _ := BuildDetail([]*Snapshot{mixed}, "", "w", 0, instanceNoun); !reflect.DeepEqual(d.Sources, []api.WorkerSource{a, {QueueID: "c", Kind: "queue"}}) {
+		t.Errorf("mixed fleet = %+v, want a then c", d.Sources)
+	}
+
+	// kind is part of the key: a topic and an ID-less queue both stay, in order
+	q := api.WorkerSource{Kind: "queue"}
+	kinds := snap(atTick(0), okPod("p0", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "round_robin", topic)}),
+		okPod("p1", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "round_robin", q)}))
+	if d, _ := BuildDetail([]*Snapshot{kinds}, "", "w", 0, instanceNoun); !reflect.DeepEqual(d.Sources, []api.WorkerSource{topic, q}) {
+		t.Errorf("topic + ID-less queue = %+v", d.Sources)
+	}
+
+	// the merge appends to a copy, never into the first pod's array
+	first := make([]api.WorkerSource, 1, 4)
+	first[0] = a
+	shared := snap(atTick(0), okPod("p0", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "priority", first...)}),
+		okPod("p1", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "priority", b)}))
+	if d, _ := BuildDetail([]*Snapshot{shared}, "", "w", 0, instanceNoun); len(d.Sources) != 2 || first[:2][1] != (api.WorkerSource{}) {
+		t.Errorf("merge wrote into the pod's sources: %+v, pod %+v", d.Sources, first[:2])
 	}
 }

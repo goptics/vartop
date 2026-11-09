@@ -10,7 +10,7 @@
     <th scope="col" class="num">Completed</th>
     <th scope="col" class="num">Failed</th>
     <th scope="col" class="num">Submitted (total)</th>
-    <th scope="col">Reported by</th>
+    <th scope="col">Workers</th>
   </tr></thead>
   <tbody>{{range .Groups}}{{$q := $.QName .ID}}
   <tr>
@@ -22,7 +22,7 @@
     <td class="num{{if .Failed}} failed{{end}}" data-label="Failed">{{.Failed}}</td>{{else}}
     <td colspan="4"><span class="err">{{.Err}}</span></td>{{end}}
     <td class="num" data-label="Submitted (total)">{{with .Totals}}{{.Submitted}}{{else}}—{{end}}</td>
-    <td class="on" data-label="Reported by">{{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span>{{end}}</td>
+    <td class="on" data-label="Workers">{{range $i, $w := $.WorkersOn .ID}}{{if $i}}<span class="sr">, </span>{{end}}<a class="chip wchip" href="{{$w.URL}}" title="{{$w.Tip}}">{{$w.Name}}</a>{{else}}<span class="sub">instances</span> {{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span>{{end}}{{end}}</td>
   </tr>{{end}}
   </tbody>
 </table>

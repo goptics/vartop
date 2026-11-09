@@ -70,10 +70,10 @@ func countCalls(calls []string, call string) int {
 func TestPollOnceBuildsSnapshot(t *testing.T) {
 	_, a := fleettest.NewVarmq(t, "host", map[string]*fleettest.Worker{
 		"orders": {Status: "Running", Concurrency: 8, Busy: 6, Pending: 80, Idle: 2,
-			Submitted: 100, Completed: 90, Successful: 85, Failed: 5},
+			Completed: 90, Successful: 85, Failed: 5},
 	})
 	_, b := fleettest.NewVarmq(t, "host", map[string]*fleettest.Worker{
-		"orders":  {Status: "Paused", Concurrency: 4, Pending: 7, Idle: 4, Submitted: 3, Completed: 2, Successful: 2},
+		"orders":  {Status: "Paused", Concurrency: 4, Pending: 7, Idle: 4, Completed: 2, Successful: 2},
 		"billing": {Status: "Idle", Concurrency: 1, Idle: 1},
 	})
 	wantEPs := []string{a.URL, b.URL}
@@ -121,7 +121,7 @@ func TestPollOnceBuildsSnapshot(t *testing.T) {
 		Name: "orders", Status: "Running", Concurrency: 8, NumProcessing: 6, NumPending: 80, NumIdleWorkers: 2,
 		Origin: a.URL, Instance: "host",
 	}}
-	want.Metrics.Submitted, want.Metrics.Completed, want.Metrics.Successful, want.Metrics.Failed = 100, 90, 85, 5
+	want.Metrics.Completed, want.Metrics.Successful, want.Metrics.Failed = 90, 85, 5
 	if !reflect.DeepEqual(sm.WorkerDetails, want) {
 		t.Errorf("sample = %+v\nwant     %+v", sm.WorkerDetails, want)
 	}

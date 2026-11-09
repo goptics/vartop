@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/fleet"
 )
 
@@ -51,12 +52,15 @@ type sampleRec struct {
 	Idle        int       `json:"id,omitempty"`
 	Instance    *string   `json:"i,omitempty"` // nil: the unit's Instance
 	Origin      *string   `json:"o,omitempty"` // nil: the unit's Via
-	Submitted   uint64    `json:"su,omitempty"`
 	Completed   uint64    `json:"co,omitempty"`
 	Successful  uint64    `json:"ok,omitempty"`
 	Failed      uint64    `json:"fa,omitempty"`
 	Rates       []float64 `json:"r,omitempty"` // completed/s, failed/s to 3 dp; absent unless RateOK
 	QueueIDs    []string  `json:"q,omitempty"` // added without a new StoreVersion: older rows read nil
+	// Strategy and Sources, as QueueIDs: no new StoreVersion; older rows
+	// read none. Older rows' "su" (submitted) is read and dropped.
+	Strategy string             `json:"st,omitempty"`
+	Sources  []api.WorkerSource `json:"src,omitempty"`
 }
 
 // labelsRec is a fleet.LabelState.
@@ -129,9 +133,8 @@ func encodeSnapshot(s *fleet.Snapshot) ([]byte, error) {
 				Status: sm.Status, Concurrency: sm.Concurrency,
 				Processing: sm.NumProcessing, Pending: sm.NumPending, Idle: sm.NumIdleWorkers,
 				Instance: ifDiffers(sm.Instance, p.Instance), Origin: ifDiffers(sm.Origin, p.Via),
-				Submitted: sm.Metrics.Submitted, Completed: sm.Metrics.Completed,
-				Successful: sm.Metrics.Successful, Failed: sm.Metrics.Failed,
-				QueueIDs: sm.QueueIDs,
+				Completed: sm.Metrics.Completed, Successful: sm.Metrics.Successful, Failed: sm.Metrics.Failed,
+				QueueIDs: sm.QueueIDs, Strategy: sm.Strategy, Sources: sm.Sources,
 			}
 			if c, f := round3(sm.CompletedRate), round3(sm.FailedRate); sm.RateOK && finite(c) && finite(f) {
 				w.Rates = []float64{c, f}
@@ -192,9 +195,8 @@ func decodeSnapshot(atMs int64, data []byte) (*fleet.Snapshot, error) {
 			sm.Name, sm.Status, sm.Concurrency = orDefault(w.Name, name), w.Status, w.Concurrency
 			sm.NumProcessing, sm.NumPending, sm.NumIdleWorkers = w.Processing, w.Pending, w.Idle
 			sm.Instance, sm.Origin = orDefault(w.Instance, u.Instance), orDefault(w.Origin, u.Via)
-			sm.Metrics.Submitted, sm.Metrics.Completed = w.Submitted, w.Completed
-			sm.Metrics.Successful, sm.Metrics.Failed = w.Successful, w.Failed
-			sm.QueueIDs = w.QueueIDs
+			sm.Metrics.Completed, sm.Metrics.Successful, sm.Metrics.Failed = w.Completed, w.Successful, w.Failed
+			sm.QueueIDs, sm.Strategy, sm.Sources = w.QueueIDs, w.Strategy, w.Sources
 			if len(w.Rates) == 2 {
 				sm.CompletedRate, sm.FailedRate, sm.RateOK = w.Rates[0], w.Rates[1], true
 			}

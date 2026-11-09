@@ -71,7 +71,6 @@ func fleetTicks(n, units, workers int, interval time.Duration) []*fleet.Snapshot
 				sm.Name, sm.Status, sm.Concurrency = name, "running", 16
 				sm.NumProcessing, sm.NumPending, sm.NumIdleWorkers = rng.IntN(17), rng.IntN(5000), rng.IntN(17)
 				sm.Instance, sm.Origin = inst, pod.Via
-				sm.Metrics.Submitted = c.completed + uint64(sm.NumPending) + uint64(sm.NumProcessing)
 				sm.Metrics.Completed, sm.Metrics.Failed = c.completed, c.failed
 				sm.Metrics.Successful = c.completed - c.failed
 				pod.Workers[name] = sm

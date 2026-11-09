@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -77,11 +78,18 @@ func TestQueuesPage(t *testing.T) {
 	if n := strings.Count(body, tenantName+"</a>"); n != 1 {
 		t.Errorf("queue listed %d times, want once", n)
 	}
+	labels := fleettest.StaticLabels(fakes[0].URL, fakes[1].URL, fakes[2].URL)
+	la, lab := labels[fakes[0].URL], slices.Sorted(slices.Values([]string{labels[fakes[0].URL], labels[fakes[1].URL]}))
 	for _, want := range []string{
 		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"><span class="qn" title="redisq:fifo:{tenant/orders}"><svg class="sico"`,
 		`<span class="sr">Redis: </span>`, `<th scope="col">Namespace</th>`, `<td data-label="Namespace"><span class="na">—</span></td>`,
 		`<span class="sr">In memory: </span><span class="qnm">emails #7</span> <span class="qkind">FIFO</span>`, // its worker's name
 		`<td data-label="Namespace">shop</td>`,
+		// the workers consuming it, by queue_ids; none: the instances
+		`<th scope="col">Workers</th>`,
+		`<a class="chip wchip" href="/workers/orders?server=multi" title="runs on ` + strings.Join(lab, ", ") + `">orders</a>`,
+		`<a class="chip wchip" href="/workers/emails?server=multi" title="runs on ` + la + `">emails</a>`,
+		`<td class="on" data-label="Workers"><span class="sub">instances</span> <span class="chip">` + la + `</span></td>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("GET /queues lacks %q", want)
@@ -96,7 +104,8 @@ func TestQueuesPage(t *testing.T) {
 		}
 		last = i
 	}
-	if _, body := fetch(t, srv, "/queues/redisq:shop:prio:%7Bemails%7D?server=multi", false); !strings.Contains(body, `Namespace <span class="chip">shop</span> · Reported by`) {
+	if _, body := fetch(t, srv, "/queues/redisq:shop:prio:%7Bemails%7D?server=multi", false); !strings.Contains(body, `<p class="sub">Namespace <span class="chip">shop</span></p>
+  <p class="readfrom">Read from instance-`) {
 		t.Errorf("namespaced queue page lacks its namespace:\n%s", body)
 	}
 	text := visibleText(body)
@@ -183,11 +192,11 @@ func TestQueueJobsPage(t *testing.T) {
 	}
 	// the worker page links back, by name
 	_, body = fetch(t, srv, "/workers/orders?server=multi", false)
-	if !strings.Contains(body, `<p class="wqueues"><span class="sub">Queues</span> <a class="ql" href="`+tenantPath+`?server=multi"><span class="qn" title="`+tenantID+`">`) {
+	if !strings.Contains(body, `<li><a class="srcn" href="`+tenantPath+`?server=multi"><span class="qn" title="`+tenantID+`">`) || !strings.Contains(body, "From <code>queue_ids</code>") {
 		t.Errorf("worker page lacks its queue:\n%s", body)
 	}
 	urls := []string{fakes[0].URL, fakes[1].URL, fakes[2].URL}
-	if status, body := fetch(t, srv, "/workers/orders?server=multi&instance="+fleettest.StaticLabels(urls...)[fakes[2].URL], false); status != http.StatusOK || strings.Contains(body, "wqueues") {
+	if status, body := fetch(t, srv, "/workers/orders?server=multi&instance="+fleettest.StaticLabels(urls...)[fakes[2].URL], false); status != http.StatusOK || strings.Contains(body, `class="sources"`) {
 		t.Errorf("an older varmq's worker = %d, lists queues:\n%s", status, body)
 	}
 
@@ -823,6 +832,12 @@ func TestQueueNamesHostile(t *testing.T) {
 	ids := []string{"redisq:" + evil + ":fifo:{" + evil + "}", "sqliteq:h:prio:" + evil, "memory:a:fifo:1", evil}
 	pod := okPod("http://a", map[string]*fleet.Sample{evil: smp("Running", 1, 0, 1, 0)})
 	pod.Workers[evil].QueueIDs = ids
+	one := int64(1)
+	pod.Workers[evil].Strategy = evil
+	for _, id := range ids {
+		pod.Workers[evil].Sources = append(pod.Workers[evil].Sources, api.WorkerSource{QueueID: id, Kind: "queue", Priority: &one})
+	}
+	pod.Workers[evil].Sources = append(pod.Workers[evil].Sources, api.WorkerSource{Kind: evil})
 	s := snap(viewT0, pod)
 	var groups []fleet.QueueGroup
 	for _, id := range ids {
@@ -837,7 +852,7 @@ func TestQueueNamesHostile(t *testing.T) {
 		t.Fatal("hostile job: no cancel button to check")
 	}
 	for name, body := range map[string]string{
-		"list":    run(t, "queues", "layout", Page{Server: "dev", owners: ownersOf(s), Queues: &fleet.QueuesView{Groups: groups}}),
+		"list":    run(t, "queues", "layout", Page{Server: "dev", owners: ownersOf(s), qworkers: workerChips(s, "dev"), Queues: &fleet.QueuesView{Groups: groups}}),
 		"page":    run(t, "queue", "layout", Page{Server: "dev", owners: ownersOf(s), Jobs: jobs}),
 		"worker":  run(t, "detail", "layout", Page{Server: "dev", owners: ownersOf(s), Detail: &d}),
 		"confirm": run(t, "confirm", "queue_confirm", QueueConfirmView{Action: "pause", Server: "dev", Queue: parseQueueID(ids[0]), Noun: instanceNoun}),
@@ -847,6 +862,13 @@ func TestQueueNamesHostile(t *testing.T) {
 	} {
 		if strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
 			t.Errorf("%s: a field rendered as markup", name)
+		}
+		// the worker's sources and its chips on the queue list are drawn, escaped
+		if name == "worker" && (strings.Count(body, `class="srcn"`) != len(ids)+1 || !strings.Contains(body, `<small>&lt;script&gt;`)) {
+			t.Errorf("worker: sources not drawn:\n%s", body)
+		}
+		if name == "list" && (strings.Count(body, `class="chip wchip"`) != len(ids) || !strings.Contains(body, `<a class="chip wchip" href="/workers/`+url.PathEscape(evil)+`?server=dev"`)) {
+			t.Errorf("list: %d worker chips, want %d, each to the escaped worker page", strings.Count(body, `class="chip wchip"`), len(ids))
 		}
 	}
 }
@@ -1072,5 +1094,124 @@ func TestJobResultCut(t *testing.T) {
 	body := run(t, "job", "layout", Page{Server: "dev", Job: v})
 	if !strings.Contains(body, `<h2 id="rs-head">Result <span class="sub">(first 64 KiB)</span></h2>`) || len(body) > 2*maxPayload {
 		t.Errorf("cut result: no label, or %d bytes rendered", len(body))
+	}
+}
+
+// The worker page draws its sources in priority order, each with its glyph,
+// name and link, and a priority chip under the priority strategy; the
+// worker node says how it picks: the strategy with 2+ sources, "Pulls
+// directly" with one, nothing (and a note) from queue_ids alone. A topic
+// and storage with no Queue ID have no link. No Submitted card.
+func TestWorkerSourcesPage(t *testing.T) {
+	const (
+		redis  = "redisq:shop:fifo:{orders}"
+		sqlite = "sqliteq:9f86d081:fifo:images"
+		memory = "memory:a:fifo:1"
+	)
+	_, fake := fleettest.NewVarmq(t, "a", fleettest.SourceWorkers(redis, sqlite, memory))
+	// b: an older varmq whose orders consumes one more queue
+	const extra = "redisq:fifo:{extra}"
+	_, old := fleettest.NewVarmq(t, "b", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 1, QueueIDs: []string{extra}}})
+	srv, _ := newTestServer(t, fake, old)
+	esc := func(id string) string { return "/queues/" + url.PathEscape(id) + "?server=multi" }
+
+	_, body := fetch(t, srv, "/workers/orders?server=multi", false)
+	var order []string
+	for _, m := range regexp.MustCompile(`<li><a class="srcn" href="([^"]+)"><span class="qn" title="[^"]+"><svg class="sico"[^>]*><path d="[^"]{0,12}[^"]*"/></svg><span class="sr">([^<]+)</span>`).FindAllStringSubmatch(body, -1) {
+		order = append(order, m[1]+" "+m[2])
+	}
+	if want := []string{esc(redis) + " Redis: ", esc(sqlite) + " SQLite: ", esc(memory) + " In memory: ", esc(extra) + " Redis: "}; !slices.Equal(order, want) {
+		t.Errorf("source nodes = %q, want %q", order, want)
+	}
+	for _, want := range []string{
+		`<h2 class="section" id="src-head">Sources <span class="sub">4, by priority; the strategy picks among them</span></h2>`,
+		`<span class="qnm">orders</span> <span class="qkind">FIFO</span></span><span class="prio" title="bind priority: lower picks first">p 1</span></a>`,
+		`<span class="prio" title="bind priority: lower picks first">p 5</span>`,
+		`<span class="qnm">orders #1</span>`, // in-memory: named by its worker
+		`<div class="wnode"><span class="nm"><span class="status active"></span>orders</span><small>Priority: lowest number first</small></div>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("orders page lacks %q", want)
+		}
+	}
+	if strings.Count(body, `class="prio"`) != 2 || strings.Contains(body, "Submitted") || strings.Contains(body, "srcnote") {
+		t.Errorf("orders: a priority chip on the unset one, a Submitted card or the queue_ids note:\n%s", body)
+	}
+
+	_, body = fetch(t, srv, "/workers/emails?server=multi", false)
+	if !strings.Contains(body, "<small>Pulls directly</small>") || strings.Contains(body, `class="prio"`) || !strings.Contains(body, "what the worker pulls from") {
+		t.Errorf("one source:\n%s", body)
+	}
+	_, body = fetch(t, srv, "/workers/fanout?server=multi", false)
+	for _, want := range []string{
+		"<small>Round robin: each source in turn</small>",
+		`<li><span class="srcn"><svg class="sico" viewBox="0 0 24 24"`, `<span class="qnm">topic</span></span></li>`,
+		`<li><span class="srcn"><span class="qnm none">custom storage</span></span></li>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fanout page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, `class="prio"`) {
+		t.Error("fanout: a priority chip under round robin")
+	}
+	_, body = fetch(t, srv, "/workers/legacy?server=multi", false)
+	if !strings.Contains(body, "From <code>queue_ids</code>") || !strings.Contains(body, `<span class="status active"></span>legacy</span></div>`) || strings.Count(body, `<li><a class="srcn"`) != 2 {
+		t.Errorf("older varmq: want 2 nodes from queue_ids, no label, the note:\n%s", body)
+	}
+}
+
+// WorkerSources' label: none without a strategy, an unknown one as sent,
+// "Pulls directly" for one source whatever the strategy; a priority chip
+// only under priority, none for the largest int64 (no priority).
+func TestWorkerSourcesLabel(t *testing.T) {
+	two, max := int64(2), int64(math.MaxInt64)
+	srcs := []api.WorkerSource{{QueueID: "a", Kind: "queue", Priority: &two}, {QueueID: "b", Kind: "queue", Priority: &max}}
+	for _, c := range []struct {
+		strategy string
+		srcs     []api.WorkerSource
+		label    string
+		prio     []string
+	}{
+		{"", srcs, "", []string{"", ""}},
+		{"lifo_magic", srcs, "lifo_magic", []string{"", ""}},
+		{"priority", srcs, "Priority: lowest number first", []string{"p 2", ""}},
+		{"max_len", srcs, "Max length: longest queue first", []string{"", ""}},
+		{"min_len", srcs[:1], "Pulls directly", []string{""}},
+		{"priority", srcs[:1], "Pulls directly", []string{"p 2"}},
+	} {
+		v := Page{Server: "s", Detail: &fleet.DetailView{Strategy: c.strategy, Sources: c.srcs}}.WorkerSources()
+		var prio []string
+		for _, n := range v.Nodes {
+			prio = append(prio, n.Priority)
+		}
+		if v.Label != c.label || !slices.Equal(prio, c.prio) {
+			t.Errorf("%q: label %q prio %q, want %q %q", c.strategy, v.Label, prio, c.label, c.prio)
+		}
+	}
+	// an older varmq does not say how it picks, even from one queue
+	if v := (Page{Detail: &fleet.DetailView{QueueIDs: []string{"a"}}}).WorkerSources(); v == nil || !v.Legacy || v.Label != "" || len(v.Nodes) != 1 {
+		t.Errorf("legacy, one queue: %+v, want one node, no label", v)
+	}
+	if v := (Page{Detail: &fleet.DetailView{}}).WorkerSources(); v != nil {
+		t.Errorf("no sources, no queue_ids: %+v, want none", v)
+	}
+	if v := (Page{Stale: "old", Detail: &fleet.DetailView{QueueIDs: []string{"a"}}}).WorkerSources(); v != nil {
+		t.Error("stale page: sources shown")
+	}
+}
+
+// workerChips leaves out a pod that is down: its workers' queue_ids are
+// the last it said, not now.
+func TestWorkerChipsSkipsDownPod(t *testing.T) {
+	w := smp("Running", 1, 0, 1, 0)
+	w.QueueIDs = []string{"q"}
+	down := okPod("http://b", map[string]*fleet.Sample{"old": w})
+	down.Err = "connection refused"
+	up := smp("Running", 1, 0, 1, 0)
+	up.QueueIDs = []string{"q"}
+	got := workerChips(snap(viewT0, okPod("http://a", map[string]*fleet.Sample{"new": up}), down), "dev")
+	if len(got["q"]) != 1 || got["q"][0].Name != "new" {
+		t.Errorf("chips = %+v, want only new", got["q"])
 	}
 }

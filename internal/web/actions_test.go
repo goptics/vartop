@@ -1657,3 +1657,16 @@ func TestJobCancel(t *testing.T) {
 		t.Errorf("%d PATCHes after the refusals", n-sent)
 	}
 }
+
+// An action's #live refresh names an in-memory source by its worker, as
+// the page does: livePage reads the owners too.
+func TestActionRefreshNamesMemorySources(t *testing.T) {
+	_, fake := fleettest.NewVarmq(t, "a", fleettest.SourceWorkers("redisq:fifo:{r}", "sqliteq:h:fifo:s", "memory:a:fifo:1"))
+	srv, _ := newTestServer(t, fake)
+	req := postRequest(t, srv, "/workers/orders/actions/pause", multi())
+	req.Header.Set("HX-Current-URL", srv.URL+"/workers/orders?server=multi")
+	resp, body := send(t, srv, req)
+	if _, live, ok := strings.Cut(body, `<div id="live" hx-swap-oob="outerHTML">`); resp.StatusCode != http.StatusOK || !ok || !strings.Contains(live, `<span class="qnm">orders #1</span>`) {
+		t.Errorf("refresh = %d, the in-memory source not named by its worker:\n%s", resp.StatusCode, body)
+	}
+}

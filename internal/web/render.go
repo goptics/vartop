@@ -93,8 +93,12 @@ type Page struct {
 	Ranges                  ChartRanges
 	CompletedDay, FailedDay *DayChart
 
-	owners queueOwners // of the newest snapshot: names in-memory queues
+	owners   queueOwners             // of the newest snapshot: names in-memory queues
+	qworkers map[string][]WorkerChip // the queue list's workers, by Queue ID
 }
+
+// WorkersOn are the workers consuming queue id, for the queue list.
+func (p Page) WorkersOn(id string) []WorkerChip { return p.qworkers[id] }
 
 // QName is Queue ID id as the page shows it.
 func (p Page) QName(id string) QueueName { return p.owners.name(id) }

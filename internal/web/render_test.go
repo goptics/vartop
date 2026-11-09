@@ -683,7 +683,7 @@ func detailPage() Page {
 	p.Dashboard = nil
 	p.Detail = &fleet.DetailView{
 		Name: "a/b c", Status: "Running", Class: "active", StatusTip: "a: Running",
-		Submitted: 10, Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
+		Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
 		ConcurrencyStart: 4, ConcurrencyMax: 64,
 		Completed1h: []fleet.Point{ptAt(atTick(0), 1), ptAt(atTick(1), 2)}, Failed1h: []fleet.Point{ptAt(atTick(0), 0), ptAt(atTick(1), 0)},
 		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}}, QueueIDs: []string{"redisq:fifo:{orders}"},
@@ -1044,7 +1044,7 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 				t.Errorf("%s: a stale page shows the current %q", set, current)
 			}
 		}
-		if set == "detail" && (!strings.Contains(fresh, `class="wqueues"`) || strings.Contains(body, `class="wqueues"`)) {
+		if set == "detail" && (!strings.Contains(fresh, `class="sources"`) || strings.Contains(body, `class="sources"`)) {
 			t.Error("detail: the Queues line not shown fresh, or shown stale")
 		}
 		if set == "detail" && !strings.Contains(body, `<p class="pods">Pods reporting: —</p>`) {

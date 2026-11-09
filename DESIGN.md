@@ -242,7 +242,10 @@ Brand (20px three-line SVG mark in accent, wordmark 16px/650). Nav: Dashboard, I
 `h1` + `.sub` scope line on one baseline, wrapping. Worker, queue and job pages add breadcrumbs (`/` separator, 13px, `subtle`).
 
 ### Stat strip
-One `panel` (8px, hairline) holding auto-fit tiles (min 150px) split by hairlines (each tile draws left+top edge pulled 1px under the frame). Tile: label heading, display number, sparkline at foot. `.hot` (failed > 0): number and onset line in `bad`. Onset line: "since 15:04" under the failed number. Status tile lists status counts as status dots. Worker page counters use the same strip without sparklines. Above them, a "Queues" line: each queue the worker's `queue_ids` hold, as a queue name link; hidden when stale or without `queue_ids`.
+One `panel` (8px, hairline) holding auto-fit tiles (min 150px) split by hairlines (each tile draws left+top edge pulled 1px under the frame). Tile: label heading, display number, sparkline at foot. `.hot` (failed > 0): number and onset line in `bad`. Onset line: "since 15:04" under the failed number. Status tile lists status counts as status dots. Worker page counters use the same strip without sparklines: Completed, Successful, Failed, Success rate (no Submitted: varmq API 1.1.0 dropped it; a queue's is its `totals.submitted`).
+
+### Worker sources
+Under the worker's counters, `h2.section` "Sources" + a fan (`.fan`, `bg` well, hairline, 8px; no JS): left, one node per source in priority order (the list the strategy picks from) (`.srcn`: `panel`, `line-strong` 1px, 8px, as a DAG task box): `qname` (glyph, name, kind badge) + priority chip "p N" (`.prio`, 12px `subtle` pill) only under the `priority` strategy and when set; a link to the queue page. Topic: broadcast glyph + "topic"; storage with no Queue ID: italic `subtle` "custom storage"; neither links. Edges (1.5px `subtle` 70%, as DAG edges) join one bus, then a 7px arrow into the worker node (`.wnode`: `panel`, 1.5px `accent`, status dot + name 600, strategy in 12px `subtle`: "Priority: lowest number first", "Round robin: each source in turn", "Max length: longest queue first", "Min length: shortest non-empty first"; "Pulls directly" with one source). Under 640px the bus runs down the left, the worker below. Pods merge by kind + Queue ID (first pod's order, then what others add; first pod's strategy). Older varmq (no `sources`): nodes from `queue_ids`, no label, a `subtle` note. Hidden when stale.
 - **Gap:** tile sparklines are fixed 160x32 (row trends 120x24); they do not stretch with the tile.
 
 ### Queue name
@@ -251,7 +254,7 @@ One `panel` (8px, hairline) holding auto-fit tiles (min 150px) split by hairline
 - **DAG node:** the name, cut at 12 chars, after the state.
 
 ### Tables
-Inside `.table-wrap` panel. Head `raised`, 12px/500 `subtle`; cells 8px 12px, hairline rows, no zebra. Row hover `raised` 60%; selected row accent 8%. Names `fg`/500, accent + underline on hover. Under 640px worker and queue rows stack into a labelled grid (head moved off-screen, `data-label` captions, status on its own line).
+Inside `.table-wrap` panel. Head `raised`, 12px/500 `subtle`; cells 8px 12px, hairline rows, no zebra. Row hover `raised` 60%; selected row accent 8%. Names `fg`/500, accent + underline on hover. Queue list "Workers" column: a chip per worker whose `queue_ids` hold the queue (link to its page, title "runs on <instances>"); none known: a 12px `subtle` "instances" then the instance chips. Under 640px worker and queue rows stack into a labelled grid (head moved off-screen, `data-label` captions, status on its own line).
 - **Gap:** no column sorting; needs a server-side sort param (no new JS).
 
 ### Status dot
@@ -293,7 +296,7 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Waiting:** 16px `fg` line with a 10px teal dot; page meta-refreshes every 2s.
 
 ### Job page
-- **Header:** `h1.qtitle`: queue name (20px/600, 18px glyph, kind badge); under it the full Queue ID in mono 12px `subtle` with a "Copy ID" button (`queue.js`, `data-copy`; hidden where `navigator.clipboard` is missing); "Namespace" chip (redisq) and "Reported by" chips. Breadcrumb ends in the queue name.
+- **Header:** `h1.qtitle`: queue name (20px/600, 18px glyph, kind badge); under it the full Queue ID in mono 12px `subtle` with a "Copy ID" button (`queue.js`, `data-copy`; hidden where `navigator.clipboard` is missing); "Namespace" chip (redisq); "Read from instance-1, …" in 12px `subtle` (the workers table names the workers). Breadcrumb ends in the queue name.
 - **Workers on this queue:** `h2.section` + table (instance, worker link to its page, status dot, concurrency) of the workers whose `queue_ids` hold the queue; stacks under 640px like queue rows. None with an older varmq (no `queue_ids`).
 - **Queue controls** (`#qstate`, under the header): paused status dot ("paused since"), default buttons "Pause queue" / "Resume queue" (Resume alone when every instance says paused, Pause alone when none does, both when mixed or unknown); hidden, with a `subtle` line, when no instance reports `paused` (varmq < API 1.2.0). Confirm panel lists instance x sent, then results; `#qstate` refreshed out of band.
 - **State tabs:** one sticky strip, five equal columns split by hairlines (scrolls sideways under 640px); label (capitalized, state dot: processing warn, completed ok, failed bad, cancelled hollow `bad` ring, pending `subtle`) over 20px count, `—` in `subtle` when varmq does not count the state (cancelled); current `raised` + 2px teal underline.
