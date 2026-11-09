@@ -46,6 +46,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 - **Instance grid.** Every worker on every instance at a glance: status, busy/concurrency, pending.
 - **Worker page.** Totals and success rate, and two charts (completed /s, failed /s), each with its own **1h | 24h** switch, plus **7d** and **30d** as far as the server's `history` reaches, axes and a hover readout.
 - **Workflows** (varmq API 1.3.0). Every workflow, newest first, once however many instances report it, with its state, tasks ended and duration; its task graph laid out left to right: pan and zoom, hover a task to trace what it waits for and what waits on it, click it for its queue, job, reason, result size and undo job. A running workflow's page follows it live.
+- **One job** (varmq API 1.4.0). Its state, a timeline with how long it waited and ran (ticking while it does), each failed attempt's error, its payload and result. Linked from a queue's job list and a workflow's tasks.
 - **History that survives restarts.** 24 hours of polls, and up to 30 days of each worker's rates per server, in a local SQLite store.
 - **Stale data called out.** A banner says how old the data is and why, instead of showing old numbers as current.
 
@@ -53,6 +54,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 
 - **Pause, resume, restart, stop**, and a concurrency slider, on every instance or on one; pause or resume several workers at once.
 - **Cancel a workflow**, with or without its undo jobs, after a confirm.
+- **Cancel a job** that waits or runs, after a confirm. Cooperative: a running job stops only if its handler watches its context.
 - **The same from the CLI**, fanned out to every endpoint concurrently, one result line each.
 
 **Find every instance**
