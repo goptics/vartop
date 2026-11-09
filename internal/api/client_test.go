@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -64,7 +65,7 @@ func recordingServer(t *testing.T, status int, header map[string]string, body st
 
 func TestGetWorker(t *testing.T) {
 	const body = `{"name":"emails","status":"running","concurrency":4,"num_processing":2,"num_pending":7,"num_idle_workers":2,
-		"queue_ids":["redisq:fifo:{emails}"],"metrics":{"submitted":10,"completed":8,"successful":6,"failed":2}}`
+		"queue_ids":["redisq:fifo:{emails}"],"metrics":{"completed":8,"successful":6,"failed":2}}`
 
 	tests := []struct {
 		name         string
@@ -95,7 +96,7 @@ func TestGetWorker(t *testing.T) {
 			if !slices.Equal(w.QueueIDs, []string{"redisq:fifo:{emails}"}) {
 				t.Errorf("QueueIDs = %q", w.QueueIDs)
 			}
-			if w.Metrics.Submitted != 10 || w.Metrics.Completed != 8 || w.Metrics.Successful != 6 || w.Metrics.Failed != 2 {
+			if w.Metrics.Completed != 8 || w.Metrics.Successful != 6 || w.Metrics.Failed != 2 {
 				t.Errorf("metrics decoded wrong: %+v", w.Metrics)
 			}
 			if w.Origin != srv.URL {
@@ -600,5 +601,25 @@ func TestFreshMethodsEscapeNothing(t *testing.T) {
 	}
 	if want := []string{"/workers/a%2Fb", "/workers/x%20y/actions/stop"}; !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+}
+
+// strategy and sources (varmq API 1.5.0) decode in pick order, a priority
+// absent as nil; an older varmq sends neither: "" and nil.
+func TestGetWorkerSources(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK, nil, `{"name":"w","status":"Running","concurrency":1,"num_processing":0,"num_pending":0,"num_idle_workers":1,
+		"strategy":"priority","sources":[{"queue_id":"redisq:fifo:{a}","kind":"queue","priority":-2},{"queue_id":"","kind":"topic"},{"queue_id":"","kind":"queue","priority":9223372036854775807}],
+		"metrics":{"completed":0,"successful":0,"failed":0}}`)
+	w, err := NewClient(srv.URL, "").GetWorkerCtx(context.Background(), "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Strategy != "priority" || len(w.Sources) != 3 || w.Sources[0].QueueID != "redisq:fifo:{a}" || *w.Sources[0].Priority != -2 ||
+		w.Sources[1].Kind != "topic" || w.Sources[1].Priority != nil || *w.Sources[2].Priority != math.MaxInt64 {
+		t.Errorf("worker = %+v", w)
+	}
+	srv, _ = recordingServer(t, http.StatusOK, nil, `{"name":"w","status":"Running","concurrency":1,"num_processing":0,"num_pending":0,"num_idle_workers":1,"metrics":{"submitted":3,"completed":0,"successful":0,"failed":0}}`)
+	if w, err := NewClient(srv.URL, "").GetWorkerCtx(context.Background(), "w"); err != nil || w.Strategy != "" || w.Sources != nil {
+		t.Errorf("older varmq: %+v, %v", w, err)
 	}
 }

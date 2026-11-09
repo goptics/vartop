@@ -19,7 +19,11 @@ import (
 type Worker struct {
 	Status                                   string
 	Concurrency, Busy, Pending, Idle         int
-	Submitted, Completed, Successful, Failed uint64
+	Completed, Successful, Failed    uint64
+	// Strategy and Sources, served by GET /workers/{name} when Sources is
+	// non-nil (varmq API 1.5.0); nil: an older varmq.
+	Strategy string
+	Sources  []api.WorkerSource
 	// QueueIDs, served as queue_ids when non-nil; nil: an older varmq.
 	QueueIDs []string
 	// ActionStatus, when non-zero, makes every PATCH on this worker reply
@@ -166,8 +170,10 @@ func (f *Varmq) get(w http.ResponseWriter, r *http.Request) {
 	if fw != nil {
 		failWith = fw.GetStatus
 		body = fakeSummary(name, fw)
+		if fw.Sources != nil {
+			body["strategy"], body["sources"] = fw.Strategy, fw.Sources
+		}
 		body["metrics"] = map[string]uint64{
-			"submitted":  fw.Submitted,
 			"completed":  fw.Completed,
 			"successful": fw.Successful,
 			"failed":     fw.Failed,
