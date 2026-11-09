@@ -339,6 +339,13 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 		d.QueueIDs = append(d.QueueIDs, sm.QueueIDs...)
 		mergeSources(&d, sm)
 	}
+	// A pod of an older varmq says only queue_ids: its queues join as
+	// sources, so a mixed fleet draws them all.
+	for _, id := range d.QueueIDs {
+		if d.Sources != nil && !slices.ContainsFunc(d.Sources, func(s api.WorkerSource) bool { return s.QueueID == id }) {
+			d.Sources = append(d.Sources, api.WorkerSource{QueueID: id, Kind: "queue"})
+		}
+	}
 	slices.Sort(d.QueueIDs)
 	d.QueueIDs = slices.Compact(d.QueueIDs)
 	d.SuccessRate = "—"
