@@ -17,8 +17,8 @@ import (
 
 // Worker is one worker as a Varmq serves it.
 type Worker struct {
-	Status                                   string
-	Concurrency, Busy, Pending, Idle         int
+	Status                           string
+	Concurrency, Busy, Pending, Idle int
 	Completed, Successful, Failed    uint64
 	// Strategy and Sources, served by GET /workers/{name} when Sources is
 	// non-nil (varmq API 1.5.0); nil: an older varmq.
@@ -580,4 +580,25 @@ func NewInstances(t *testing.T, ids ...string) ([]*Varmq, []*httptest.Server) {
 		})
 	}
 	return fakes, srvs
+}
+
+// SourceWorkers are workers on queues redis, sqlite and memory (Queue IDs)
+// as varmq API 1.5.0 serves them, for tests and screenshots: "orders"
+// picks by priority from all three (1, 5, none set), "emails" pulls from
+// redis alone, "fanout" takes turns between sqlite, a topic and storage
+// with no Queue ID, and "legacy" is an older varmq's: queue_ids only.
+func SourceWorkers(redis, sqlite, memory string) map[string]*Worker {
+	p := func(n int64) *int64 { return &n }
+	q := func(id string, prio *int64) api.WorkerSource {
+		return api.WorkerSource{QueueID: id, Kind: "queue", Priority: prio}
+	}
+	return map[string]*Worker{
+		"orders": {Status: "Running", Concurrency: 8, Busy: 2, Idle: 6, QueueIDs: []string{memory, redis, sqlite},
+			Strategy: "priority", Sources: []api.WorkerSource{q(redis, p(1)), q(sqlite, p(5)), q(memory, nil)}},
+		"emails": {Status: "Running", Concurrency: 2, Idle: 2, QueueIDs: []string{redis},
+			Strategy: "priority", Sources: []api.WorkerSource{q(redis, nil)}},
+		"fanout": {Status: "Idle", Concurrency: 1, Idle: 1, QueueIDs: []string{sqlite},
+			Strategy: "round_robin", Sources: []api.WorkerSource{q(sqlite, p(2)), {Kind: "topic"}, {Kind: "queue"}}},
+		"legacy": {Status: "Running", Concurrency: 1, Idle: 1, QueueIDs: []string{redis, sqlite}},
+	}
 }

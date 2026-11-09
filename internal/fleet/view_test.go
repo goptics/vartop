@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/goptics/vartop/internal/api"
 )
 
 var viewT0 = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
@@ -1056,5 +1058,33 @@ func TestDetailSeriesBoundedToTheHour(t *testing.T) {
 		if !pts[0].At.Equal(since) || !pts[len(pts)-1].At.Equal(newestAt) {
 			t.Errorf("%s spans %v to %v, want the hour from %v to %v", what, pts[0].At, pts[len(pts)-1].At, since, newestAt)
 		}
+	}
+}
+
+// A worker's sources merge over its pods: the first pod's in pick order,
+// then what others add (same kind and Queue ID once); its strategy is the
+// first pod's. A pod of an older varmq adds none; with no pod sending
+// them, Sources is nil.
+func TestBuildDetailMergesSources(t *testing.T) {
+	one := int64(1)
+	src := func(sm *Sample, strategy string, s ...api.WorkerSource) *Sample {
+		sm.Strategy, sm.Sources = strategy, s
+		return sm
+	}
+	a, b, topic := api.WorkerSource{QueueID: "a", Kind: "queue", Priority: &one}, api.WorkerSource{QueueID: "b", Kind: "queue"}, api.WorkerSource{Kind: "topic"}
+	s := snap(atTick(0),
+		okPod("p0", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "priority", a, topic)}),
+		okPod("p1", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "round_robin", b, a)}),
+		okPod("p2", map[string]*Sample{"w": smp("Running", 1, 0, 1, 0)}),
+	)
+	d, ok := BuildDetail([]*Snapshot{s}, "", "w", 0, instanceNoun)
+	if !ok || d.Strategy != "priority" || !reflect.DeepEqual(d.Sources, []api.WorkerSource{a, topic, b}) {
+		t.Errorf("merged = %q %+v", d.Strategy, d.Sources)
+	}
+	if d, _ := BuildDetail([]*Snapshot{s}, "p1", "w", 0, instanceNoun); d.Strategy != "round_robin" || !reflect.DeepEqual(d.Sources, []api.WorkerSource{b, a}) {
+		t.Errorf("one pod = %q %+v", d.Strategy, d.Sources)
+	}
+	if d, _ := BuildDetail([]*Snapshot{s}, "p2", "w", 0, instanceNoun); d.Strategy != "" || d.Sources != nil {
+		t.Errorf("older varmq = %q %+v", d.Strategy, d.Sources)
 	}
 }
