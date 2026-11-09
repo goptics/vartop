@@ -9,8 +9,12 @@
   <div class="axis-x">{{range .XTicks}}<span style="left:{{.Pct}}%">{{.Label}}</span>{{end}}</div>
   <div class="tip" hidden></div>
 </div>{{end}}
-{{/* nav_icon: 16px stroke icon of a nav page: dashboard, grid or queues */}}
-{{define "nav_icon"}}<svg class="ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">{{if eq . "dashboard"}}<path d="M2 13.5h12M4 11V7.5M8 11V3.5M12 11V6"/>{{else if eq . "grid"}}<rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M2 6.5h12M2 10.5h12M6.5 2v12M10.5 2v12"/>{{else}}<path d="M2.5 4h11M2.5 8h11M2.5 12h7"/>{{end}}</svg>{{end}}
+{{/* nav_icon: 16px stroke icon of a nav page: dashboard, grid, queues or workflows */}}
+{{define "nav_icon"}}<svg class="ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">{{if eq . "dashboard"}}<path d="M2 13.5h12M4 11V7.5M8 11V3.5M12 11V6"/>{{else if eq . "grid"}}<rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M2 6.5h12M2 10.5h12M6.5 2v12M10.5 2v12"/>{{else if eq . "workflows"}}<circle cx="3.5" cy="8" r="1.75"/><circle cx="12.5" cy="3.5" r="1.75"/><circle cx="12.5" cy="12.5" r="1.75"/><path d="M5.1 7.2 10.9 4.3M5.1 8.8l5.8 2.9"/>{{else}}<path d="M2.5 4h11M2.5 8h11M2.5 12h7"/>{{end}}</svg>{{end}}
+{{/* wf_state: a workflow or task state (StateView): its dot and words */}}
+{{define "wf_state"}}<span class="wst s-{{.Class}}">{{.Label}}</span>{{end}}
+{{/* progress: a workflow's tasks (Progress): a bar by how they stand, and ended/total */}}
+{{define "progress"}}<span class="prog" role="img" aria-label="{{.Ended}} of {{.Total}} tasks ended: {{.Completed}} completed, {{.Failed}} failed, {{.Cancelled}} cancelled; {{.Live}} in flight"><span class="bar"><i class="c" style="width:{{.PctCompleted}}%"></i><i class="f" style="width:{{.PctFailed}}%"></i><i class="x" style="width:{{.PctCancelled}}%"></i><i class="l" style="width:{{.PctLive}}%"></i></span><span class="n">{{.Ended}}/{{.Total}}</span></span>{{end}}
 {{define "layout"}}<!doctype html>
 <html lang="en">
 <head>
@@ -22,6 +26,7 @@
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/htmx-2.0.4.min.js" defer></script>
 {{if .Detail}}<script src="/static/detail.js" defer></script>
+{{end}}{{if .OwnPoll}}<script src="/static/workflow.js" defer></script>
 {{end}}
 </head>
 <body id="page">
@@ -31,6 +36,7 @@
     <a href="{{pageURL "/" .Server .Noun.Param .Pod}}"{{if .Dashboard}} aria-current="page"{{end}}>{{template "nav_icon" "dashboard"}}Dashboard</a>
     <a href="{{pageURL "/grid" .Server .Noun.Param .Pod}}"{{if .Grid}} aria-current="page"{{end}}>{{template "nav_icon" "grid"}}{{.Noun.Cap}} grid</a>
     <a href="{{queuesURL .Server}}"{{if or .Queues .Jobs}} aria-current="page"{{end}}>{{template "nav_icon" "queues"}}Queues</a>
+    <a href="{{workflowsURL .Server "" 0}}"{{if or .WorkflowList .OwnPoll}} aria-current="page"{{end}}>{{template "nav_icon" "workflows"}}Workflows</a>
   </nav>
   <div class="scope">
   {{if .Servers}}<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
@@ -57,7 +63,7 @@
 {{template "content" .}}
 </main>
 </div>
-{{if and (gt .IntervalSec 0) (not .Waiting)}}<div id="poller" hidden hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="#live" hx-swap="outerHTML" hx-sync="#page:drop"></div>{{end}}
+{{if and (gt .IntervalSec 0) (not .Waiting) (not .OwnPoll)}}<div id="poller" hidden hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="#live" hx-swap="outerHTML" hx-sync="#page:drop"></div>{{end}}
 </body>
 </html>
 {{end}}

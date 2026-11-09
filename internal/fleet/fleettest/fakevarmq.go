@@ -41,8 +41,16 @@ type Varmq struct {
 	Workers map[string]*Worker
 	// Queues by Queue ID, served by GET /queues and /queues/{id}/jobs. Nil:
 	// those routes answer the router's plain-text 404, as an older varmq.
-	Queues   map[string]*Queue
-	received []string // "METHOD escaped-path" of every request received
+	Queues map[string]*Queue
+	// Workflows served by the workflow routes, in any order. Several
+	// Varmqs may share one Workflow (a durable store); one ID twice on a
+	// Varmq is held by two of its storages (409 by ID). Nil: those routes
+	// answer the router's plain-text 404, as varmq before API 1.3.0.
+	Workflows []*Workflow
+	// WorkflowStatus, when non-zero, makes every workflow route reply with
+	// it and {"error":"..."}: storage that cannot be read.
+	WorkflowStatus int
+	received       []string // "METHOD escaped-path" of every request received
 
 	listInFlight, maxListInFlight int // concurrent GET /workers requests
 }
@@ -64,6 +72,9 @@ func NewVarmq(t *testing.T, instance string, workers map[string]*Worker) (*Varmq
 	mux.HandleFunc("GET /queues", f.queues)
 	mux.HandleFunc("GET /queues/{id}/jobs", f.jobs)
 	mux.HandleFunc("PATCH /queues/{id}/actions/{action}", f.queueAction)
+	mux.HandleFunc("GET /workflows", f.workflows)
+	mux.HandleFunc("GET /workflows/{id}", f.workflow)
+	mux.HandleFunc("PATCH /workflows/{id}/actions/{action}", f.workflowAction)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isList := r.Method == http.MethodGet && r.URL.Path == "/workers"

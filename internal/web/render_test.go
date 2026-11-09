@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goptics/varmq/contract"
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 	"github.com/goptics/vartop/internal/store"
 )
 
@@ -367,7 +369,7 @@ func TestTemplatesParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"dashboard", "grid", "detail", "results", "confirm"} {
+	for _, k := range []string{"dashboard", "grid", "detail", "queues", "queue", "workflows", "workflow", "results", "confirm"} {
 		if ts[k] == nil {
 			t.Errorf("missing template set %q", k)
 		}
@@ -525,10 +527,12 @@ func TestKPIShowsDashWhenLastPointIsGap(t *testing.T) {
 }
 
 func TestEveryFormCarriesServer(t *testing.T) {
+	wf := workflowView(fleet.WorkflowGroup{WorkflowRecord: fleettest.SampleWorkflows(time.Now().UnixMilli())[1].Record()}, "dev", time.Now())
 	for set, page := range map[string]Page{
 		"dashboard": dashboardPage(),
 		"detail":    detailPage(),
 		"grid":      gridPage(),
+		"workflow":  {Server: "dev", OwnPoll: true, Workflow: wf},
 	} {
 		body := run(t, set, "layout", page)
 		forms := strings.Split(body, "<form")[1:]
@@ -542,6 +546,11 @@ func TestEveryFormCarriesServer(t *testing.T) {
 				t.Errorf("%s: form %d lacks the server:\n%s", set, i, f)
 			}
 		}
+	}
+	// the cancel confirmation's form too
+	body := run(t, "confirm", "workflow_confirm", WorkflowConfirmView{Server: "dev", ID: "w", At: 1, Noun: instanceNoun})
+	if !strings.Contains(body, `<input type="hidden" name="server" value="dev">`) {
+		t.Errorf("workflow_confirm lacks the server:\n%s", body)
 	}
 }
 
@@ -880,6 +889,16 @@ func TestStaticAssetsEmbedded(t *testing.T) {
 			t.Errorf("detail.js lacks %q: not the charts' hover readout and the concurrency inputs kept in step", want)
 		}
 	}
+	// The graph's script: pan and zoom, trace, panel, kept across swaps.
+	wf, err := assets.ReadFile("static/workflow.js")
+	if err != nil {
+		t.Fatalf("workflow.js not embedded: %v", err)
+	}
+	for _, want := range []string{".dag-port", "htmx:afterSwap", "task-detail-", "ctrlKey", "Escape", "data-zoom", "dataset.taken", "CSS.escape(", ".wf-panel .body a[href="} {
+		if !strings.Contains(string(wf), want) {
+			t.Errorf("workflow.js lacks %q", want)
+		}
+	}
 	// The primary colour is varmq's logo teal, which the native controls
 	// (the concurrency slider, checkboxes) take too.
 	for _, want := range []string{"#0D0F14", "#E3E6ED", "prefers-color-scheme: light", ".mixed", "--accent: #44BF9E", "accent-color: var(--accent)"} {
@@ -1086,5 +1105,360 @@ func TestOnset(t *testing.T) {
 		if got := onset(c.pts); got != c.want {
 			t.Errorf("onset(%v) = %q, want %q", c.pts, got, c.want)
 		}
+	}
+}
+
+// layers is the layer of each task of l.
+func layers(l dagLayout) []int { return l.layer[:l.n] }
+
+// rank is the order of task ids within their layers, top to bottom.
+func rank(l dagLayout, ly int) []int {
+	var out []int
+	for _, id := range l.order[ly] {
+		if id < l.n {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// A task's layer is the longest path to it from a root; an edge spanning
+// layers runs through a dummy slot in each layer between.
+func TestLayoutDAGLayers(t *testing.T) {
+	// diamond: 0 -> 1, 2 -> 3
+	l, _ := layoutDAG(4, [][]int{nil, {0}, {0}, {1, 2}})
+	if got := layers(l); !slices.Equal(got, []int{0, 1, 1, 2}) {
+		t.Errorf("diamond layers = %v", got)
+	}
+	if len(l.chains) != 4 || len(l.layer) != 4 {
+		t.Errorf("diamond: %d edges, %d ids, want 4 and no dummy", len(l.chains), len(l.layer))
+	}
+	// 0 -> 1 -> 2 -> 3, and 0 -> 3: the long edge passes layers 1 and 2
+	l, _ = layoutDAG(4, [][]int{nil, {0}, {1}, {2, 0}})
+	if got := layers(l); !slices.Equal(got, []int{0, 1, 2, 3}) {
+		t.Errorf("chain layers = %v", got)
+	}
+	long := l.chains[len(l.chains)-1]
+	if len(long) != 4 || long[0] != 0 || long[3] != 3 || long[1] < 4 || long[2] < 4 {
+		t.Fatalf("long edge chain = %v, want 0, two dummies, 3", long)
+	}
+	if d := l.path(long); strings.Count(d, " L") != 2 || strings.Count(d, " C") != 3 {
+		t.Errorf("long edge path %q: want a straight run through each dummy, a curve in each gap", d)
+	}
+	// a dummy slot holds its column: no task box overlaps it
+	for _, id := range long[1:3] {
+		for _, other := range l.order[l.layer[id]] {
+			if other < l.n && abs(l.y[other]-l.y[id]) < (dagNodeH+dagDummyH)/2 {
+				t.Errorf("dummy %d at y %v overlaps task %d at %v", id, l.y[id], other, l.y[other])
+			}
+		}
+	}
+	if l.width != 2*dagPad+4*dagNodeW+3*dagGapX {
+		t.Errorf("width = %v", l.width)
+	}
+}
+
+func abs(f float64) float64 { return max(f, -f) }
+
+// Barycenter sweeps uncross edges: children follow their parents' order.
+// Ties (no neighbours) keep the producer's order.
+func TestLayoutDAGOrders(t *testing.T) {
+	// 0 and 1 roots; 2 under 1, 3 under 0: 3 belongs above 2
+	l, _ := layoutDAG(4, [][]int{nil, nil, {1}, {0}})
+	if got := rank(l, 1); !slices.Equal(got, []int{3, 2}) {
+		t.Errorf("layer 1 order = %v, want [3 2] (no crossing)", got)
+	}
+	if l.y[3] >= l.y[2] {
+		t.Errorf("y: 3 at %v, 2 at %v", l.y[3], l.y[2])
+	}
+	l, _ = layoutDAG(3, [][]int{nil, nil, nil})
+	if got := rank(l, 0); !slices.Equal(got, []int{0, 1, 2}) {
+		t.Errorf("independent tasks reordered: %v", got)
+	}
+	// a lone task in a layer sits level with the middle of the tallest
+	l, _ = layoutDAG(4, [][]int{nil, {0}, {0}, {1, 2}})
+	if l.y[0] != l.y[3] || l.y[0] != (l.y[1]+l.y[2])/2 {
+		t.Errorf("diamond not centred: %v", l.y)
+	}
+}
+
+// varmq refuses cyclic plans; a bad record still lays out: deps out of
+// range, on itself or closing a cycle get no edge, and nothing loops.
+func TestLayoutDAGGuards(t *testing.T) {
+	l, _ := layoutDAG(3, [][]int{{1}, {0}, {2, 7, -1}})
+	if len(l.chains) != 1 {
+		t.Errorf("chains = %v, want one edge of the cycle", l.chains)
+	}
+	for _, c := range l.chains {
+		if l.layer[c[0]] >= l.layer[c[len(c)-1]] {
+			t.Errorf("edge %v does not go forward", c)
+		}
+	}
+	if l, _ := layoutDAG(0, nil); len(l.order) != 0 || l.height != 2*dagPad {
+		t.Errorf("empty layout = %+v", l)
+	}
+	if l, _ := layoutDAG(2, nil); len(l.order) != 1 || len(l.chains) != 0 {
+		t.Errorf("no deps given = %+v", l)
+	}
+	// a huge record: no graph, not a huge layout
+	if _, ok := layoutDAG(dagMaxSlots+1, nil); ok {
+		t.Error("more tasks than slots laid out")
+	}
+	fan := make([][]int, 200) // a chain of 100, each of the next 100 also on task 0: long edges
+	for i := 1; i < 100; i++ {
+		fan[i] = []int{i - 1}
+	}
+	for i := 100; i < 200; i++ {
+		fan[i] = []int{0, 99}
+	}
+	if _, ok := layoutDAG(200, fan); ok {
+		t.Error("~10000 dummies laid out")
+	}
+	// a dense fan-in: no dummy, but r*r edges, each a path on the page
+	if _, ok := layoutDAG(2*40, fanIn(40)); !ok {
+		t.Error("40x40 fan-in (1600 edges) not laid out")
+	}
+	if _, ok := layoutDAG(2*100, fanIn(100)); ok {
+		t.Error("100x100 fan-in (10000 edges) laid out")
+	}
+}
+
+// fanIn is r roots, then r tasks each on every root.
+func fanIn(r int) [][]int {
+	deps := make([][]int, 2*r)
+	for i := r; i < 2*r; i++ {
+		for p := range r {
+			deps[i] = append(deps[i], p)
+		}
+	}
+	return deps
+}
+
+// Graphs near the cap: a chain, one wide layer, a dense fan-in, long
+// edges. Layout must stay cheap enough to run on every poll.
+func BenchmarkLayoutDAG(b *testing.B) {
+	chain := make([][]int, dagMaxSlots/2)
+	for i := 1; i < len(chain); i++ {
+		chain[i] = []int{i - 1}
+	}
+	wide := make([][]int, dagMaxSlots/2)
+	for i := 1; i < len(wide); i++ {
+		wide[i] = []int{0}
+	}
+	long := make([][]int, 100) // a chain of 50, the next 50 each on its head and tail
+	for i := 1; i < 50; i++ {
+		long[i] = []int{i - 1}
+	}
+	for i := 50; i < 100; i++ {
+		long[i] = []int{0, 49}
+	}
+	for name, deps := range map[string][][]int{"chain": chain, "wide": wide, "fan-in": fanIn(48), "long-edges": long} {
+		b.Run(name, func(b *testing.B) {
+			for b.Loop() {
+				if _, ok := layoutDAG(len(deps), deps); !ok {
+					b.Fatal("over the cap")
+				}
+			}
+		})
+	}
+}
+
+// The workflow page model: a node per task, an edge per dep, dashed into an
+// always task, animated into a task in flight while the workflow runs.
+func TestWorkflowView(t *testing.T) {
+	wfs := fleettest.SampleWorkflows(time.Now().UnixMilli())
+	run := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[1].Record(), On: []string{"a"}}, "dev", time.Now())
+	if run.Ctl.Final || len(run.Graph.Nodes) != 7 || len(run.Graph.Edges) != 8 || !run.Running || run.Progress.Live != 2 || run.Progress.Ended() != 3 {
+		t.Fatalf("running view: final %v, %d nodes, %d edges, progress %+v", run.Ctl.Final, len(run.Graph.Nodes), len(run.Graph.Edges), run.Progress)
+	}
+	var always, live int
+	for _, e := range run.Graph.Edges {
+		if e.Always {
+			always++
+			if run.Tasks[e.To].Name != "report" {
+				t.Errorf("dashed edge into %s", run.Tasks[e.To].Name)
+			}
+		}
+		if e.Live {
+			live++
+		}
+	}
+	if always != 2 || live != 2 {
+		t.Errorf("always edges %d, live edges %d; want 2 and 2", always, live)
+	}
+	if tv := run.Tasks[2]; !tv.Live || tv.QueueShort != "audit" || tv.QueueURL != "/queues/redisq:shop:fifo:%7Baudit%7D?server=dev" || tv.Label != "audit-log, pending, after extract" {
+		t.Errorf("audit-log = %+v", tv)
+	}
+	saga := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[2].Record()}, "dev", time.Now())
+	if !saga.Ctl.Final || saga.Tasks[0].Undo == nil || saga.Tasks[0].Undo.State.Class != "completed" || saga.Duration != "4.2s" {
+		t.Errorf("saga = %+v", saga)
+	}
+	for _, tv := range saga.Tasks {
+		if tv.Live {
+			t.Errorf("task %s live in an ended workflow", tv.Name)
+		}
+	}
+}
+
+func TestWorkflowWords(t *testing.T) {
+	for in, want := range map[string]StateView{
+		"compensation_failed": {"compensation failed", "compensation-failed"},
+		"running":             {"running", "running"},
+		"paused":              {"paused", "unknown"}, // a state a later varmq adds: as it is
+		"":                    {"unknown", "unknown"},
+		"<b>":                 {"<b>", "unknown"},
+	} {
+		if got := stateView(in); got != want {
+			t.Errorf("stateView(%q) = %+v, want %+v", in, got, want)
+		}
+	}
+	for d, want := range map[time.Duration]string{
+		400 * time.Millisecond: "0.4s", 38 * time.Second: "38s", 95 * time.Second: "1m 35s",
+		2*time.Hour + 5*time.Minute: "2h 05m", 76 * time.Hour: "3d 4h", -time.Second: "—",
+	} {
+		if got := span(d); got != want {
+			t.Errorf("span(%v) = %q, want %q", d, got, want)
+		}
+	}
+	for id, want := range map[string]string{"redisq:shop:fifo:{orders}": "orders", "memory:a:reports": "reports", "plain": "plain"} {
+		if got := queueShort(id); got != want {
+			t.Errorf("queueShort(%q) = %q", id, got)
+		}
+	}
+	for n, want := range map[int]string{812: "812 B", 9320: "9.1 KiB", 1_204_311: "1.1 MiB"} {
+		if got := byteSize(n); got != want {
+			t.Errorf("byteSize(%d) = %q, want %q", n, got, want)
+		}
+	}
+	if got := cut("transform-refunds-and-more", 20); got != "transform-refunds-a…" || cut("short", 20) != "short" {
+		t.Errorf("cut = %q", got)
+	}
+}
+
+// The workflow page: the graph is an SVG of focusable task links, each to
+// its table row; #live polls itself while the workflow runs and not once
+// it ended; the cancel buttons go with it.
+func TestWorkflowRenders(t *testing.T) {
+	wfs := fleettest.SampleWorkflows(time.Now().UnixMilli())
+	page := func(i int) Page {
+		v := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[i].Record(), On: []string{"a", "b"}}, "dev", time.Now())
+		p := Page{Title: "wf", Server: "dev", SelfURL: "/workflows/x?server=dev", OwnPoll: true, Workflow: v}
+		if !v.Ctl.Final {
+			p.IntervalSec = 5
+		}
+		return p
+	}
+	body := run(t, "workflow", "layout", page(1))
+	for _, want := range []string{
+		`<div id="live" hx-disinherit="*" hx-get="/workflows/x?server=dev" hx-trigger="every 5s" hx-select="#live"`,
+		`<a class="node t-pending live" href="#task-2" data-i="2" aria-label="audit-log, pending, after extract"`,
+		`<rect class="halo"`, `<path class="flow"`, `<path class="edge always"`, `marker-end="url(#dag-arrow)"`,
+		`<tr id="task-6">`, `<div id="task-detail-6">`, `<span class="chip">always</span>`,
+		`hx-post="/workflows/` + fleettest.RunningID + `/actions/cancel">Cancel workflow</button>`,
+		`name="undo" value="false"`, `<input type="hidden" name="at" value="`, `<dt>On cancel</dt><dd>undo jobs run</dd>`,
+		`<div id="results" aria-live="polite" hx-preserve="true"></div>`,
+		`<script src="/static/workflow.js" defer></script>`,
+		`aria-current="page"><svg class="ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="3.5"`, // the Workflows nav entry
+		// the hooks workflow.js queries
+		`class="dagbox"`, `<div class="dag-tools" hidden>`, `data-zoom="fit"`, `<div class="dag-port" tabindex="0"`,
+		`<svg class="dag"`, `data-w="`, `data-h="`, `<g class="view">`, `data-from="`, `data-to="`,
+		`<aside class="wf-panel" hidden`, `<button type="button" class="close"`, `<div class="body"></div>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("running workflow page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, `id="poller"`) {
+		t.Error("the layout poller polls too: #live polls itself")
+	}
+
+	body = run(t, "workflow", "layout", page(2))
+	for _, want := range []string{`<g class="undo t-completed"`, "carrier API: 503", `<span class="wst s-compensated">compensated</span>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("compensated page lacks %q", want)
+		}
+	}
+	for _, not := range []string{"hx-trigger", "Cancel workflow", "refresh every", `class="flow"`, `class="halo"`} {
+		if strings.Contains(body, not) {
+			t.Errorf("ended workflow page has %q", not)
+		}
+	}
+	// no undo on cancel: one button
+	if body := run(t, "workflow", "wfctl", WorkflowCtl{Server: "dev", ID: "w", At: 1}); !strings.Contains(body, "Cancel workflow") || strings.Contains(body, "without undo") {
+		t.Errorf("wfctl without undo_on_cancel:\n%s", body)
+	}
+	rec := wfs[1].Record()
+	rec.UndoOnCancel = false
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{"a"}}, "dev", time.Now())
+	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
+	if !strings.Contains(body, `<dt>On cancel</dt><dd>no undo jobs</dd>`) || !strings.Contains(body, "Cancel workflow") || strings.Contains(body, "without undo") {
+		t.Errorf("running page without undo_on_cancel:\n%s", body)
+	}
+
+	// over the edge cap: no graph, a note, every task in the table
+	var tasks []contract.TaskRecord
+	for i, deps := range fanIn(100) {
+		tr := contract.TaskRecord{Name: "t" + strconv.Itoa(i), State: contract.JobWaiting}
+		for _, d := range deps {
+			tr.Deps = append(tr.Deps, "t"+strconv.Itoa(d))
+		}
+		tasks = append(tasks, tr)
+	}
+	big := workflowView(fleet.WorkflowGroup{WorkflowRecord: contract.WorkflowRecord{ID: "big", State: contract.WorkflowRunning, CreatedAt: 1, Tasks: tasks}}, "dev", time.Now())
+	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: big})
+	if !strings.Contains(body, "200 tasks: too many edges to draw a graph") || !strings.Contains(body, `<tr id="task-199">`) || strings.Contains(body, `<svg class="dag"`) {
+		t.Errorf("over-cap workflow: no note, a graph, or tasks missing")
+	}
+}
+
+// A producer names tasks, queues, reasons and the workflow: every one is
+// text on the page, never markup (the panel copies #task-detail-N with
+// innerHTML, so the server's escaping is all there is).
+func TestWorkflowRendersHostileFields(t *testing.T) {
+	const evil = `<script>alert(1)</script><img src=x onerror=y>`
+	task := func(name string, deps ...string) contract.TaskRecord {
+		return contract.TaskRecord{Name: name, State: contract.JobState(evil), QueueID: evil, JobID: evil, Reason: evil, Deps: deps}
+	}
+	a, b := task(evil+"a"), task(evil+"b", evil+"a")
+	b.Undo = &contract.TaskRecord{Name: evil, State: contract.JobFailed, QueueID: evil, JobID: evil, Reason: evil}
+	rec := contract.WorkflowRecord{ID: evil, State: contract.WorkflowState(evil), CreatedAt: 1, Tasks: []contract.TaskRecord{a, b}}
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{evil}}, "dev", time.Now())
+	v.Others, v.Ambiguous, v.Failed = []WorkflowChoice{{URL: "/x", Created: evil, State: evil, On: []string{evil}}}, []string{evil}, []string{evil}
+	for name, body := range map[string]string{
+		"page":    run(t, "workflow", "layout", Page{Title: evil, Server: "dev", OwnPoll: true, Banner: evil, Workflow: v}),
+		"confirm": run(t, "confirm", "workflow_confirm", WorkflowConfirmView{Server: "dev", ID: evil, On: []string{evil}, Noun: instanceNoun}),
+		"list": run(t, "workflows", "layout", Page{Server: "dev", WorkflowList: &WorkflowsView{Read: true, Rows: []WorkflowRow{
+			{ID: evil, URL: workflowURL(evil, "dev", 0), State: stateView(evil), Created: evil, Duration: evil, On: []string{evil}}}}}),
+	} {
+		if !strings.Contains(body, "&lt;script&gt;") || strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") {
+			t.Errorf("%s: a field rendered as markup", name)
+		}
+		if n, want := strings.Count(body, "<script"), map[string]int{"page": 2, "confirm": 0, "list": 1}[name]; n != want {
+			t.Errorf("%s: %d <script, want %d (htmx, workflow.js)", name, n, want)
+		}
+	}
+
+	// an ID with '/', '?' and '#': one path segment in every link and post
+	const odd, esc = "a/b?c#d", "/workflows/a%2Fb%3Fc%23d"
+	for name, c := range map[string]struct{ body, want string }{
+		"list":    {run(t, "workflows", "layout", Page{Server: "dev", WorkflowList: &WorkflowsView{Read: true, Rows: []WorkflowRow{{ID: odd, URL: workflowURL(odd, "dev", 0)}}}}), `href="` + esc + `?server=dev"`},
+		"wfctl":   {run(t, "workflow", "wfctl", WorkflowCtl{Server: "dev", ID: odd, At: 1}), `hx-post="` + esc + `/actions/cancel"`},
+		"confirm": {run(t, "confirm", "workflow_confirm", WorkflowConfirmView{Server: "dev", ID: odd, Noun: instanceNoun}), `hx-post="` + esc + `/actions/cancel"`},
+	} {
+		if !strings.Contains(c.body, c.want) {
+			t.Errorf("%s with ID %q lacks %s:\n%s", name, odd, c.want, c.body)
+		}
+	}
+}
+
+// Two tasks of one name: a dep on it is the first one's edge, as in the
+// table, not the last's.
+func TestWorkflowViewDuplicateName(t *testing.T) {
+	rec := contract.WorkflowRecord{ID: "w", State: contract.WorkflowRunning, Tasks: []contract.TaskRecord{
+		{Name: "a", State: contract.JobCompleted}, {Name: "a", State: contract.JobCompleted}, {Name: "b", State: contract.JobWaiting, Deps: []string{"a"}},
+	}}
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", time.Now())
+	if len(v.Graph.Edges) != 1 || v.Graph.Edges[0].From != 0 || v.Graph.Edges[0].To != 2 {
+		t.Errorf("edges = %+v, want 0 -> 2", v.Graph.Edges)
 	}
 }

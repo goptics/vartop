@@ -34,3 +34,15 @@
     <button type="submit" class="primary">Confirm {{.Action}}</button>
   </form>
 </section>{{end}}
+{{define "workflow_confirm"}}<section class="confirm" aria-labelledby="confirm-head">
+  <h2 id="confirm-head">Confirm cancel{{if .NoUndo}} without undo{{end}} of workflow <span class="mono">{{.ID}}</span> on {{.Server}}</h2>
+  <p>Waiting tasks are cancelled now; queued ones when a worker reaches them. {{if or .NoUndo (not .Undo)}}No undo job runs{{if .Undoable}}: the {{.Undoable}} completed task{{if ne .Undoable 1}}s{{end}} with one stay done{{end}}.{{else if .Undoable}}Then the undo jobs of the {{.Undoable}} completed task{{if ne .Undoable 1}}s{{end}} with one run.{{else}}No completed task has an undo job yet.{{end}} The cancel is stored with the workflow: it reaches every process that works on it.</p>
+  <p>Sent to the first of these {{.Noun.Many}} that takes it: {{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span> {{end}}</p>
+  <form hx-post="/workflows/{{pathEscape .ID}}/actions/cancel" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+    {{template "server_field" .}}
+    <input type="hidden" name="at" value="{{.At}}">
+    {{if .NoUndo}}<input type="hidden" name="undo" value="false">
+    {{end}}<input type="hidden" name="confirm" value="1">
+    <button type="submit" class="primary">Confirm cancel{{if .NoUndo}} without undo{{end}}</button>
+  </form>
+</section>{{end}}

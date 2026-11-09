@@ -159,3 +159,119 @@ func TestQueueActionUnsupported(t *testing.T) {
 		t.Error("a transport error is not unsupported")
 	}
 }
+
+// A spec-shaped WorkflowRecord (varmq spec 1.3.0).
+const workflowBody = `{"id":"wf-1","state":"running","created_at":1762228800000,"undo_on_cancel":true,
+	"tasks":[{"name":"a","state":"completed","queue_id":"q","job_id":"a-1","result_size":12,"undo":{"name":"a","state":"pending","queue_id":"u","job_id":"a-u"}},
+	{"name":"b","state":"waiting","deps":["a"],"always":true,"queue_id":"q","job_id":"b-1"}]}`
+
+// ListWorkflows asks for a page, the state only when one is given, and
+// decodes the records, undo sub-records included.
+func TestListWorkflows(t *testing.T) {
+	srv, reqs := recordingServer(t, http.StatusOK, nil, "["+workflowBody+"]")
+	c := NewClient(srv.URL, "tok")
+	wfs, ok, err := c.ListWorkflows(context.Background(), contract.WorkflowFailed, 25, 50)
+	if err != nil || !ok || len(wfs) != 1 {
+		t.Fatalf("ListWorkflows = %v, ok %v, err %v", wfs, ok, err)
+	}
+	w := wfs[0]
+	if w.ID != "wf-1" || w.State != contract.WorkflowRunning || w.CreatedAt != 1762228800000 || !w.UndoOnCancel || len(w.Tasks) != 2 ||
+		w.Tasks[0].Undo == nil || w.Tasks[0].Undo.JobID != "a-u" || !w.Tasks[1].Always || w.Tasks[1].Deps[0] != "a" || w.Tasks[0].ResultSize != 12 {
+		t.Errorf("record = %+v", w)
+	}
+	if r := reqs()[0]; r.Path != "/workflows" || r.Query != "limit=50&offset=25&state=failed" || r.Auth != "Bearer tok" {
+		t.Errorf("request = %+v", r)
+	}
+	if _, _, err := c.ListWorkflows(context.Background(), "", 0, 10); err != nil || reqs()[1].Query != "limit=10&offset=0" {
+		t.Errorf("all states: err %v, query %q", err, reqs()[1].Query)
+	}
+}
+
+// varmq before 1.3.0 has no /workflows: the router's 404 or a 405 is no
+// workflow data, not an error; a 503 (every store failed) is one.
+func TestListWorkflowsUnsupported(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		srv, _ := recordingServer(t, status, nil, "404 page not found\n")
+		wfs, ok, err := NewClient(srv.URL, "").ListWorkflows(context.Background(), "", 0, 10)
+		if err != nil || ok || wfs != nil {
+			t.Errorf("%d: ListWorkflows = %v, ok %v, err %v", status, wfs, ok, err)
+		}
+	}
+	srv, _ := recordingServer(t, http.StatusServiceUnavailable, nil, `{"error":"redis down"}`)
+	if _, ok, err := NewClient(srv.URL, "").ListWorkflows(context.Background(), "", 0, 10); ok || err == nil || !strings.Contains(err.Error(), "redis down") {
+		t.Errorf("503: ok %v, err %v", ok, err)
+	}
+}
+
+// GetWorkflow escapes the ID as one segment; its errors are told apart:
+// not found (JSON 404), ambiguous (409), no route (router 404).
+func TestGetWorkflow(t *testing.T) {
+	srv, reqs := recordingServer(t, http.StatusOK, nil, workflowBody)
+	w, err := NewClient(srv.URL, "").GetWorkflow(context.Background(), "a/b c")
+	if err != nil || w.ID != "wf-1" || reqs()[0].EscapedPath != "/workflows/a%2Fb%20c" {
+		t.Errorf("GetWorkflow = %+v, %v; path %q", w, err, reqs()[0].EscapedPath)
+	}
+	for _, c := range []struct {
+		status                    int
+		body                      string
+		notFound, ambiguous, gone bool
+	}{
+		{http.StatusNotFound, `{"error":"workflow not found"}`, true, false, false},
+		{http.StatusConflict, `{"error":"workflow id in several stores"}`, false, true, false},
+		{http.StatusNotFound, "404 page not found\n", false, false, true},
+		{http.StatusServiceUnavailable, `{"error":"redis down"}`, false, false, false},
+	} {
+		srv, _ := recordingServer(t, c.status, nil, c.body)
+		_, err := NewClient(srv.URL, "").GetWorkflow(context.Background(), "wf-1")
+		if err == nil || WorkflowNotFound(err) != c.notFound || WorkflowAmbiguous(err) != c.ambiguous || RouteMissing(err) != c.gone {
+			t.Errorf("%d %s: err %v; not found %v, ambiguous %v, no route %v", c.status, c.body, err, WorkflowNotFound(err), WorkflowAmbiguous(err), RouteMissing(err))
+		}
+	}
+	for _, id := range []string{".", ".."} { // would name another route: not sent
+		srv, reqs := recordingServer(t, http.StatusOK, nil, workflowBody)
+		c := NewClient(srv.URL, "")
+		_, err := c.GetWorkflow(context.Background(), id)
+		_, err2 := c.CancelWorkflow(context.Background(), id, false)
+		if !WorkflowNotFound(err) || !WorkflowNotFound(err2) || len(reqs()) != 0 {
+			t.Errorf("%q: %v, %v, %d requests", id, err, err2, len(reqs()))
+		}
+	}
+	if WorkflowNotFound(context.Canceled) || WorkflowAmbiguous(context.Canceled) || RouteMissing(context.Canceled) {
+		t.Error("a transport error is none of them")
+	}
+}
+
+// CancelWorkflow PATCHes the cancel route, with undo=false only when asked
+// (the spec refuses undo=true), and returns the record sent back.
+func TestCancelWorkflow(t *testing.T) {
+	srv, reqs := recordingServer(t, http.StatusOK, nil, strings.Replace(workflowBody, `"running"`, `"compensating"`, 1))
+	c := NewClient(srv.URL, "tok")
+	w, err := c.CancelWorkflow(context.Background(), "wf/1", false)
+	if err != nil || w.State != contract.WorkflowCompensating {
+		t.Fatalf("CancelWorkflow = %+v, %v", w, err)
+	}
+	if _, err := c.CancelWorkflow(context.Background(), "wf/1", true); err != nil {
+		t.Fatal(err)
+	}
+	r := reqs()
+	if r[0].Method != http.MethodPatch || r[0].EscapedPath != "/workflows/wf%2F1/actions/cancel" || r[0].Query != "" || r[0].Auth != "Bearer tok" {
+		t.Errorf("cancel = %+v", r[0])
+	}
+	if r[1].Query != "undo=false" {
+		t.Errorf("cancel without undo: query %q", r[1].Query)
+	}
+}
+
+// WorkflowFinal: the five ended states; running, compensating and a state
+// a later varmq adds are not.
+func TestWorkflowFinal(t *testing.T) {
+	for _, s := range WorkflowStates {
+		want := s != contract.WorkflowRunning && s != contract.WorkflowCompensating
+		if WorkflowFinal(s) != want {
+			t.Errorf("WorkflowFinal(%s) = %v", s, !want)
+		}
+	}
+	if WorkflowFinal("paused") {
+		t.Error("an unknown state is final")
+	}
+}

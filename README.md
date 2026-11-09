@@ -45,12 +45,14 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 - **Fleet dashboard.** Completed per second, failed per minute, pending jobs and workers by status, with a 10-minute trend per worker.
 - **Instance grid.** Every worker on every instance at a glance: status, busy/concurrency, pending.
 - **Worker page.** Totals and success rate, and two charts (completed /s, failed /s), each with its own **1h | 24h** switch, plus **7d** and **30d** as far as the server's `history` reaches, axes and a hover readout.
+- **Workflows** (varmq API 1.3.0). Every workflow, newest first, once however many instances report it, with its state, tasks ended and duration; its task graph laid out left to right: pan and zoom, hover a task to trace what it waits for and what waits on it, click it for its queue, job, reason, result size and undo job. A running workflow's page follows it live.
 - **History that survives restarts.** 24 hours of polls, and up to 30 days of each worker's rates per server, in a local SQLite store.
 - **Stale data called out.** A banner says how old the data is and why, instead of showing old numbers as current.
 
 **Act**
 
 - **Pause, resume, restart, stop**, and a concurrency slider, on every instance or on one; pause or resume several workers at once.
+- **Cancel a workflow**, with or without its undo jobs, after a confirm.
 - **The same from the CLI**, fanned out to every endpoint concurrently, one result line each.
 
 **Find every instance**
@@ -145,6 +147,12 @@ The concurrency slider sets the pool size per instance, applied when you let go;
 
 Every worker on every instance: spot the one instance that is idle, stuck or behind.
 
+### Workflows
+
+**Workflows** lists the server's workflows (varmq API 1.3.0), newest first, filtered by state. A workflow in shared (durable) storage is listed by every instance that binds it; vartop shows it once, with the instances that report it. An in-memory workflow shows under its own instance.
+
+A workflow's page draws its tasks as a graph, laid out by vartop: each task in the column of its longest path from a root, edges into an *always* task dashed, a task with an undo job marked **undo**. Drag to pan, Ctrl or Cmd + scroll (or pinch, or the buttons) to zoom; Tab to a task and Enter, or click it, for its details. The table below lists every task. While the workflow runs, the page refreshes at each poll and stops once it ends. **Cancel workflow** cancels it as its producer chose (the undo jobs of completed tasks run when it said so); **Cancel without undo** turns them off. Both reach every process that works on the workflow. An instance holding the same ID in more than one storage answers 409; the page says so.
+
 ## Usage
 
 ### `vartop web`
@@ -199,6 +207,8 @@ A page's address says what it shows, by the names the page shows, so a reload, t
 | --- | --- |
 | `server=<name>` | The configured server to show, by the key it is listed under in the config (the default server when absent, else the first configured server by name) |
 | `instance=<label>` | Only that instance, e.g. `?instance=instance-2` |
+| `state=<state>`, `offset=<n>` | On the workflows list: only that state (`running`, `completed`, …), from that row |
+| `at=<ms>` | On a workflow page: which of several workflows of that ID (in-memory ones of different instances), by its creation time |
 | `completed=<span>`, `failed=<span>` | On a worker page: the span of that chart, `24h`, `7d`, `30d` or the server's history (e.g. `14d`); without it, the hour |
 
 Without `instance` the page shows every instance merged. An old `pod=` link opens the merged view. A label the server never had says so; one that is no longer reported says that, with a link to the merged view. A span the server's history does not offer (a link from before it was shortened, say) shows the hour.

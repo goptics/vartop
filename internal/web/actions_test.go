@@ -10,12 +10,14 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/goptics/varmq/contract"
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
@@ -330,6 +332,7 @@ func TestPOSTWithoutHXRequest(t *testing.T) {
 		{"/workers/orders/concurrency", multi("n", "9")},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
 		{tenantPath + "/actions/pause", multi("confirm", "1")},
+		{"/workflows/w/actions/cancel", multi("at", "1", "confirm", "1")},
 	} {
 		if resp, _ := post(t, srv, c.path, c.form, false); resp.StatusCode != http.StatusForbidden {
 			t.Errorf("POST %s without HX-Request = %d, want 403", c.path, resp.StatusCode)
@@ -356,6 +359,7 @@ func TestCrossOriginPOST(t *testing.T) {
 			{"/workers/orders/concurrency", multi("n", "9")},
 			{"/bulk/pause", multi("names", "orders", "confirm", "1")},
 			{tenantPath + "/actions/pause", multi("confirm", "1")},
+			{"/workflows/w/actions/cancel", multi("at", "1", "confirm", "1")},
 		} {
 			req := postRequest(t, srv, c.path, c.form)
 			for k, v := range headers {
@@ -383,6 +387,7 @@ func TestGETOnMutatingRoute(t *testing.T) {
 		"/workers/orders/concurrency?server=multi&n=3",
 		"/bulk/pause?server=multi&names=orders&confirm=1",
 		tenantPath + "/actions/pause?server=multi&confirm=1",
+		"/workflows/w/actions/cancel?server=multi&at=1&confirm=1",
 	} {
 		for _, hx := range []bool{false, true} {
 			if status, _ := fetch(t, srv, path, hx); status != http.StatusMethodNotAllowed {
@@ -1244,6 +1249,8 @@ func TestActionRefusedWhenStale(t *testing.T) {
 		{"/bulk/pause", multi("names", "orders", "confirm", "1")},
 		{"/queues/q/actions/pause", multi()},
 		{"/queues/q/actions/resume", multi("confirm", "1")},
+		{"/workflows/w/actions/cancel", multi("at", "1")},
+		{"/workflows/w/actions/cancel", multi("at", "1", "undo", "false", "confirm", "1")},
 	} {
 		start := time.Now()
 		resp, body := post(t, f.srv, c.path, c.form, true)
@@ -1451,5 +1458,133 @@ func TestActionResponseShowsStale(t *testing.T) {
 	}
 	if live := liveOOB(body); !strings.Contains(live, `<td class="num" data-label="Busy">—</td>`) || strings.Contains(live, `">3</td>`) {
 		t.Errorf("the refreshed #live of a stale server shows current values:\n%s", live)
+	}
+}
+
+// wfPatches are the PATCHes on f's workflow routes.
+func wfPatches(f *fleettest.Varmq) []string {
+	return slices.DeleteFunc(patches(f), func(c string) bool { return !strings.HasPrefix(c, "PATCH /workflows/") })
+}
+
+// Cancel: a confirmation panel first, nothing sent; then one PATCH, to the
+// first unit reporting the workflow, the results, and #wfctl out of band
+// with no buttons once it ended.
+func TestWorkflowCancel(t *testing.T) {
+	varmqs, fakes, wfs := workflowFakes(t)
+	srv, _ := newTestServer(t, fakes...)
+	running := wfs[1]
+	at := strconv.FormatInt(running.Record().CreatedAt, 10)
+	path := "/workflows/" + fleettest.RunningID + "/actions/cancel"
+
+	resp, body := post(t, srv, path, multi("at", at), true)
+	if !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) || !strings.Contains(body, `<form hx-post="`+path+`" hx-target="#results"`) ||
+		!strings.Contains(body, `<input type="hidden" name="server" value="multi">`) {
+		t.Errorf("confirm panel does not post the cancel back:\n%s", body)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Confirm cancel of workflow") || strings.Contains(body, "without undo") ||
+		!strings.Contains(body, `<input type="hidden" name="at" value="`+at+`">`) || !strings.Contains(body, "No completed task has an undo job yet") {
+		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
+	}
+	resp, body = post(t, srv, path, multi("at", at, "undo", "false"), true)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Confirm cancel without undo") || !strings.Contains(body, `<input type="hidden" name="undo" value="false">`) {
+		t.Errorf("confirm panel without undo = %d:\n%s", resp.StatusCode, body)
+	}
+	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])); n != 0 {
+		t.Fatalf("%d PATCHes before confirm", n)
+	}
+
+	// every unit refuses (storage down): failed per unit, the buttons stay
+	running.SetActionStatus(http.StatusServiceUnavailable)
+	resp, body = post(t, srv, path, multi("at", at, "confirm", "1"), true)
+	if resp.StatusCode != http.StatusOK || strings.Count(body, `<li class="failed">`) != 2 || strings.Count(body, "(Service Unavailable)") != 2 || strings.Contains(body, "now cancelled") {
+		t.Errorf("refused cancel = %d:\n%s", resp.StatusCode, body)
+	}
+	if _, oob, ok := strings.Cut(body, `<div id="wfctl" class="qctl" hx-swap-oob="outerHTML">`); !ok || !strings.Contains(oob, "Cancel workflow") {
+		t.Errorf("refused cancel: #wfctl lost its buttons:\n%s", body)
+	}
+	if r := running.Record(); r.State != contract.WorkflowRunning {
+		t.Errorf("refused cancel changed the workflow: %s", r.State)
+	}
+	running.SetActionStatus(0)
+	sent := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1]))
+
+	resp, body = post(t, srv, path, multi("at", at, "undo", "false", "confirm", "1"), true)
+	if resp.StatusCode != http.StatusOK || strings.Count(body, `<li class="ok">`) != 1 || !strings.Contains(body, "now cancelled") {
+		t.Errorf("cancel = %d:\n%s", resp.StatusCode, body)
+	}
+	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])) - sent; n != 1 {
+		t.Errorf("%d PATCHes, want one: the cancel is stored with the workflow", n)
+	}
+	if r := running.Record(); r.State != contract.WorkflowCancelled || r.UndoOnCancel {
+		t.Errorf("after cancel without undo: %s, undo_on_cancel %v", r.State, r.UndoOnCancel)
+	}
+	if _, oob, ok := strings.Cut(body, `<div id="wfctl" class="qctl" hx-swap-oob="outerHTML">`); !ok || strings.Contains(oob, "Cancel workflow") {
+		t.Errorf("no #wfctl without buttons out of band:\n%s", body)
+	}
+	if strings.Contains(body, testToken) {
+		t.Error("the response carries the token")
+	}
+
+	// it ended: refused, nothing sent
+	resp, body = post(t, srv, path, multi("at", at, "confirm", "1"), true)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "already ended (cancelled)") {
+		t.Errorf("cancel of an ended workflow = %d %q", resp.StatusCode, body)
+	}
+	for _, c := range []struct {
+		path   string
+		form   url.Values
+		status int
+		msg    string
+	}{
+		{"/workflows/w/actions/retry", multi("at", "1"), http.StatusBadRequest, "want cancel"},
+		{path, multi("at", at, "undo", "true"), http.StatusBadRequest, "undo: want false"},
+		{path, multi(), http.StatusBadRequest, "names no created_at"},
+		{path, multi("at", "1"), http.StatusConflict, "no longer reported"}, // another workflow of that ID, or none
+		{"/workflows/nope/actions/cancel", multi("at", "1", "confirm", "1"), http.StatusConflict, "no longer reported"},
+	} {
+		resp, body := post(t, srv, c.path, c.form, true)
+		if resp.StatusCode != c.status || !strings.Contains(body, c.msg) {
+			t.Errorf("POST %s %v = %d %q, want %d with %q", c.path, c.form, resp.StatusCode, body, c.status, c.msg)
+		}
+	}
+	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])) - sent; n != 1 {
+		t.Errorf("%d PATCHes after the refusals, want still one", n)
+	}
+
+	// the saga ended too; a running saga with undo jobs says they run
+	saga := fleettest.NewWorkflow(contract.WorkflowRecord{ID: "s", State: contract.WorkflowRunning, CreatedAt: 7, UndoOnCancel: true,
+		Tasks: []contract.TaskRecord{{Name: "a", State: contract.JobCompleted, Undo: &contract.TaskRecord{Name: "a", State: contract.JobWaiting}}, {Name: "b", State: contract.JobPending, Deps: []string{"a"}}}})
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workflows = append(varmqs[0].Workflows, saga)
+	varmqs[0].Mu.Unlock()
+	if _, body := post(t, srv, "/workflows/s/actions/cancel", multi("at", "7"), true); !strings.Contains(body, "Then the undo jobs of the 1 completed task with one run.") {
+		t.Errorf("saga confirm:\n%s", body)
+	}
+	if _, body := post(t, srv, "/workflows/s/actions/cancel", multi("at", "7", "confirm", "1"), true); !strings.Contains(body, "now compensating") || !strings.Contains(body, "Cancel workflow") {
+		t.Errorf("saga cancel (still compensating: buttons stay):\n%s", body)
+	}
+
+	// an ID with '/', '?' and '#': one path segment, end to end
+	odd := fleettest.NewWorkflow(contract.WorkflowRecord{ID: "a/b?c#d", State: contract.WorkflowRunning, CreatedAt: 8, Tasks: []contract.TaskRecord{{Name: "a", State: contract.JobWaiting}}})
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workflows = append(varmqs[0].Workflows, odd)
+	varmqs[0].Mu.Unlock()
+	if resp, body := post(t, srv, "/workflows/a%2Fb%3Fc%23d/actions/cancel", multi("at", "8", "confirm", "1"), true); resp.StatusCode != http.StatusOK || !strings.Contains(body, "now cancelled") {
+		t.Errorf("cancel of %q = %d:\n%s", odd.Record().ID, resp.StatusCode, body)
+	}
+
+	// every unit holds the ID in two storages (409): refused, nothing sent
+	sent = len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1]))
+	for _, v := range varmqs[:2] {
+		v.Mu.Lock()
+		v.Workflows = append(v.Workflows, fleettest.NewWorkflow(contract.WorkflowRecord{ID: fleettest.RunningID, CreatedAt: 9}))
+		v.Mu.Unlock()
+	}
+	resp, body = post(t, srv, path, multi("at", at, "confirm", "1"), true)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "held by more than one storage") || !strings.Contains(body, "cannot cancel") {
+		t.Errorf("cancel of an ID two storages hold = %d %q", resp.StatusCode, body)
+	}
+	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])) - sent; n != 0 {
+		t.Errorf("%d PATCHes for an ambiguous ID, want none", n)
 	}
 }
