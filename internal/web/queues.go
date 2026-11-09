@@ -260,6 +260,8 @@ func (h *handler) queues(w http.ResponseWriter, r *http.Request) {
 	p.Pods = nil // queues are shared by the units: no unit select
 	if ok {
 		if v, read := h.readQueues(r, &p, snaps); read {
+			// by name, as the rows show them; v.Group needs ID order, unused here
+			slices.SortStableFunc(v.Groups, func(a, b fleet.QueueGroup) int { return p.cmpQName(a.ID, b.ID) })
 			p.Queues = &v
 		}
 	}
@@ -360,13 +362,13 @@ func stateCount(c *contract.JobCounts, state contract.JobState) int64 {
 var queueActions = []string{"pause", "resume"}
 
 // QueueConfirmView is the confirmation panel of a queue action: Action on
-// queue ID of Server, sent to each of Units (a unit that does not serve the
+// Queue of Server, sent to each of Units (a unit that does not serve the
 // route is sent nothing).
 type QueueConfirmView struct {
-	Action, Server, ID string
-	Queue              QueueName
-	Noun               fleet.Noun
-	Units              []fleet.QueueUnit
+	Action, Server string
+	Queue          QueueName
+	Noun           fleet.Noun
+	Units          []fleet.QueueUnit
 }
 
 // queueAction pauses or resumes queue id on every unit of the form's
@@ -400,7 +402,7 @@ func (h *handler) queueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.PostFormValue("confirm") != "1" {
-		h.fragments(w, fragment{"confirm", "queue_confirm", QueueConfirmView{Action: action, Server: t.key, ID: id, Queue: ownersOf(t.latest).name(id), Noun: t.noun, Units: g.Units()}})
+		h.fragments(w, fragment{"confirm", "queue_confirm", QueueConfirmView{Action: action, Server: t.key, Queue: ownersOf(t.latest).name(id), Noun: t.noun, Units: g.Units()}})
 		return
 	}
 	results, after := fleet.QueueAct(mutationCtx(r), g, fleet.UnitsOf(t.latest), t.noun, action)
@@ -554,16 +556,10 @@ type queueOwners map[string]string
 
 // ownersOf reads s's queue_ids; of two workers on one queue, the first by name.
 func ownersOf(s *fleet.Snapshot) queueOwners {
-	var o queueOwners
+	o := queueOwners{}
 	for _, p := range fleet.PodsOf(s, "") {
 		for name, sm := range p.Workers {
 			for _, id := range sm.QueueIDs {
-				if !strings.HasPrefix(id, "memory:") {
-					continue
-				}
-				if o == nil {
-					o = make(queueOwners)
-				}
 				if cur, ok := o[id]; !ok || name < cur {
 					o[id] = name
 				}
