@@ -1044,7 +1044,7 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 				t.Errorf("%s: a stale page shows the current %q", set, current)
 			}
 		}
-		if set == "detail" && (!strings.Contains(fresh, `class="wqueues"`) || strings.Contains(body, `class="wqueues"`)) {
+		if set == "detail" && (!strings.Contains(fresh, `class="sources"`) || strings.Contains(body, `class="sources"`)) {
 			t.Error("detail: the Queues line not shown fresh, or shown stale")
 		}
 		if set == "detail" && !strings.Contains(body, `<p class="pods">Pods reporting: —</p>`) {

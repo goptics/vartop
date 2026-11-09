@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
@@ -82,6 +83,36 @@ func queueWorkers(s *fleet.Snapshot, id, server string) []QueueWorker {
 		}
 	}
 	slices.SortStableFunc(out, func(a, b QueueWorker) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
+// WorkerChip is a worker consuming a queue, as the queue list names it:
+// its page, and Tip, the units it runs on.
+type WorkerChip struct{ Name, URL, Tip string }
+
+// workerChips are, by Queue ID, the workers of s whose queue_ids hold it,
+// by name, each once; nil from an older varmq (no queue_ids).
+func workerChips(s *fleet.Snapshot, server string) map[string][]WorkerChip {
+	on := map[string]map[string][]string{} // Queue ID → worker → unit labels
+	for _, p := range fleet.PodsOf(s, "") {
+		if p.Err != "" {
+			continue
+		}
+		for name, sm := range p.Workers {
+			for _, id := range sm.QueueIDs {
+				if on[id] == nil {
+					on[id] = map[string][]string{}
+				}
+				on[id][name] = append(on[id][name], p.Label)
+			}
+		}
+	}
+	out := make(map[string][]WorkerChip, len(on))
+	for id, workers := range on {
+		for _, name := range slices.Sorted(maps.Keys(workers)) {
+			out[id] = append(out[id], WorkerChip{Name: name, URL: workerURL(name, server, "", ""), Tip: "runs on " + strings.Join(workers[name], ", ")})
+		}
+	}
 	return out
 }
 
@@ -264,6 +295,7 @@ func (h *handler) queues(w http.ResponseWriter, r *http.Request) {
 			// by name, as the rows show them; v.Group needs ID order, unused here
 			slices.SortStableFunc(v.Groups, func(a, b fleet.QueueGroup) int { return p.cmpQName(a.ID, b.ID) })
 			p.Queues = &v
+			p.qworkers = workerChips(latestOf(snaps), p.Server)
 		}
 	}
 	h.render(w, "queues", p.status(r), p)

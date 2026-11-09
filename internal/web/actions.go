@@ -396,6 +396,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 
 	p := Page{Server: key, Pod: label, Noun: n, IntervalSec: int(interval / time.Second), Stale: stale, Spans: spans, Ranges: ranges}
 	fill(&p, snaps)
+	p.owners = ownersOf(latestOf(snaps)) // names in-memory sources, as page does
 	if podGone(&p, snaps) {
 		return "", Page{}, false // the next poll shows why
 	}
