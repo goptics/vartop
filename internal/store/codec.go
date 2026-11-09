@@ -56,6 +56,7 @@ type sampleRec struct {
 	Successful  uint64    `json:"ok,omitempty"`
 	Failed      uint64    `json:"fa,omitempty"`
 	Rates       []float64 `json:"r,omitempty"` // completed/s, failed/s to 3 dp; absent unless RateOK
+	QueueIDs    []string  `json:"q,omitempty"` // added without a new StoreVersion: older rows read nil
 }
 
 // labelsRec is a fleet.LabelState.
@@ -130,6 +131,7 @@ func encodeSnapshot(s *fleet.Snapshot) ([]byte, error) {
 				Instance: ifDiffers(sm.Instance, p.Instance), Origin: ifDiffers(sm.Origin, p.Via),
 				Submitted: sm.Metrics.Submitted, Completed: sm.Metrics.Completed,
 				Successful: sm.Metrics.Successful, Failed: sm.Metrics.Failed,
+				QueueIDs: sm.QueueIDs,
 			}
 			if c, f := round3(sm.CompletedRate), round3(sm.FailedRate); sm.RateOK && finite(c) && finite(f) {
 				w.Rates = []float64{c, f}
@@ -192,6 +194,7 @@ func decodeSnapshot(atMs int64, data []byte) (*fleet.Snapshot, error) {
 			sm.Instance, sm.Origin = orDefault(w.Instance, u.Instance), orDefault(w.Origin, u.Via)
 			sm.Metrics.Submitted, sm.Metrics.Completed = w.Submitted, w.Completed
 			sm.Metrics.Successful, sm.Metrics.Failed = w.Successful, w.Failed
+			sm.QueueIDs = w.QueueIDs
 			if len(w.Rates) == 2 {
 				sm.CompletedRate, sm.FailedRate, sm.RateOK = w.Rates[0], w.Rates[1], true
 			}
