@@ -3,7 +3,8 @@
 <table class="queues">
   <caption class="sr">Queues, one row per Queue ID; counts are the queue's own, not summed across {{$.Noun.Many}}</caption>
   <thead><tr>
-    <th scope="col">Queue ID</th>
+    <th scope="col">Queue</th>
+    <th scope="col">Namespace</th>
     <th scope="col" class="num">Pending</th>
     <th scope="col" class="num">Processing</th>
     <th scope="col" class="num">Completed</th>
@@ -11,9 +12,10 @@
     <th scope="col" class="num">Submitted (total)</th>
     <th scope="col">Reported by</th>
   </tr></thead>
-  <tbody>{{range .Groups}}
+  <tbody>{{range .Groups}}{{$q := $.QName .ID}}
   <tr>
-    <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}">{{.ID}}</a>{{if .IsPaused}} <span class="status paused"{{with .PausedAt}} title="paused at {{fullMs .}}"{{end}}>paused</span>{{end}}</th>{{with .Counts}}
+    <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}">{{template "qname" $q}}</a>{{if .IsPaused}} <span class="status paused"{{with .PausedAt}} title="paused at {{fullMs .}}"{{end}}>paused</span>{{end}}</th>
+    <td data-label="Namespace">{{with $q.NS}}{{.}}{{else}}<span class="na">—</span>{{end}}</td>{{with .Counts}}
     <td class="num" data-label="Pending">{{.Pending}}</td>
     <td class="num" data-label="Processing">{{.Processing}}</td>
     <td class="num" data-label="Completed">{{.Completed}}</td>

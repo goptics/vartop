@@ -347,6 +347,7 @@ func (h *handler) page(r *http.Request) (p Page, snaps []*fleet.Snapshot, ok boo
 	snaps = feed.Snapshots()
 	latest := latestOf(snaps)
 	fill(&p, snaps)
+	p.owners = ownersOf(latest)
 	d := h.collector()
 	if d.Other {
 		// Another environment's snapshots: no current value, and no

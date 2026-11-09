@@ -333,8 +333,23 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 /* queues and jobs */
 .queues .on { white-space: normal; color: var(--subtle); }
 .queues .failed { color: var(--bad); }
-.queues .name { overflow-wrap: break-word; } /* break a Queue ID only when it cannot fit whole */
-.queues .name a { font-family: var(--mono); font-size: var(--fs-2); }
+.queues .name { overflow-wrap: break-word; } /* break a name only when it cannot fit whole */
+/* a queue's name (qname): store glyph, name, kind badge; the full ID its title */
+.qn { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-width: 0; vertical-align: middle; }
+.qnm { min-width: 0; overflow-wrap: anywhere; }
+.qnm.mono { font-size: .93em; }
+.sico { flex: none; fill: currentColor; stroke: none; color: var(--subtle); }
+.qkind { padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--subtle); font-size: var(--fs-1); font-weight: 500; line-height: 1.5; }
+.qtitle { font-size: var(--fs-5); font-weight: 600; }
+.qtitle .sico { width: 18px; height: 18px; }
+.qtitle .qkind { font-weight: 500; letter-spacing: 0; }
+.qfull { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 6px 0 0; color: var(--subtle); font-size: var(--fs-1); }
+.qfull code { min-width: 0; overflow-wrap: anywhere; }
+.qfull .copy { padding: 1px 8px; font-size: var(--fs-1); }
+.wqueues { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0 0 16px; }
+.wqueues .sub { font-size: var(--fs-2); }
+a.ql { color: var(--fg); text-decoration: none; }
+a.ql:hover .qnm { color: var(--accent); text-decoration: underline; }
 
 /* phone: each queue row stacks, its numbers labelled, as .workers */
 @media (max-width: 640px) {
@@ -343,6 +358,7 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
   .queues tbody tr:last-child { border-bottom: 0; }
   .queues th, .queues td { padding: 0; border: 0; background: none; white-space: normal; text-align: left; }
   .queues .name, .queues .on, .queues td[colspan] { grid-column: 1 / -1; min-width: 0; }
+  .qworkers .name { order: -1; }
   .queues td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: var(--fs-1); }
 }
 

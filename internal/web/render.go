@@ -90,7 +90,12 @@ type Page struct {
 	Spans                   []time.Duration
 	Ranges                  ChartRanges
 	CompletedDay, FailedDay *DayChart
+
+	owners queueOwners // of the newest snapshot: names in-memory queues
 }
+
+// QName is Queue ID id as the page shows it.
+func (p Page) QName(id string) QueueName { return p.owners.name(id) }
 
 // Interval is the server's poll interval; 0 with no server.
 func (p Page) Interval() time.Duration { return time.Duration(p.IntervalSec) * time.Second }

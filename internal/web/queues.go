@@ -58,6 +58,31 @@ type JobsView struct {
 	Prev, Next string
 	// Pages are the numbered page links, when Total is known; a zero N is a gap.
 	Pages []PageLink
+	// Workers: the workers whose queue_ids hold the queue, nil from an
+	// older varmq.
+	Workers []QueueWorker
+}
+
+// QueueWorker is one worker on one unit, consuming a queue.
+type QueueWorker struct {
+	Unit, Tip, Name, URL, Status, Class string
+	Concurrency                         int
+}
+
+// queueWorkers are the workers of s whose queue_ids hold id, by name, then
+// in unit order.
+func queueWorkers(s *fleet.Snapshot, id, server string) []QueueWorker {
+	var out []QueueWorker
+	for _, p := range fleet.PodsOf(s, "") {
+		for name, sm := range p.Workers {
+			if p.Err == "" && slices.Contains(sm.QueueIDs, id) {
+				out = append(out, QueueWorker{Unit: p.Label, Tip: p.Tip(), Name: name, URL: workerURL(name, server, "", ""),
+					Status: sm.Status, Class: fleet.StatusClass(sm.Status), Concurrency: sm.Concurrency})
+			}
+		}
+	}
+	slices.SortStableFunc(out, func(a, b QueueWorker) int { return strings.Compare(a.Name, b.Name) })
+	return out
 }
 
 // QueueCtl is the paused badge and the pause and resume buttons of a queue's
@@ -247,13 +272,14 @@ func (h *handler) queues(w http.ResponseWriter, r *http.Request) {
 func (h *handler) queue(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	p, snaps, ok := h.page(r)
-	p.Title = pageTitle(id, p.Server)
+	p.Title = pageTitle(p.QName(id).Name, p.Server)
 	p.Pods, p.IntervalSec = nil, 0
 	status := p.status(r)
 	if ok {
 		if v, read := h.readQueues(r, &p, snaps); read {
 			if g, found := v.Group(id); found {
 				p.Jobs = h.jobs(r, &p, g)
+				p.Jobs.Workers = queueWorkers(latestOf(snaps), id, p.Server)
 			} else {
 				p.Banner = "Queue " + strconv.Quote(id) + " not found on any " + p.Noun.One
 				status = http.StatusNotFound
@@ -338,6 +364,7 @@ var queueActions = []string{"pause", "resume"}
 // route is sent nothing).
 type QueueConfirmView struct {
 	Action, Server, ID string
+	Queue              QueueName
 	Noun               fleet.Noun
 	Units              []fleet.QueueUnit
 }
@@ -373,7 +400,7 @@ func (h *handler) queueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.PostFormValue("confirm") != "1" {
-		h.fragments(w, fragment{"confirm", "queue_confirm", QueueConfirmView{Action: action, Server: t.key, ID: id, Noun: t.noun, Units: g.Units()}})
+		h.fragments(w, fragment{"confirm", "queue_confirm", QueueConfirmView{Action: action, Server: t.key, ID: id, Queue: ownersOf(t.latest).name(id), Noun: t.noun, Units: g.Units()}})
 		return
 	}
 	results, after := fleet.QueueAct(mutationCtx(r), g, fleet.UnitsOf(t.latest), t.noun, action)

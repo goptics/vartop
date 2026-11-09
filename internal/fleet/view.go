@@ -117,6 +117,7 @@ type DetailView struct {
 	ConcurrencyStart, ConcurrencyMax         int         // start = max current per-pod; max = max(64, 2*start)
 	Completed1h, Failed1h                    []Point     // per second
 	Pods                                     []PodColumn // pods reporting this worker
+	QueueIDs                                 []string    // its queue_ids on those pods, sorted, each once
 }
 
 // StatusClass maps a varmq worker status to its colour class. Anything varmq
@@ -307,7 +308,10 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 		d.Successful += sm.Metrics.Successful
 		d.Failed += sm.Metrics.Failed
 		d.Pods = append(d.Pods, PodColumn{Key: p.Key, Label: p.Label, Err: p.Err, Tip: p.Tip()})
+		d.QueueIDs = append(d.QueueIDs, sm.QueueIDs...)
 	}
+	slices.Sort(d.QueueIDs)
+	d.QueueIDs = slices.Compact(d.QueueIDs)
 	d.SuccessRate = "—"
 	if total := d.Successful + d.Failed; total > 0 {
 		d.SuccessRate = fmt.Sprintf("%.1f%%", float64(d.Successful)/float64(total)*100)

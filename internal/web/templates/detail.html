@@ -3,6 +3,7 @@
   <h1>{{.Name}}</h1>
   {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{end}}
 </div>
+{{if and .QueueIDs (not $.Stale)}}<p class="wqueues"><span class="sub">Queues</span>{{range .QueueIDs}} <a class="ql" href="{{jobsURL . $.Server "" 0 50}}">{{template "qname" ($.QName .)}}</a>{{end}}</p>{{end}}
 <section class="counters" aria-label="Counters">{{if $.Stale}}
   <div class="card"><h2>Submitted</h2><p class="big">—</p></div>
   <div class="card"><h2>Completed</h2><p class="big">—</p></div>

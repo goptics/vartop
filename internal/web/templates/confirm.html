@@ -18,7 +18,7 @@
   </form>
 </section>{{end}}
 {{define "queue_confirm"}}<section class="confirm" aria-labelledby="confirm-head">
-  <h2 id="confirm-head">Confirm {{.Action}} of queue <span class="mono">{{.ID}}</span> on {{.Server}}</h2>
+  <h2 id="confirm-head">Confirm {{.Action}} of queue {{template "qname" .Queue}} on {{.Server}}</h2>
   <p>{{if eq .Action "pause"}}Every process that reads this queue's storage stops taking its jobs, also ones that serve no API, until it is resumed. Adds still land; running jobs finish.{{else}}Every process that reads this queue's storage takes its jobs again.{{end}}</p>
   <div class="table-wrap">
   <table>
