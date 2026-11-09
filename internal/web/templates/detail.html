@@ -18,7 +18,7 @@
   <div class="card"><h2>Success rate</h2><p class="big">{{.SuccessRate}}</p></div>{{end}}
 </section>
 {{with $.WorkerSources}}{{$n := len .Nodes}}<section class="sources" aria-labelledby="src-head">
-<h2 class="section" id="src-head">Sources <span class="sub">{{if gt $n 1}}{{$n}}, in the order the worker picks from them{{else}}what the worker pulls from{{end}}</span></h2>
+<h2 class="section" id="src-head">Sources <span class="sub">{{if gt $n 1}}{{$n}}, by priority; the strategy picks among them{{else}}what the worker pulls from{{end}}</span></h2>
 <div class="fan">
   <ol class="srcs">{{range .Nodes}}
     <li>{{if .URL}}<a class="srcn" href="{{.URL}}">{{template "qname" .Queue}}{{template "prio" .}}</a>{{else}}<span class="srcn">{{if eq .Kind "topic"}}{{template "topic_icon"}}<span class="qnm">topic</span>{{else if eq .Kind "queue"}}<span class="qnm none">custom storage</span>{{else}}<span class="qnm">{{.Kind}}</span>{{end}}{{template "prio" .}}</span>{{end}}</li>{{end}}

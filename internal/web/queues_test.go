@@ -1097,7 +1097,7 @@ func TestJobResultCut(t *testing.T) {
 	}
 }
 
-// The worker page draws its sources in pick order, each with its glyph,
+// The worker page draws its sources in priority order, each with its glyph,
 // name and link, and a priority chip under the priority strategy; the
 // worker node says how it picks: the strategy with 2+ sources, "Pulls
 // directly" with one, nothing (and a note) from queue_ids alone. A topic
@@ -1124,7 +1124,7 @@ func TestWorkerSourcesPage(t *testing.T) {
 		t.Errorf("source nodes = %q, want %q", order, want)
 	}
 	for _, want := range []string{
-		`<h2 class="section" id="src-head">Sources <span class="sub">4, in the order the worker picks from them</span></h2>`,
+		`<h2 class="section" id="src-head">Sources <span class="sub">4, by priority; the strategy picks among them</span></h2>`,
 		`<span class="qnm">orders</span> <span class="qkind">FIFO</span></span><span class="prio" title="bind priority: lower picks first">p 1</span></a>`,
 		`<span class="prio" title="bind priority: lower picks first">p 5</span>`,
 		`<span class="qnm">orders #1</span>`, // in-memory: named by its worker

@@ -127,7 +127,7 @@ type DetailView struct {
 	Sources  []api.WorkerSource
 }
 
-// mergeSources merges pods' sources: the first pod's in its pick order,
+// mergeSources merges pods' sources: the first pod's in its priority order,
 // then each source another pod has and it lacks (same kind and Queue ID),
 // in that pod's order. Strategy is the first pod's that sends one. Pods
 // that differ are not told apart: one worker name, one view.

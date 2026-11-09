@@ -604,7 +604,7 @@ func TestFreshMethodsEscapeNothing(t *testing.T) {
 	}
 }
 
-// strategy and sources (varmq API 1.5.0) decode in pick order, a priority
+// strategy and sources (varmq API 1.5.0) decode in priority order, a priority
 // absent as nil; an older varmq sends neither: "" and nil.
 func TestGetWorkerSources(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusOK, nil, `{"name":"w","status":"Running","concurrency":1,"num_processing":0,"num_pending":0,"num_idle_workers":1,

@@ -1061,7 +1061,7 @@ func TestDetailSeriesBoundedToTheHour(t *testing.T) {
 	}
 }
 
-// A worker's sources merge over its pods: the first pod's in pick order,
+// A worker's sources merge over its pods: the first pod's in priority order,
 // then what others add (same kind and Queue ID once); its strategy is the
 // first pod's. A pod of an older varmq adds none; with no pod sending
 // them, Sources is nil.
