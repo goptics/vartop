@@ -23,6 +23,7 @@ Live dashboard and control panel for varmq worker fleets. Talks to varmq's REST 
 - No agent, no database to run: one binary on the user's machine; collects only while `vartop web` runs.
 - Finds instances from static URLs or DNS, followed live; detects one URL answered by several instances behind a load balancer.
 - Merges every instance, or shows one; queue data grouped by Queue ID, never summed across instances.
+- Names queues as people do: a redisq, sqliteq or in-memory Queue ID is shown as its name, kind and namespace (an in-memory queue by its worker, from varmq API 1.4.0 `queue_ids`); other storage's IDs as sent. The full ID is one hover or copy away.
 
 ## Operating Context
 
@@ -33,7 +34,7 @@ Live dashboard and control panel for varmq worker fleets. Talks to varmq's REST 
 
 ## Capabilities and Constraints
 
-- Pages: Dashboard (fleet totals + per-worker rows with 10-min trend), Instance grid (every worker on every instance), Worker page (totals, success rate, completed/failed charts with 1h | 24h | 7d | 30d), Queues list (paused badge), Queue job page (jobs by state incl. cancelled, paged, payload, per-attempt errors; queue pause/resume), Workflows list (varmq API 1.3.0: merged across instances, one row per workflow, state tabs, progress, duration), Workflow page (task DAG laid out server-side as SVG: pan/zoom, upstream/downstream trace, task panel, task table; live while it runs; cancel). Confirm dialogs and action results.
+- Pages: Dashboard (fleet totals + per-worker rows with 10-min trend), Instance grid (every worker on every instance), Worker page (its queues, totals, success rate, completed/failed charts with 1h | 24h | 7d | 30d), Queues list (by name: store icon, FIFO/Priority, namespace; paused badge), Queue job page (full ID with copy, workers on the queue, jobs by state incl. cancelled, paged, payload, per-attempt errors; queue pause/resume), Workflows list (varmq API 1.3.0: merged across instances, one row per workflow, state tabs, progress, duration), Workflow page (task DAG laid out server-side as SVG: pan/zoom, upstream/downstream trace, task panel, task table; live while it runs; cancel). Confirm dialogs and action results.
 - Actions: pause, resume, restart, stop, concurrency; bulk pause/resume; queue pause/resume (varmq API 1.2.0+, storage-wide: every process reading the queue); workflow cancel, with or without undo jobs (API 1.3.0, stored with the workflow: every process working on it). No job is retried, removed or purged.
 - **Stack (binding):** one Go binary. Server-rendered `html/template` + vendored htmx + plain CSS/JS, embedded with `go:embed`. No Node toolchain, no build step, no front-end framework.
 - Safety behavior (product function, not styling): loopback only; bearer token never reaches the browser; actions refused and nothing sent while data is stale or from another configuration; stale data called out with its age and reason.

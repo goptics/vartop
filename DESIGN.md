@@ -193,12 +193,12 @@ Cool neutral greys, one teal accent, four state hues. Light values are the `-lig
 ### Hierarchy
 Six-step scale: 12 / 13 / 14 / 16 / 20 / 28px (`--fs-1`..`--fs-6`).
 - **Display** (600, 28px, 1.15, -.02em): stat numbers (`.big`); 20px under 640px.
-- **Headline** (600, 20px, -.01em): page `h1`, queue ID (mono), state-tab counts.
+- **Headline** (600, 20px, -.01em): page `h1`, queue name (sans), workflow ID (mono), state-tab counts.
 - **Title** (600, 16px): confirm heading, waiting line (400), brand (650).
 - **Body** (400, 14px, 1.5): default text, table rows, chips list.
 - **Label** (500, 13px): tile headings, `.sub` scope lines, controls, figcaptions, pager.
 - **Caption** (500, 12px): table heads, chart axes, tooltip, notes, badge, chip, job meta.
-- **Mono** (size follows its context, 12-20px): queue/job IDs, previews, payload, attempt errors.
+- **Mono** (size follows its context, 12-20px): full Queue IDs, a custom storage's queue name, job IDs, previews, payload, attempt errors.
 
 ### Named Rules
 **The Tabular Rule.** `font-variant-numeric: tabular-nums` on `body`; numeric columns right-aligned (`.num`).
@@ -242,8 +242,13 @@ Brand (20px three-line SVG mark in accent, wordmark 16px/650). Nav: Dashboard, I
 `h1` + `.sub` scope line on one baseline, wrapping. Worker and job pages add breadcrumbs (`/` separator, 13px, `subtle`).
 
 ### Stat strip
-One `panel` (8px, hairline) holding auto-fit tiles (min 150px) split by hairlines (each tile draws left+top edge pulled 1px under the frame). Tile: label heading, display number, sparkline at foot. `.hot` (failed > 0): number and onset line in `bad`. Onset line: "since 15:04" under the failed number. Status tile lists status counts as status dots. Worker page counters use the same strip without sparklines.
+One `panel` (8px, hairline) holding auto-fit tiles (min 150px) split by hairlines (each tile draws left+top edge pulled 1px under the frame). Tile: label heading, display number, sparkline at foot. `.hot` (failed > 0): number and onset line in `bad`. Onset line: "since 15:04" under the failed number. Status tile lists status counts as status dots. Worker page counters use the same strip without sparklines. Above them, a "Queues" line: each queue the worker's `queue_ids` hold, as a queue name link; hidden when stale or without `queue_ids`.
 - **Gap:** tile sparklines are fixed 160x32 (row trends 120x24); they do not stretch with the tile.
+
+### Queue name
+`qname` partial (`layout.html`), the one way a Queue ID is shown: 14px store glyph (`.sico`, `subtle`) + visually hidden store word ("Redis: ", "SQLite: ", "In memory: ") + name + kind badge; `title` = full Queue ID. Parsed in Go (`parseQueueID`): redisq `redisq:[ns:]fifo|prio:{key}` -> key, kind, namespace; sqliteq `sqliteq:<h>:fifo|prio:<name>` -> name, kind (hash only in the title); in-memory `memory:<instance>[:fifo|prio]:<n>` -> "<worker> #n" from the workers' `queue_ids`, else "in-memory #n"; anything else -> the full ID in mono, no glyph, no badge. Links (`a.ql`) keep `fg`, the name turns accent + underline on hover. URLs always carry the full ID.
+- **Store glyphs:** filled, not stroked (the one exception to `.ico`): Redis and SQLite are Simple Icons (CC0), the memory chip is the varmq docs site's; path data copied from the varmq docs (`Storage.astro`, `heromap/render.ts`).
+- **DAG node:** the name, cut at 12 chars, after the state.
 
 ### Tables
 Inside `.table-wrap` panel. Head `raised`, 12px/500 `subtle`; cells 8px 12px, hairline rows, no zebra. Row hover `raised` 60%; selected row accent 8%. Names `fg`/500, accent + underline on hover. Under 640px worker and queue rows stack into a labelled grid (head moved off-screen, `data-label` captions, status on its own line).
@@ -254,7 +259,8 @@ Inside `.table-wrap` panel. Head `raised`, 12px/500 `subtle`; cells 8px 12px, ha
 
 ### Badge / chip
 - **Badge:** warn pill, warn 14% tint, 12px/500; "absent on N instances".
-- **Queue paused:** not a badge: the paused status dot + "paused" (12px/500 in the queues list Queue ID cell, title = paused at; "paused since HH:MM" on the job page).
+- **Queue paused:** not a badge: the paused status dot + "paused" (12px/500 in the queues list name cell, title = paused at; "paused since HH:MM" on the job page).
+- **Kind badge** (`.qkind`): neutral pill, `line-strong` edge, no fill, 12px/500 `subtle`; "FIFO" or "Priority" after a queue name.
 - **Chip:** neutral pill, `raised` + hairline, 12px; instance names a queue is reported by.
 
 ### Segmented range switch
@@ -287,7 +293,8 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Waiting:** 16px `fg` line with a 10px teal dot; page meta-refreshes every 2s.
 
 ### Job page
-- **Header:** mono queue ID (20px/600), "Reported by" chips.
+- **Header:** `h1.qtitle`: queue name (20px/600, 18px glyph, kind badge); under it the full Queue ID in mono 12px `subtle` with a "Copy ID" button (`queue.js`, `data-copy`; hidden where `navigator.clipboard` is missing); "Namespace" chip (redisq) and "Reported by" chips. Breadcrumb ends in the queue name.
+- **Workers on this queue:** `h2.section` + table (instance, worker link to its page, status dot, concurrency) of the workers whose `queue_ids` hold the queue; stacks under 640px like queue rows. None with an older varmq (no `queue_ids`).
 - **Queue controls** (`#qstate`, under the header): paused status dot ("paused since"), default buttons "Pause queue" / "Resume queue" (Resume alone when every instance says paused, Pause alone when none does, both when mixed or unknown); hidden, with a `subtle` line, when no instance reports `paused` (varmq < API 1.2.0). Confirm panel lists instance x sent, then results; `#qstate` refreshed out of band.
 - **State tabs:** one sticky strip, five equal columns split by hairlines (scrolls sideways under 640px); label (capitalized, state dot: processing warn, completed ok, failed bad, cancelled hollow `bad` ring, pending `subtle`) over 20px count, `—` in `subtle` when varmq does not count the state (cancelled); current `raised` + 2px teal underline.
 - **Job list:** one panel; list head (state word, "N–M of T"); rows are `<details>`: dot, mono ID 14px/600 (italic `subtle` "(no ID yet)"), time right, 14px chevron rotating 90deg (.15s, off under reduced motion); second line mono preview (bad-tinted when last error), attempts right. Hover/open accent 7%.
@@ -306,11 +313,11 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Header:** mono ID (20px/600) + state; "Reported by" chips; facts row (`dl.facts`: 12px `subtle` term over value: Created, Running for / Took, Tasks ended, On cancel); `#wfctl` danger buttons "Cancel workflow" and "Cancel without undo" (the second only while `undo_on_cancel`), none once ended. `#results` sits in `#live` with `hx-preserve`, so a poll keeps an open confirm panel.
 - **Graph well** (`.dagbox` > `.dag-port`): `bg` well, hairline, 8px. With workflow.js (`.pz`): 300–560px tall (graph height, 62vh cap), pans/zooms in place; without, it scrolls. Tool buttons top-left (zoom in / out / fit, 14px icons, `panel` fill). Legend below in 12px `subtle`: task state dots, solid vs dashed edge, the gesture hint.
 - **Layout** (Go, `dag.go`): left to right; column = longest path from a root; dummy slots (10px) carry long edges so none crosses a box; order by barycenter, 4 sweeps (each re-places only the layer it sorts). Past 5000 tasks + edges + dummy slots no graph is drawn: a note, and the table. Boxes 184x56, columns 64px apart, rows 30px apart, 20px pad. Edges: horizontal-tangent cubics, straight through dummy columns, 7px arrowhead in the edge's colour (`context-stroke`).
-- **Task node** (SVG `<a href="#task-N">`, focusable, `aria-label` "name, state, after deps, runs always, undo state"): `panel` box, `line-strong` 1px, 8px; 9px state dot; name 13px/600 `fg` (cut at 20 chars with "…", full in `<title>`); "state · queue" 12px/500 `subtle`. Failed: `bad` 7% fill, 55% edge. In flight: `warn` 60% edge + pulse ring. Cancelled: hollow `bad` dot, name `subtle`. Waiting: hollow dot, dashed box, no fill. Hover/focus: `accent` edge; selected: 2px `accent` + 8% fill.
+- **Task node** (SVG `<a href="#task-N">`, focusable, `aria-label` "name, state, after deps, runs always, undo state"): `panel` box, `line-strong` 1px, 8px; 9px state dot; name 13px/600 `fg` (cut at 20 chars with "…", full in `<title>`); "state · queue name" 12px/500 `subtle` (name cut at 12 chars). Failed: `bad` 7% fill, 55% edge. In flight: `warn` 60% edge + pulse ring. Cancelled: hollow `bad` dot, name `subtle`. Waiting: hollow dot, dashed box, no fill. Hover/focus: `accent` edge; selected: 2px `accent` + 8% fill.
 - **Undo badge:** 72x18 pill on the box's bottom edge, right: `raised` + `line-strong`, stroke undo arrow, "undo" 12px, 6px dot in the undo job's state colour.
 - **Edges:** 1.5px `subtle` 70%; into an always task dashed 5 4; into an in-flight task a `warn` 2px overlay dashed 2 10 flowing (dashoffset, .9s). Hover/focus a task: its upstream and downstream stay, traced edges `accent`, the rest fade (nodes 32%, edges 15%).
 - **Task panel** (`.wf-panel`): a 340px column right of the well (`panel`, `line-strong`, 8px, no shadow); the well narrows by 352px while it is open (`.panel-open`), so no task hides under it; as tall as the well at most, scrolls; under the graph below 760px. Facts as `dl.kv` (6.5em terms, 13px), reason in mono `bad`, "Undo job" block under a hairline; close button top-right. Opening it shows the first view that reads (zoom >= 0.6): the whole graph, else the task's lineage (upstream + downstream), else the task and its downstream, else the task centred.
-- **Task table** (`table.tasks`): the accessible fallback, row `id="task-N"` (`:target` accent 8%): name (mono 13px, `always` chip), state + reason (12px `subtle`), deps, queue link (to its job page), job ID, result size, undo state. Stacks under 640px.
+- **Task table** (`table.tasks`): the accessible fallback, row `id="task-N"` (`:target` accent 8%): name (mono 13px, `always` chip), state + reason (12px `subtle`), deps, queue name link (to its job page), job ID, result size, undo state. Stacks under 640px.
 - **Motion:** pulse ring 1.8s ease-out, flowing edge .9s linear, box stroke .12s. All off under `prefers-reduced-motion` (ring shown static at 50%).
 - **Live:** workflow.js loads on every workflow page (`OwnPoll`), so a graph a later poll brings in still pans and zooms. `#live` polls itself (`hx-trigger="every Ns"`, `hx-disinherit="*"`) while the workflow runs; the first answer of an ended (or missing, or ambiguous) workflow has no trigger, so polling stops. workflow.js keeps the view, open panel, focused task and focused control across each swap. Unlike the dashboard and worker page (`TestLiveRegionHoldsNoControls`), the cancel buttons, zoom buttons and panel live inside `#live`: their state follows the record (no cancel once it ended), and the script hands focus back.
 
@@ -321,7 +328,7 @@ Default: `raised`, `line-strong` border, 13px/500, 5px 10px, hover border `subtl
 - **Do** group related numbers in one hairline-split panel (8px radius, 1px `line`).
 - **Do** set every number in tabular figures and right-align numeric columns.
 - **Do** mark uncertain status (transitional, unknown, mixed, a waiting task, a compensating workflow) with a hollow dot. One exception, in `bad`: cancelled, of a job, task or workflow (stopped before it ran, not failed).
-- **Do** draw icons as inline SVG (`.ico`: stroke currentColor, 1.5, round caps/joins), `aria-hidden`.
+- **Do** draw icons as inline SVG (`.ico`: stroke currentColor, 1.5, round caps/joins), `aria-hidden`; store glyphs (`.sico`) are filled.
 - **Do** keep tables scrolling inside their wrapper and stack worker/queue rows under 640px.
 - **Do** check every new text colour for >= 4.5:1 on `bg`, `panel`, `raised` in both themes.
 
