@@ -15,9 +15,9 @@ import (
 
 var actionOrigin string
 
-// fanOut runs fn against every pod of the active server (only --origin when
-// set) concurrently and prints one result line per pod. It fails if any pod
-// fails.
+// fanOut runs fn against every instance of the active server (only --origin
+// when set) concurrently and prints one result line per instance. It fails if
+// any instance fails.
 func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -47,15 +47,15 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 			}
 		}
 		if len(match) == 0 {
-			return fmt.Errorf("no varmq pod found for endpoint %s", actionOrigin)
+			return fmt.Errorf("no VarMQ instance found for endpoint %s", actionOrigin)
 		}
 		clients = match
 	}
 	if len(clients) == 0 {
-		return fmt.Errorf("no varmq pods discovered")
+		return fmt.Errorf("no VarMQ instances discovered")
 	}
 
-	fmt.Fprintf(w, "%s on %d pod(s)...\n", desc, len(clients))
+	fmt.Fprintf(w, "%s on %d instance(s)...\n", desc, len(clients))
 
 	errs := make([]error, len(clients))
 	var wg sync.WaitGroup
@@ -82,7 +82,7 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	}
 
 	if failed > 0 {
-		return fmt.Errorf("%d of %d pod(s) failed", failed, len(clients))
+		return fmt.Errorf("%d of %d instance(s) failed", failed, len(clients))
 	}
 	return nil
 }
@@ -131,8 +131,8 @@ var concurrencyCmd = &cobra.Command{
 }
 
 func init() {
-	actionCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target only this pod endpoint (default: all pods)")
-	concurrencyCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target only this pod endpoint (default: all pods)")
+	actionCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target only this instance endpoint (default: all instances)")
+	concurrencyCmd.Flags().StringVar(&actionOrigin, "origin", "", "Target only this instance endpoint (default: all instances)")
 	rootCmd.AddCommand(actionCmd)
 	rootCmd.AddCommand(concurrencyCmd)
 }
