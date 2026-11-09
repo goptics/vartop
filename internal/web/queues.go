@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goptics/varmq/contract"
@@ -444,4 +445,112 @@ func msTime(ms int64) (string, string) {
 	}
 	t := time.UnixMilli(ms)
 	return t.Local().Format("2006-01-02 15:04:05.000"), t.UTC().Format(time.RFC3339Nano)
+}
+
+// QueueName is a Queue ID as the pages show it, parsed from the formats
+// of the storages vartop knows (see parseQueueID). Links and titles keep
+// the ID in full.
+type QueueName struct {
+	ID      string
+	Backend string // redis, sqlite, memory; "": other storage, Name is the ID
+	Name    string
+	Kind    string // FIFO, Priority; "" when the ID says neither
+	NS      string // the redisq namespace, "" for none
+	n       string // memory: the queue's number in its process
+}
+
+// Store names the backend for a screen reader (the icon is hidden).
+func (q QueueName) Store() string {
+	return map[string]string{"redis": "Redis", "sqlite": "SQLite", "memory": "In memory"}[q.Backend]
+}
+
+var queueKinds = map[string]string{"fifo": "FIFO", "prio": "Priority"}
+
+// parseQueueID reads id by the documented formats:
+//
+//	redisq:[<ns>:]fifo|prio:{<key>}  ns may hold ':', never '{' or '}'
+//	sqliteq:<h>:fifo|prio:<name>     h: hash of the file's path
+//	memory:<instance>:fifo|prio:<n>  varmq API 1.4.0
+//	memory:<instance>:<n>            before it, no kind
+//
+// Anything else is other storage: the whole ID as its name.
+func parseQueueID(id string) QueueName {
+	q := QueueName{ID: id, Name: id}
+	switch {
+	case strings.HasPrefix(id, "redisq:") && strings.HasSuffix(id, "}"):
+		head, key, _ := strings.Cut(id[len("redisq:"):len(id)-1], "{")
+		pre, kind, ok := cutKind(head)
+		if !ok || pre == ":" || strings.Contains(head, "}") || key == "" || strings.ContainsAny(key, "{}") {
+			return q
+		}
+		q.Backend, q.Name, q.Kind, q.NS = "redis", key, kind, strings.TrimSuffix(pre, ":")
+	case strings.HasPrefix(id, "sqliteq:"):
+		p := strings.SplitN(id, ":", 4)
+		if len(p) != 4 || p[1] == "" || p[3] == "" || queueKinds[p[2]] == "" {
+			return q
+		}
+		q.Backend, q.Name, q.Kind = "sqlite", p[3], queueKinds[p[2]]
+	case strings.HasPrefix(id, "memory:"):
+		rest := id[len("memory:"):]
+		i := strings.LastIndexByte(rest, ':')
+		if i < 0 || i == len(rest)-1 || strings.Trim(rest[i+1:], "0123456789") != "" {
+			return q
+		}
+		inst := rest[:i]
+		if pre, kind, ok := cutKind(inst + ":"); ok && pre != "" {
+			inst, q.Kind = strings.TrimSuffix(pre, ":"), kind
+		}
+		if inst == "" {
+			return q
+		}
+		q.Backend, q.n = "memory", rest[i+1:]
+		q.Name = "in-memory #" + q.n
+	}
+	return q
+}
+
+// cutKind cuts a trailing "fifo:" or "prio:" off s, alone or after a ':':
+// what is before it ("" or ending in ':'), and the kind's label.
+func cutKind(s string) (pre, kind string, ok bool) {
+	for k, label := range queueKinds {
+		if t, found := strings.CutSuffix(s, k+":"); found && (t == "" || strings.HasSuffix(t, ":")) {
+			return t, label, true
+		}
+	}
+	return "", "", false
+}
+
+// queueOwners maps an in-memory Queue ID to the worker consuming it, by
+// the workers' queue_ids (varmq API 1.4.0). Nil: names fall back to
+// "in-memory #n".
+type queueOwners map[string]string
+
+// ownersOf reads s's queue_ids; of two workers on one queue, the first by name.
+func ownersOf(s *fleet.Snapshot) queueOwners {
+	var o queueOwners
+	for _, p := range fleet.PodsOf(s, "") {
+		for name, sm := range p.Workers {
+			for _, id := range sm.QueueIDs {
+				if !strings.HasPrefix(id, "memory:") {
+					continue
+				}
+				if o == nil {
+					o = make(queueOwners)
+				}
+				if cur, ok := o[id]; !ok || name < cur {
+					o[id] = name
+				}
+			}
+		}
+	}
+	return o
+}
+
+// name is id parsed, an in-memory queue named after its worker.
+func (o queueOwners) name(id string) QueueName {
+	q := parseQueueID(id)
+	if w := o[id]; w != "" && q.Backend == "memory" {
+		q.Name = w + " #" + q.n
+	}
+	return q
 }

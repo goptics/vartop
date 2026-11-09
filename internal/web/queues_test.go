@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/goptics/varmq/contract"
+	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
@@ -685,5 +686,54 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 	if status != http.StatusOK || strings.Contains(body, "not found") || !strings.Contains(body, "no longer reported") ||
 		!strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) || strings.Contains(body, `hx-trigger="every`) {
 		t.Errorf("stale at, one twin left = %d:\n%s", status, visibleText(body))
+	}
+}
+
+func TestParseQueueID(t *testing.T) {
+	for _, c := range []struct {
+		id                      string
+		backend, name, kind, ns string
+	}{
+		{"redisq:fifo:{orders}", "redis", "orders", "FIFO", ""},
+		{"redisq:shop:prio:{emails}", "redis", "emails", "Priority", "shop"},
+		{"redisq:eu:west:fifo:{tenant/orders}", "redis", "tenant/orders", "FIFO", "eu:west"}, // ns with ':'
+		{"redisq:fifo:fifo:{x}", "redis", "x", "FIFO", "fifo"},
+		{"redisq:fifo:{}", "", "redisq:fifo:{}", "", ""},
+		{"redisq:fifo:{a{b}", "", "redisq:fifo:{a{b}", "", ""},
+		{"redisq:list:{orders}", "", "redisq:list:{orders}", "", ""},
+		{"redisq::fifo:{orders}", "", "redisq::fifo:{orders}", "", ""},
+		{"redisq:shopfifo:{orders}", "", "redisq:shopfifo:{orders}", "", ""},
+		{"sqliteq:9f86d081:fifo:images", "sqlite", "images", "FIFO", ""},
+		{"sqliteq:9f86d081:prio:a:b", "sqlite", "a:b", "Priority", ""},
+		{"sqliteq:9f86d081:list:images", "", "sqliteq:9f86d081:list:images", "", ""},
+		{"sqliteq::fifo:images", "", "sqliteq::fifo:images", "", ""},
+		{"memory:shop-a:fifo:3", "memory", "in-memory #3", "FIFO", ""},
+		{"memory:host:9000:prio:12", "memory", "in-memory #12", "Priority", ""},
+		{"memory:shop-a:3", "memory", "in-memory #3", "", ""}, // before API 1.4.0
+		{"memory:fifo:3", "memory", "in-memory #3", "", ""},   // instance "fifo"
+		{"memory:a:reports", "", "memory:a:reports", "", ""},
+		{"memory::3", "", "memory::3", "", ""},
+		{"memory:a:fifo:", "", "memory:a:fifo:", "", ""},
+		{"pgq.ledger/settlements", "", "pgq.ledger/settlements", "", ""},
+		{"", "", "", "", ""},
+	} {
+		q := parseQueueID(c.id)
+		if q.ID != c.id || q.Backend != c.backend || q.Name != c.name || q.Kind != c.kind || q.NS != c.ns {
+			t.Errorf("parseQueueID(%q) = %+v, want %s %q %s ns %q", c.id, q, c.backend, c.name, c.kind, c.ns)
+		}
+	}
+
+	pod := okPod("http://a", map[string]*fleet.Sample{"reports": smp("Running", 1, 0, 1, 0), "aaa": smp("Running", 1, 0, 1, 0), "orders": smp("Running", 1, 0, 1, 0)})
+	pod.Workers["reports"].QueueIDs = []string{"memory:a:fifo:1", "memory:a:prio:2"}
+	pod.Workers["aaa"].QueueIDs = []string{"memory:a:prio:2"} // two on one queue: the first by name
+	pod.Workers["orders"].QueueIDs = []string{"redisq:fifo:{orders}"}
+	o := ownersOf(snap(viewT0, pod))
+	for id, want := range map[string]string{"memory:a:fifo:1": "reports #1", "memory:a:prio:2": "aaa #2", "memory:a:fifo:9": "in-memory #9", "redisq:fifo:{orders}": "orders"} {
+		if got := o.name(id).Name; got != want {
+			t.Errorf("name(%q) = %q, want %q", id, got, want)
+		}
+	}
+	if o := ownersOf(nil); o.name("memory:a:fifo:1").Name != "in-memory #1" {
+		t.Error("no snapshot: not the fallback")
 	}
 }
