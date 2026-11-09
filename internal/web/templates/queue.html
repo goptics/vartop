@@ -10,13 +10,21 @@
 </div>{{end}}
 {{/* arrow: a 16px stroke arrow, "left" or "right" */}}
 {{define "arrow"}}<svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">{{if eq . "left"}}<path d="M13 8H3M7 4 3 8l4 4"/>{{else}}<path d="M3 8h10M9 4l4 4-4 4"/>{{end}}</svg>{{end}}
-{{define "content"}}{{with .Jobs}}<nav class="crumbs" aria-label="Breadcrumb"><a href="{{queuesURL $.Server}}">Queues</a><span aria-hidden="true">/</span><span aria-current="page" class="mono">{{.Queue.ID}}</span></nav>{{end}}
-{{with .Jobs}}{{$state := .State}}<header class="qhead">
-  <h1 class="qid">{{.Queue.ID}}</h1>
-  <p class="sub">Reported by {{range .Queue.On}}<span class="chip">{{.}}</span> {{end}}</p>
+{{define "content"}}{{with .Jobs}}<nav class="crumbs" aria-label="Breadcrumb"><a href="{{queuesURL $.Server}}">Queues</a><span aria-hidden="true">/</span><span aria-current="page">{{template "qname" ($.QName .Queue.ID)}}</span></nav>{{end}}
+{{with .Jobs}}{{$state := .State}}{{$q := $.QName .Queue.ID}}<header class="qhead">
+  <h1 class="qtitle">{{template "qname" $q}}</h1>
+  <p class="qfull"><code class="mono">{{.Queue.ID}}</code> <button type="button" class="copy" data-copy="{{.Queue.ID}}" hidden>Copy ID</button></p>
+  <p class="sub">{{with $q.NS}}Namespace <span class="chip">{{.}}</span> · {{end}}Reported by {{range .Queue.On}}<span class="chip">{{.}}</span> {{end}}</p>
   {{template "qstate" .Ctl}}
 </header>
 <div id="results" aria-live="polite"></div>
+{{with .Workers}}<section aria-labelledby="qworkers-head"><h2 class="section" id="qworkers-head">Workers on this queue</h2>
+<div class="table-wrap"><table class="queues qworkers">
+  <thead><tr><th scope="col">{{$.Noun.Cap}}</th><th scope="col">Worker</th><th scope="col">Status</th><th scope="col" class="num">Concurrency</th></tr></thead>
+  <tbody>{{range .}}
+  <tr><td title="{{.Tip}}" data-label="{{$.Noun.Cap}}">{{.Unit}}</td><th scope="row" class="name"><a href="{{.URL}}">{{.Name}}</a></th><td data-label="Status"><span class="status {{.Class}}">{{.Status}}</span></td><td class="num" data-label="Concurrency">{{.Concurrency}}</td></tr>{{end}}
+  </tbody>
+</table></div></section>{{end}}
 <nav class="states" aria-label="Job state">{{range .Tabs}}<a href="{{.URL}}" class="state-{{.State}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.State}}</span>{{if ge .Count 0}}<span class="count">{{.Count}}</span>{{else}}<span class="count none" title="not counted by this varmq">—</span>{{end}}</a>{{end}}</nav>
 {{if .Jobs}}<section class="joblist" aria-label="{{.State}} jobs">
 <p class="listhead"><span><span class="st">{{.State}}</span> jobs</span><span>{{(index .Jobs 0).N}}–{{.Last}}{{if ge .Total 0}} of {{.Total}}{{end}}</span></p>
