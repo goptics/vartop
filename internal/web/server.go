@@ -274,6 +274,7 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 		if podGone(&p, snaps) || podDown(&p, snaps) {
 			// p says why; no unit's data is shown under the gone one's label.
 		} else if d, found := fleet.BuildDetail(snaps, p.Pod, name, 0, p.Noun); found {
+			slices.SortFunc(d.QueueIDs, p.cmpQName) // by name, as the line shows them
 			p.Detail = &d
 			h.dayCharts(&p, h.feeds.get(p.Server, p.Interval(), time.Now()), name, latestOf(snaps).At)
 		} else {

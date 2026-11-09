@@ -340,9 +340,8 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .qnm.mono { font-size: .93em; }
 .sico { flex: none; fill: currentColor; stroke: none; color: var(--subtle); }
 .qkind { padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--subtle); font-size: var(--fs-1); font-weight: 500; line-height: 1.5; }
-.qtitle { font-size: var(--fs-5); font-weight: 600; }
 .qtitle .sico { width: 18px; height: 18px; }
-.qtitle .qkind { font-weight: 500; letter-spacing: 0; }
+.qtitle .qkind { letter-spacing: 0; }
 .qfull { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 6px 0 0; color: var(--subtle); font-size: var(--fs-1); }
 .qfull code { min-width: 0; overflow-wrap: anywhere; }
 .qfull .copy { padding: 1px 8px; font-size: var(--fs-1); }
