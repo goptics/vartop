@@ -1,6 +1,7 @@
 package web
 
 import (
+	"cmp"
 	"embed"
 	"fmt"
 	"html/template"
@@ -90,6 +91,17 @@ type Page struct {
 	Spans                   []time.Duration
 	Ranges                  ChartRanges
 	CompletedDay, FailedDay *DayChart
+
+	owners queueOwners // of the newest snapshot: names in-memory queues
+}
+
+// QName is Queue ID id as the page shows it.
+func (p Page) QName(id string) QueueName { return p.owners.name(id) }
+
+// cmpQName orders Queue IDs as the page names them: name, namespace, ID.
+func (p Page) cmpQName(a, b string) int {
+	qa, qb := p.QName(a), p.QName(b)
+	return cmp.Or(strings.Compare(qa.Name, qb.Name), strings.Compare(qa.NS, qb.NS), strings.Compare(a, b))
 }
 
 // Interval is the server's poll interval; 0 with no server.

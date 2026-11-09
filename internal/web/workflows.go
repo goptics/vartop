@@ -287,18 +287,19 @@ type WorkflowChoice struct {
 
 // TaskView is one task as the graph, its panel and the table show it.
 type TaskView struct {
-	I                 int // its index in the record: the node, panel and row id
-	Name, Short       string
-	State             StateView
-	Live              bool
-	QueueID, QueueURL string
-	QueueShort        string
-	JobID, Reason     string
-	Result            string // stored result size, "" for none
-	Deps              []string
-	Always            bool
-	Undo              *TaskView
-	Label             string // the node's accessible name
+	I             int // its index in the record: the node, panel and row id
+	Name, Short   string
+	State         StateView
+	Live          bool
+	Queue         QueueName
+	QueueURL      string
+	QueueShort    string // Queue's name as a node shows it, cut
+	JobID, Reason string
+	Result        string // stored result size, "" for none
+	Deps          []string
+	Always        bool
+	Undo          *TaskView
+	Label         string // the node's accessible name
 }
 
 // WorkflowCtl is the cancel buttons of a workflow's page (#wfctl), and,
@@ -337,7 +338,7 @@ func (h *handler) workflow(w http.ResponseWriter, r *http.Request) {
 			}
 			switch {
 			case found:
-				v := workflowView(g, p.Server, time.Now())
+				v := workflowView(g, p.Server, p.owners, time.Now())
 				v.Ambiguous, v.Failed = read.Ambiguous, read.Failed
 				for _, o := range read.Groups {
 					if o.CreatedAt != g.CreatedAt {
@@ -385,8 +386,9 @@ func choiceOf(g fleet.WorkflowGroup, server string) WorkflowChoice {
 	return WorkflowChoice{URL: workflowURL(g.ID, server, g.CreatedAt), Created: full, State: stateView(string(g.State)).Label, On: g.On}
 }
 
-// workflowView is g's page model on server at now.
-func workflowView(g fleet.WorkflowGroup, server string, now time.Time) *WorkflowView {
+// workflowView is g's page model on server at now; owners names its
+// in-memory queues.
+func workflowView(g fleet.WorkflowGroup, server string, owners queueOwners, now time.Time) *WorkflowView {
 	w := g.WorkflowRecord
 	v := &WorkflowView{ID: w.ID, State: stateView(string(w.State)), Progress: progressOf(w), On: g.On, Ctl: workflowCtl(server, w)}
 	v.Created, v.CreatedISO = msTime(w.CreatedAt)
@@ -400,7 +402,7 @@ func workflowView(g fleet.WorkflowGroup, server string, now time.Time) *Workflow
 	}
 	deps := make([][]int, len(w.Tasks))
 	for i, t := range w.Tasks {
-		v.Tasks = append(v.Tasks, taskView(i, t, server, !v.Ctl.Final))
+		v.Tasks = append(v.Tasks, taskView(i, t, server, owners, !v.Ctl.Final))
 		for _, d := range t.Deps {
 			if j, ok := index[d]; ok {
 				deps[i] = append(deps[i], j)
@@ -417,18 +419,22 @@ func workflowView(g fleet.WorkflowGroup, server string, now time.Time) *Workflow
 // with "…" (the full name is the node's title and panel).
 const maxNodeName = 20
 
-func taskView(i int, t contract.TaskRecord, server string, running bool) TaskView {
+// maxNodeQueue is the most of a queue name a node's meta line shows.
+const maxNodeQueue = 12
+
+func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, running bool) TaskView {
 	v := TaskView{I: i, Name: t.Name, Short: cut(t.Name, maxNodeName), State: stateView(string(t.State)),
-		Live: running && taskLive(t.State), QueueID: t.QueueID, QueueShort: queueShort(t.QueueID),
+		Live: running && taskLive(t.State), Queue: owners.name(t.QueueID),
 		JobID: t.JobID, Reason: t.Reason, Deps: t.Deps, Always: t.Always}
 	if t.QueueID != "" {
+		v.QueueShort = cut(v.Queue.Name, maxNodeQueue)
 		v.QueueURL = jobsURL(t.QueueID, server, "", 0, defaultJobLimit)
 	}
 	if t.ResultSize > 0 {
 		v.Result = byteSize(t.ResultSize)
 	}
 	if t.Undo != nil {
-		u := taskView(i, *t.Undo, server, running)
+		u := taskView(i, *t.Undo, server, owners, running)
 		u.Name = t.Name + " (undo)"
 		v.Undo = &u
 	}
@@ -451,18 +457,6 @@ func cut(s string, n int) string {
 		return string(r[:n-1]) + "…"
 	}
 	return s
-}
-
-// queueShort is the part of a Queue ID a node shows: the name inside
-// braces (Redis hash tag), else the last ':' part.
-func queueShort(id string) string {
-	if i, j := strings.LastIndex(id, "{"), strings.LastIndex(id, "}"); i >= 0 && j > i {
-		return id[i+1 : j]
-	}
-	if i := strings.LastIndex(id, ":"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
 }
 
 // byteSize is n bytes, short: 812 B, 9.1 KiB, 1.1 MiB.

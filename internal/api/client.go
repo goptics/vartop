@@ -40,8 +40,11 @@ type WorkerSummary struct {
 	NumProcessing  int    `json:"num_processing"`
 	NumPending     int    `json:"num_pending"`
 	NumIdleWorkers int    `json:"num_idle_workers"`
-	Origin         string `json:"-"` // Endpoint this worker was fetched from (set by ListWorkers)
-	Instance       string `json:"-"` // varmq instance that served it (InstanceHeader), if reported
+	// QueueIDs: the GET /queues IDs of the queues the worker consumes
+	// (varmq API 1.4.0); nil from an older varmq.
+	QueueIDs []string `json:"queue_ids,omitempty"`
+	Origin   string   `json:"-"` // Endpoint this worker was fetched from (set by ListWorkers)
+	Instance string   `json:"-"` // varmq instance that served it (InstanceHeader), if reported
 }
 
 // WorkerDetails matches the extended API response of GET /workers/{name}

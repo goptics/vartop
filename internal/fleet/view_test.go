@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -743,6 +744,15 @@ func TestBuildDetail(t *testing.T) {
 	}
 	if len(d.Pods) != 2 || d.Pods[0].Key != "p0" || d.Pods[1].Key != "p1" {
 		t.Errorf("Pods = %+v, want only the pods reporting orders", d.Pods)
+	}
+	// queue_ids: merged over the pods, sorted, each once; one pod's alone
+	s.Pods[0].Workers["orders"].QueueIDs = []string{"z", "a"}
+	s.Pods[1].Workers["orders"].QueueIDs = []string{"a"}
+	if d, _ := BuildDetail([]*Snapshot{s}, "", "orders", iv, podNoun); !slices.Equal(d.QueueIDs, []string{"a", "z"}) {
+		t.Errorf("QueueIDs = %q, want [a z]", d.QueueIDs)
+	}
+	if d, _ := BuildDetail([]*Snapshot{s}, s.Pods[1].Label, "orders", iv, podNoun); !slices.Equal(d.QueueIDs, []string{"a"}) {
+		t.Errorf("QueueIDs of p1 = %q, want [a]", d.QueueIDs)
 	}
 
 	// 6 ok / 2 failed on one pod.

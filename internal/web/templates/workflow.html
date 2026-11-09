@@ -16,7 +16,7 @@
 <defs><marker id="dag-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1 9 5 0 9z" fill="context-stroke"/></marker></defs>
 <g class="view">
 <g class="edges">{{range .Edges}}<path class="edge{{if .Always}} always{{end}}" d="{{.Path}}" data-from="{{.From}}" data-to="{{.To}}" marker-end="url(#dag-arrow)"/>{{if .Live}}<path class="flow" d="{{.Path}}" data-from="{{.From}}" data-to="{{.To}}"/>{{end}}{{end}}</g>
-<g class="nodes">{{range .Nodes}}<a class="node t-{{.Task.State.Class}}{{if .Task.Live}} live{{end}}" href="#task-{{.Task.I}}" data-i="{{.Task.I}}" aria-label="{{.Task.Label}}" transform="translate({{.X}} {{.Y}})">{{with .Task}}<title>{{.Name}}</title>
+<g class="nodes">{{range .Nodes}}<a class="node t-{{.Task.State.Class}}{{if .Task.Live}} live{{end}}" href="#task-{{.Task.I}}" data-i="{{.Task.I}}" aria-label="{{.Task.Label}}" transform="translate({{.X}} {{.Y}})">{{with .Task}}<title>{{.Name}}{{with .Queue.ID}} · {{.}}{{end}}</title>
 {{if .Live}}<rect class="halo" x="-1" y="-1" width="{{$.HaloW}}" height="58" rx="9"/>{{end}}<rect class="box" width="{{$.NodeW}}" height="{{$.NodeH}}" rx="8"/>
 <circle class="dot" cx="17" cy="20" r="4.5"/>
 <text class="name" x="30" y="24">{{.Short}}</text>
@@ -29,7 +29,7 @@
 {{/* task_detail: a task's facts (TaskView), in the side panel and for each undo job */}}
 {{define "task_facts"}}<dl class="kv">
   <dt>State</dt><dd>{{template "wf_state" .State}}{{if .Live}} <span class="sub">queued or running</span>{{end}}</dd>
-  <dt>Queue</dt><dd>{{if .QueueURL}}<a class="mono" href="{{.QueueURL}}">{{.QueueID}}</a>{{else}}—{{end}}</dd>
+  <dt>Queue</dt><dd>{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</dd>
   <dt>Job ID</dt><dd>{{with .JobID}}<span class="mono">{{.}}</span>{{else}}—{{end}}</dd>
   <dt>Result</dt><dd>{{or .Result "—"}}</dd>
   {{with .Reason}}<dt>Reason</dt><dd><code class="err">{{.}}</code></dd>{{end}}
@@ -99,7 +99,7 @@
     <th scope="row" class="name"><span class="mono">{{.Name}}</span>{{if .Always}} <span class="chip">always</span>{{end}}</th>
     <td data-label="State">{{template "wf_state" .State}}{{with .Reason}}<small class="reason">{{.}}</small>{{end}}</td>
     <td data-label="Depends on">{{range $i, $d := .Deps}}{{if $i}}, {{end}}<span class="mono">{{$d}}</span>{{else}}—{{end}}</td>
-    <td data-label="Queue">{{if .QueueURL}}<a class="mono" href="{{.QueueURL}}">{{.QueueID}}</a>{{else}}—{{end}}</td>
+    <td data-label="Queue">{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</td>
     <td data-label="Job ID">{{with .JobID}}<span class="mono">{{.}}</span>{{else}}—{{end}}</td>
     <td class="num" data-label="Result">{{or .Result "—"}}</td>
     <td data-label="Undo">{{with .Undo}}{{template "wf_state" .State}}{{else}}—{{end}}</td>

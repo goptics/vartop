@@ -527,7 +527,7 @@ func TestKPIShowsDashWhenLastPointIsGap(t *testing.T) {
 }
 
 func TestEveryFormCarriesServer(t *testing.T) {
-	wf := workflowView(fleet.WorkflowGroup{WorkflowRecord: fleettest.SampleWorkflows(time.Now().UnixMilli())[1].Record()}, "dev", time.Now())
+	wf := workflowView(fleet.WorkflowGroup{WorkflowRecord: fleettest.SampleWorkflows(time.Now().UnixMilli())[1].Record()}, "dev", nil, time.Now())
 	for set, page := range map[string]Page{
 		"dashboard": dashboardPage(),
 		"detail":    detailPage(),
@@ -686,7 +686,7 @@ func detailPage() Page {
 		Submitted: 10, Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
 		ConcurrencyStart: 4, ConcurrencyMax: 64,
 		Completed1h: []fleet.Point{ptAt(atTick(0), 1), ptAt(atTick(1), 2)}, Failed1h: []fleet.Point{ptAt(atTick(0), 0), ptAt(atTick(1), 0)},
-		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}},
+		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}}, QueueIDs: []string{"redisq:fifo:{orders}"},
 	}
 	return p
 }
@@ -1034,6 +1034,9 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 				t.Errorf("%s: a stale page shows the current %q", set, current)
 			}
 		}
+		if set == "detail" && (!strings.Contains(fresh, `class="wqueues"`) || strings.Contains(body, `class="wqueues"`)) {
+			t.Error("detail: the Queues line not shown fresh, or shown stale")
+		}
 		if set == "detail" && !strings.Contains(body, `<p class="pods">Pods reporting: —</p>`) {
 			t.Errorf("detail: a stale page lacks %q:\n%s", "Pods reporting: —", body)
 		}
@@ -1267,7 +1270,7 @@ func BenchmarkLayoutDAG(b *testing.B) {
 // always task, animated into a task in flight while the workflow runs.
 func TestWorkflowView(t *testing.T) {
 	wfs := fleettest.SampleWorkflows(time.Now().UnixMilli())
-	run := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[1].Record(), On: []string{"a"}}, "dev", time.Now())
+	run := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[1].Record(), On: []string{"a"}}, "dev", nil, time.Now())
 	if run.Ctl.Final || len(run.Graph.Nodes) != 7 || len(run.Graph.Edges) != 8 || !run.Running || run.Progress.Live != 2 || run.Progress.Ended() != 3 {
 		t.Fatalf("running view: final %v, %d nodes, %d edges, progress %+v", run.Ctl.Final, len(run.Graph.Nodes), len(run.Graph.Edges), run.Progress)
 	}
@@ -1289,7 +1292,7 @@ func TestWorkflowView(t *testing.T) {
 	if tv := run.Tasks[2]; !tv.Live || tv.QueueShort != "audit" || tv.QueueURL != "/queues/redisq:shop:fifo:%7Baudit%7D?server=dev" || tv.Label != "audit-log, pending, after extract" {
 		t.Errorf("audit-log = %+v", tv)
 	}
-	saga := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[2].Record()}, "dev", time.Now())
+	saga := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[2].Record()}, "dev", nil, time.Now())
 	if !saga.Ctl.Final || saga.Tasks[0].Undo == nil || saga.Tasks[0].Undo.State.Class != "completed" || saga.Duration != "4.2s" {
 		t.Errorf("saga = %+v", saga)
 	}
@@ -1320,11 +1323,6 @@ func TestWorkflowWords(t *testing.T) {
 			t.Errorf("span(%v) = %q, want %q", d, got, want)
 		}
 	}
-	for id, want := range map[string]string{"redisq:shop:fifo:{orders}": "orders", "memory:a:reports": "reports", "plain": "plain"} {
-		if got := queueShort(id); got != want {
-			t.Errorf("queueShort(%q) = %q", id, got)
-		}
-	}
 	for n, want := range map[int]string{812: "812 B", 9320: "9.1 KiB", 1_204_311: "1.1 MiB"} {
 		if got := byteSize(n); got != want {
 			t.Errorf("byteSize(%d) = %q, want %q", n, got, want)
@@ -1341,7 +1339,7 @@ func TestWorkflowWords(t *testing.T) {
 func TestWorkflowRenders(t *testing.T) {
 	wfs := fleettest.SampleWorkflows(time.Now().UnixMilli())
 	page := func(i int) Page {
-		v := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[i].Record(), On: []string{"a", "b"}}, "dev", time.Now())
+		v := workflowView(fleet.WorkflowGroup{WorkflowRecord: wfs[i].Record(), On: []string{"a", "b"}}, "dev", nil, time.Now())
 		p := Page{Title: "wf", Server: "dev", SelfURL: "/workflows/x?server=dev", OwnPoll: true, Workflow: v}
 		if !v.Ctl.Final {
 			p.IntervalSec = 5
@@ -1389,7 +1387,7 @@ func TestWorkflowRenders(t *testing.T) {
 	}
 	rec := wfs[1].Record()
 	rec.UndoOnCancel = false
-	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{"a"}}, "dev", time.Now())
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{"a"}}, "dev", nil, time.Now())
 	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
 	if !strings.Contains(body, `<dt>On cancel</dt><dd>no undo jobs</dd>`) || !strings.Contains(body, "Cancel workflow") || strings.Contains(body, "without undo") {
 		t.Errorf("running page without undo_on_cancel:\n%s", body)
@@ -1404,7 +1402,7 @@ func TestWorkflowRenders(t *testing.T) {
 		}
 		tasks = append(tasks, tr)
 	}
-	big := workflowView(fleet.WorkflowGroup{WorkflowRecord: contract.WorkflowRecord{ID: "big", State: contract.WorkflowRunning, CreatedAt: 1, Tasks: tasks}}, "dev", time.Now())
+	big := workflowView(fleet.WorkflowGroup{WorkflowRecord: contract.WorkflowRecord{ID: "big", State: contract.WorkflowRunning, CreatedAt: 1, Tasks: tasks}}, "dev", nil, time.Now())
 	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: big})
 	if !strings.Contains(body, "200 tasks: too many edges to draw a graph") || !strings.Contains(body, `<tr id="task-199">`) || strings.Contains(body, `<svg class="dag"`) {
 		t.Errorf("over-cap workflow: no note, a graph, or tasks missing")
@@ -1422,7 +1420,7 @@ func TestWorkflowRendersHostileFields(t *testing.T) {
 	a, b := task(evil+"a"), task(evil+"b", evil+"a")
 	b.Undo = &contract.TaskRecord{Name: evil, State: contract.JobFailed, QueueID: evil, JobID: evil, Reason: evil}
 	rec := contract.WorkflowRecord{ID: evil, State: contract.WorkflowState(evil), CreatedAt: 1, Tasks: []contract.TaskRecord{a, b}}
-	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{evil}}, "dev", time.Now())
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec, On: []string{evil}}, "dev", nil, time.Now())
 	v.Others, v.Ambiguous, v.Failed = []WorkflowChoice{{URL: "/x", Created: evil, State: evil, On: []string{evil}}}, []string{evil}, []string{evil}
 	for name, body := range map[string]string{
 		"page":    run(t, "workflow", "layout", Page{Title: evil, Server: "dev", OwnPoll: true, Banner: evil, Workflow: v}),
@@ -1457,7 +1455,7 @@ func TestWorkflowViewDuplicateName(t *testing.T) {
 	rec := contract.WorkflowRecord{ID: "w", State: contract.WorkflowRunning, Tasks: []contract.TaskRecord{
 		{Name: "a", State: contract.JobCompleted}, {Name: "a", State: contract.JobCompleted}, {Name: "b", State: contract.JobWaiting, Deps: []string{"a"}},
 	}}
-	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", time.Now())
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now())
 	if len(v.Graph.Edges) != 1 || v.Graph.Edges[0].From != 0 || v.Graph.Edges[0].To != 2 {
 		t.Errorf("edges = %+v, want 0 -> 2", v.Graph.Edges)
 	}

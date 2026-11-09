@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/goptics/varmq/contract"
+	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
 )
 
@@ -45,21 +48,55 @@ func queueFakes(t *testing.T) ([]*fleettest.Varmq, []*httptest.Server) {
 	for _, v := range varmqs[:2] { // a and b share the queue; c is an older varmq
 		v.Mu.Lock()
 		v.Queues = map[string]*fleettest.Queue{tenantID: tenantQueue()}
+		v.Workers["orders"].QueueIDs = []string{tenantID}
 		v.Mu.Unlock()
 	}
 	return varmqs[:2], fakes
 }
 
+// tenantName is tenantID as the pages name it.
+const tenantName = `<span class="qnm">tenant/orders</span> <span class="qkind">FIFO</span></span>`
+
 func TestQueuesPage(t *testing.T) {
-	_, fakes := queueFakes(t)
+	shared, fakes := queueFakes(t)
+	const mem = "memory:a:fifo:7" // emails' in-memory queue on a
+	shared[0].Mu.Lock()
+	shared[0].Queues[mem] = &fleettest.Queue{Summary: `{"id":"memory:a:fifo:7","counts":{"pending":0,"processing":0,"completed":0,"failed":0},"totals":{"submitted":0,"completed":0,"failed":0}}`}
+	shared[0].Workers["emails"].QueueIDs = []string{mem}
+	for _, id := range []string{"sqliteq:h:fifo:apples", "redisq:shop:prio:{emails}"} {
+		shared[0].Queues[id] = &fleettest.Queue{Summary: `{"id":"` + id + `","counts":{"pending":0,"processing":0,"completed":0,"failed":0}}`}
+	}
+	shared[0].Mu.Unlock()
 	srv, _ := newTestServer(t, fakes...)
 
 	status, body := fetch(t, srv, "/queues", false)
 	if status != http.StatusOK {
 		t.Fatalf("GET /queues = %d:\n%s", status, body)
 	}
-	if n := strings.Count(body, ">"+tenantID+"</a>"); n != 1 {
+	if n := strings.Count(body, tenantName+"</a>"); n != 1 {
 		t.Errorf("queue listed %d times, want once", n)
+	}
+	for _, want := range []string{
+		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"><span class="qn" title="redisq:fifo:{tenant/orders}"><svg class="sico"`,
+		`<span class="sr">Redis: </span>`, `<th scope="col">Namespace</th>`, `<td data-label="Namespace"><span class="na">—</span></td>`,
+		`<span class="sr">In memory: </span><span class="qnm">emails #7</span> <span class="qkind">FIFO</span>`, // its worker's name
+		`<td data-label="Namespace">shop</td>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("GET /queues lacks %q", want)
+		}
+	}
+	// rows by name, not by ID
+	last := -1
+	for _, name := range []string{`"qnm">apples<`, `"qnm">emails<`, `"qnm">emails #7<`, `"qnm">tenant/orders<`} {
+		i := strings.Index(body, name)
+		if i <= last {
+			t.Errorf("rows not by name: %s at %d, after %d", name, i, last)
+		}
+		last = i
+	}
+	if _, body := fetch(t, srv, "/queues/redisq:shop:prio:%7Bemails%7D?server=multi", false); !strings.Contains(body, `Namespace <span class="chip">shop</span> · Reported by`) {
+		t.Errorf("namespaced queue page lacks its namespace:\n%s", body)
 	}
 	text := visibleText(body)
 	// One copy of the shared queue's numbers: 10 submitted, not 20.
@@ -82,6 +119,9 @@ func TestQueuesPage(t *testing.T) {
 
 func TestQueueJobsPage(t *testing.T) {
 	shared, fakes := queueFakes(t)
+	shared[0].Mu.Lock()
+	shared[0].Workers["emails"].QueueIDs = []string{tenantID}
+	shared[0].Mu.Unlock()
 	srv, _ := newTestServer(t, fakes...)
 	page := "/queues/redisq:fifo:%7Btenant%2Forders%7D"
 
@@ -90,7 +130,13 @@ func TestQueueJobsPage(t *testing.T) {
 		t.Fatalf("GET %s = %d:\n%s", page, status, body)
 	}
 	for _, want := range []string{
-		`<h1 class="qid">` + tenantID + "</h1>",
+		`<h1 class="qtitle"><span class="qn" title="` + tenantID + `">`, tenantName + "</h1>",
+		`<code class="mono">` + tenantID + `</code> <button type="button" class="copy" data-copy="` + tenantID + `" hidden>Copy ID</button>`,
+		`<span aria-current="page"><span class="qn" title="` + tenantID + `">`, `<script src="/static/queue.js" defer>`,
+		"<title>tenant/orders · multi</title>",
+		// a and b's orders consume it; c, an older varmq, says nothing
+		`<h2 class="section" id="qworkers-head">Workers on this queue</h2>`,
+		`<th scope="row" class="name"><a href="/workers/orders?server=multi">orders</a></th><td data-label="Status"><span class="status active">Running</span></td><td class="num" data-label="Concurrency">4</td>`,
 		"order-42", "2 attempts",
 		`<span class="preview err">out of stock</span>`, // list line: the final error
 		"1–1 of 1",
@@ -121,6 +167,27 @@ func TestQueueJobsPage(t *testing.T) {
 	_, body = fetch(t, srv, page+"?server=multi&limit=1&offset=1", false)
 	if !strings.Contains(body, `start="2"`) || !strings.Contains(body, `rel="prev"`) || strings.Contains(body, `rel="next"`) {
 		t.Errorf("second pending page:\n%s", body)
+	}
+
+	if n := strings.Count(body, `<a href="/workers/orders?server=multi">`); n != 2 {
+		t.Errorf("workers on the queue: %d rows, want a's and b's", n)
+	}
+	// by name, then in unit order
+	var rows []string
+	for _, m := range regexp.MustCompile(`data-label="Instance">(instance-\d)</td><th scope="row" class="name"><a href="/workers/(\w+)`).FindAllStringSubmatch(body, -1) {
+		rows = append(rows, m[2]+"@"+m[1])
+	}
+	if len(rows) != 3 || rows[0][:7] != "emails@" || rows[1][:7] != "orders@" || rows[2][:7] != "orders@" || rows[1] > rows[2] {
+		t.Errorf("workers on the queue = %q, want emails, then orders by unit", rows)
+	}
+	// the worker page links back, by name
+	_, body = fetch(t, srv, "/workers/orders?server=multi", false)
+	if !strings.Contains(body, `<p class="wqueues"><span class="sub">Queues</span> <a class="ql" href="`+tenantPath+`?server=multi"><span class="qn" title="`+tenantID+`">`) {
+		t.Errorf("worker page lacks its queue:\n%s", body)
+	}
+	urls := []string{fakes[0].URL, fakes[1].URL, fakes[2].URL}
+	if status, body := fetch(t, srv, "/workers/orders?server=multi&instance="+fleettest.StaticLabels(urls...)[fakes[2].URL], false); status != http.StatusOK || strings.Contains(body, "wqueues") {
+		t.Errorf("an older varmq's worker = %d, lists queues:\n%s", status, body)
 	}
 
 	if status, _ := fetch(t, srv, "/queues/nope?server=multi", false); status != http.StatusNotFound {
@@ -203,7 +270,7 @@ func TestQueuePauseResume(t *testing.T) {
 	}
 
 	resp, body := post(t, srv, esc+"/actions/pause", multi(), true)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Confirm pause of queue") ||
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `Confirm pause of queue <span class="qn" title="`+tenantID+`">`) || !strings.Contains(body, tenantName) ||
 		!strings.Contains(body, "also ones that serve no API") || !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) {
 		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
 	}
@@ -514,6 +581,9 @@ func TestWorkflowsUnsupported(t *testing.T) {
 // ended; 404 when no unit has it (200 to a poll, the notice in the banner).
 func TestWorkflowPage(t *testing.T) {
 	varmqs, fakes, _ := workflowFakes(t)
+	varmqs[0].Mu.Lock()
+	varmqs[0].Workers["emails"].QueueIDs = []string{"memory:shop-a:fifo:1"} // the report's queue
+	varmqs[0].Mu.Unlock()
 	srv, _ := newTestServer(t, fakes...)
 
 	status, body := fetch(t, srv, "/workflows/"+fleettest.RunningID+"?server=multi", false)
@@ -524,7 +594,8 @@ func TestWorkflowPage(t *testing.T) {
 		`hx-get="/workflows/` + fleettest.RunningID + `?server=multi" hx-trigger="every 1s"`,
 		`<h1 class="qid">` + fleettest.RunningID + `</h1>`, "Running for", "refresh every 1s",
 		`<a class="node t-pending live" href="#task-4"`, "Cancel without undo",
-		`<a class="mono" href="/queues/redisq:shop:fifo:%7Betl%7D?server=multi">redisq:shop:fifo:{etl}</a>`,
+		`<a class="ql" href="/queues/redisq:shop:fifo:%7Betl%7D?server=multi"><span class="qn" title="redisq:shop:fifo:{etl}">`,
+		`<span class="qnm">etl</span> <span class="qkind">FIFO</span></span></a>`, `<text class="meta" x="30" y="42">pending · audit</text>`, `<title>audit-log · redisq:shop:fifo:{audit}</title>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("running page lacks %q", want)
@@ -577,6 +648,9 @@ func TestWorkflowPage(t *testing.T) {
 	// the in-memory one: on its unit only
 	if _, body = fetch(t, srv, "/workflows/"+fleettest.CancelID+"?server=multi", false); strings.Count(body, `<span class="chip">instance-`) != 1 {
 		t.Errorf("in-memory workflow reported by:\n%s", body)
+	}
+	if !strings.Contains(body, `<span class="qnm">emails #1</span>`) || strings.Contains(body, "in-memory #1") {
+		t.Errorf("in-memory queue not named after its worker:\n%s", body)
 	}
 
 	if status, body := fetch(t, srv, "/workflows/nope?server=multi", false); status != http.StatusNotFound || !strings.Contains(body, `Workflow &#34;nope&#34; not found on any instance`) {
@@ -685,5 +759,81 @@ func TestWorkflowPageAmbiguous(t *testing.T) {
 	if status != http.StatusOK || strings.Contains(body, "not found") || !strings.Contains(body, "no longer reported") ||
 		!strings.Contains(body, `href="/workflows/twin?at=1001&amp;server=multi"`) || strings.Contains(body, `hx-trigger="every`) {
 		t.Errorf("stale at, one twin left = %d:\n%s", status, visibleText(body))
+	}
+}
+
+func TestParseQueueID(t *testing.T) {
+	for _, c := range []struct {
+		id                      string
+		backend, name, kind, ns string
+	}{
+		{"redisq:fifo:{orders}", "redis", "orders", "FIFO", ""},
+		{"redisq:shop:prio:{emails}", "redis", "emails", "Priority", "shop"},
+		{"redisq:eu:west:fifo:{tenant/orders}", "redis", "tenant/orders", "FIFO", "eu:west"}, // ns with ':'
+		{"redisq:fifo:fifo:{x}", "redis", "x", "FIFO", "fifo"},
+		{"redisq:fifo:{}", "", "redisq:fifo:{}", "", ""},
+		{"redisq:fifo:{a{b}", "", "redisq:fifo:{a{b}", "", ""},
+		{"redisq:list:{orders}", "", "redisq:list:{orders}", "", ""},
+		{"redisq::fifo:{orders}", "", "redisq::fifo:{orders}", "", ""},
+		{"redisq:shopfifo:{orders}", "", "redisq:shopfifo:{orders}", "", ""},
+		{"redisq:a}b:fifo:{x}", "", "redisq:a}b:fifo:{x}", "", ""},
+		{"sqliteq:9f86d081:fifo:images", "sqlite", "images", "FIFO", ""},
+		{"sqliteq:9f86d081:prio:a:b", "sqlite", "a:b", "Priority", ""},
+		{"sqliteq:9f86d081:list:images", "", "sqliteq:9f86d081:list:images", "", ""},
+		{"sqliteq::fifo:images", "", "sqliteq::fifo:images", "", ""},
+		{"memory:shop-a:fifo:3", "memory", "in-memory #3", "FIFO", ""},
+		{"memory:host:9000:prio:12", "memory", "in-memory #12", "Priority", ""},
+		{"memory:shop-a:3", "memory", "in-memory #3", "", ""}, // before API 1.4.0
+		{"memory:fifo:3", "memory", "in-memory #3", "", ""},   // instance "fifo"
+		{"memory:a:reports", "", "memory:a:reports", "", ""},
+		{"memory::3", "", "memory::3", "", ""},
+		{"memory:a:fifo:", "", "memory:a:fifo:", "", ""},
+		{"pgq.ledger/settlements", "", "pgq.ledger/settlements", "", ""},
+		{"", "", "", "", ""},
+	} {
+		q := parseQueueID(c.id)
+		if q.ID != c.id || q.Backend != c.backend || q.Name != c.name || q.Kind != c.kind || q.NS != c.ns {
+			t.Errorf("parseQueueID(%q) = %+v, want %s %q %s ns %q", c.id, q, c.backend, c.name, c.kind, c.ns)
+		}
+	}
+
+	pod := okPod("http://a", map[string]*fleet.Sample{"reports": smp("Running", 1, 0, 1, 0), "aaa": smp("Running", 1, 0, 1, 0), "orders": smp("Running", 1, 0, 1, 0)})
+	pod.Workers["reports"].QueueIDs = []string{"memory:a:fifo:1", "memory:a:prio:2"}
+	pod.Workers["aaa"].QueueIDs = []string{"memory:a:prio:2"} // two on one queue: the first by name
+	pod.Workers["orders"].QueueIDs = []string{"redisq:fifo:{orders}"}
+	o := ownersOf(snap(viewT0, pod))
+	for id, want := range map[string]string{"memory:a:fifo:1": "reports #1", "memory:a:prio:2": "aaa #2", "memory:a:fifo:9": "in-memory #9", "redisq:fifo:{orders}": "orders"} {
+		if got := o.name(id).Name; got != want {
+			t.Errorf("name(%q) = %q, want %q", id, got, want)
+		}
+	}
+	if o := ownersOf(nil); o.name("memory:a:fifo:1").Name != "in-memory #1" {
+		t.Error("no snapshot: not the fallback")
+	}
+}
+
+// Queue IDs, namespaces and worker names come from varmq: text, never
+// markup, in names, titles, data-copy and links.
+func TestQueueNamesHostile(t *testing.T) {
+	const evil = `<script>alert(1)</script>"'><img src=x onerror=y>`
+	ids := []string{"redisq:" + evil + ":fifo:{" + evil + "}", "sqliteq:h:prio:" + evil, "memory:a:fifo:1", evil}
+	pod := okPod("http://a", map[string]*fleet.Sample{evil: smp("Running", 1, 0, 1, 0)})
+	pod.Workers[evil].QueueIDs = ids
+	s := snap(viewT0, pod)
+	var groups []fleet.QueueGroup
+	for _, id := range ids {
+		groups = append(groups, fleet.QueueGroup{QueueSummary: api.QueueSummary{ID: id}, On: []string{evil}})
+	}
+	d, _ := fleet.BuildDetail([]*fleet.Snapshot{s}, "", evil, 0, instanceNoun)
+	jobs := &JobsView{Queue: groups[0], Ctl: QueueCtl{ID: ids[0]}, Workers: queueWorkers(s, ids[0], "dev")}
+	for name, body := range map[string]string{
+		"list":    run(t, "queues", "layout", Page{Server: "dev", owners: ownersOf(s), Queues: &fleet.QueuesView{Groups: groups}}),
+		"page":    run(t, "queue", "layout", Page{Server: "dev", owners: ownersOf(s), Jobs: jobs}),
+		"worker":  run(t, "detail", "layout", Page{Server: "dev", owners: ownersOf(s), Detail: &d}),
+		"confirm": run(t, "confirm", "queue_confirm", QueueConfirmView{Action: "pause", Server: "dev", Queue: parseQueueID(ids[0]), Noun: instanceNoun}),
+	} {
+		if strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
+			t.Errorf("%s: a field rendered as markup", name)
+		}
 	}
 }

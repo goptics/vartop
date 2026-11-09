@@ -20,6 +20,8 @@ type Worker struct {
 	Status                                   string
 	Concurrency, Busy, Pending, Idle         int
 	Submitted, Completed, Successful, Failed uint64
+	// QueueIDs, served as queue_ids when non-nil; nil: an older varmq.
+	QueueIDs []string
 	// ActionStatus, when non-zero, makes every PATCH on this worker reply
 	// with this status and {"error":"..."} without changing anything.
 	ActionStatus int
@@ -392,7 +394,7 @@ func fakeSummary(name string, fw *Worker) map[string]any {
 	if fw == nil {
 		fw = &Worker{}
 	}
-	return map[string]any{
+	m := map[string]any{
 		"name":             name,
 		"status":           fw.Status,
 		"concurrency":      fw.Concurrency,
@@ -400,6 +402,10 @@ func fakeSummary(name string, fw *Worker) map[string]any {
 		"num_pending":      fw.Pending,
 		"num_idle_workers": fw.Idle,
 	}
+	if fw.QueueIDs != nil {
+		m["queue_ids"] = fw.QueueIDs
+	}
+	return m
 }
 
 func writeFakeJSON(w http.ResponseWriter, status int, body any) {

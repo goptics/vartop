@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,7 +64,7 @@ func recordingServer(t *testing.T, status int, header map[string]string, body st
 
 func TestGetWorker(t *testing.T) {
 	const body = `{"name":"emails","status":"running","concurrency":4,"num_processing":2,"num_pending":7,"num_idle_workers":2,
-		"metrics":{"submitted":10,"completed":8,"successful":6,"failed":2}}`
+		"queue_ids":["redisq:fifo:{emails}"],"metrics":{"submitted":10,"completed":8,"successful":6,"failed":2}}`
 
 	tests := []struct {
 		name         string
@@ -90,6 +91,9 @@ func TestGetWorker(t *testing.T) {
 			if w.Name != "emails" || w.Status != "running" || w.Concurrency != 4 ||
 				w.NumProcessing != 2 || w.NumPending != 7 || w.NumIdleWorkers != 2 {
 				t.Errorf("summary decoded wrong: %+v", w.WorkerSummary)
+			}
+			if !slices.Equal(w.QueueIDs, []string{"redisq:fifo:{emails}"}) {
+				t.Errorf("QueueIDs = %q", w.QueueIDs)
 			}
 			if w.Metrics.Submitted != 10 || w.Metrics.Completed != 8 || w.Metrics.Successful != 6 || w.Metrics.Failed != 2 {
 				t.Errorf("metrics decoded wrong: %+v", w.Metrics)
