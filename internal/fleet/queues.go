@@ -163,6 +163,84 @@ func FetchJobs(ctx context.Context, g QueueGroup, state contract.JobState, offse
 	return nil, "", lastErr
 }
 
+// JobRead is what the units reporting a queue said of one job: Found, the
+// job as From (a unit's label) answered it; else Err, the last failure, or
+// none had it. Unsupported labels the units that serve no one-job read
+// (varmq before API 1.4.0, storage without JobReader).
+type JobRead struct {
+	Job         contract.JobRecord
+	From        string
+	Found       bool
+	Unsupported []string
+	Err         error
+}
+
+// NoRoute reports whether no unit reporting the queue can read one job.
+func (r JobRead) NoRoute(g QueueGroup) bool {
+	return !r.Found && r.Err == nil && len(r.Unsupported) == len(g.Clients)
+}
+
+// FetchJob reads job jobID of queue g from its units in order, the first
+// that has it: shared storage, any; an in-memory queue, only the unit that
+// owns it. A unit without the job or the queue (JSON 404), one that cannot
+// read it, and one that fails give way to the next. With none found, a
+// failure is Err: the job may be on that unit.
+func FetchJob(ctx context.Context, g QueueGroup, jobID string) JobRead {
+	var r JobRead
+	for i, c := range g.Clients {
+		job, ok, err := c.GetJob(ctx, g.ID, jobID)
+		var apiErr *api.APIError
+		switch {
+		case err == nil && ok:
+			return JobRead{Job: job, From: g.labels[i], Found: true, Unsupported: r.Unsupported}
+		case err == nil:
+			r.Unsupported = append(r.Unsupported, g.labels[i])
+		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound:
+		default:
+			r.Err = err
+		}
+	}
+	return r
+}
+
+// CancelJob sends a cancel of job jobID of queue g to its units in order,
+// until one takes it (202) or says it ended (409): a job lives in one
+// place, and shared storage passes a cancel to every process that consumes
+// the queue. It returns one result per unit asked: ok "cancel requested",
+// no change "already ended", or why the unit did not (job or queue not on
+// it, not supported, a failure). units label the tips; n words them.
+func CancelJob(ctx context.Context, g QueueGroup, units map[string]PodSnapshot, n Noun, jobID string) []ActionResult {
+	var out []ActionResult
+	for i, c := range g.Clients {
+		key := c.PrimaryEndpoint()
+		u := units[key]
+		u.Key = key
+		r := ActionResult{Pod: g.labels[i], Key: key, Tip: u.Tip(), Outcome: "ok", Msg: "cancel requested"}
+		ok, err := c.CancelJob(ctx, g.ID, jobID)
+		var apiErr *api.APIError
+		switch {
+		case err == nil && !ok:
+			r.Outcome, r.Msg = "failed", "not supported by this "+n.One
+		case err == nil:
+		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict:
+			r.Outcome, r.Msg = "no change", "already ended"
+		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound && apiErr.Message == "queue not found":
+			r.Outcome, r.Msg = "no change", "queue not on this "+n.One+" now"
+		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound:
+			r.Outcome, r.Msg = "no change", "job not on this "+n.One
+		case errors.As(err, &apiErr):
+			r.Outcome, r.Msg = "failed", apiErr.Message
+		default:
+			r.Outcome, r.Msg = "failed", err.Error()
+		}
+		out = append(out, r)
+		if r.Outcome == "ok" || r.Msg == "already ended" {
+			break
+		}
+	}
+	return out
+}
+
 // QueueAct sends action (pause or resume) on queue g to every unit that
 // reported it, at once, and returns one result per unit in g's order, and
 // g as the units answered: each answering unit's paused from its answer,

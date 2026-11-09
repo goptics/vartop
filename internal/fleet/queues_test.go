@@ -534,3 +534,101 @@ func TestCancelWorkflow(t *testing.T) {
 		t.Errorf("plain cancel = %+v, %+v", after, res)
 	}
 }
+
+// memQueue is an in-memory queue as one instance serves it: its own jobs.
+func memQueue(id string, jobs map[string][]string) *fleettest.Queue {
+	return &fleettest.Queue{Summary: `{"id":"` + id + `","counts":{"pending":0,"processing":0,"completed":0,"failed":0},"totals":{"submitted":0,"completed":0,"failed":0}}`, Jobs: jobs}
+}
+
+// FetchJob asks the units in order: one without the job (JSON 404) gives
+// way to the one that has it; every 404 is not found; every unit without
+// the route is unsupported; a failure with none found is Err.
+func TestFetchJob(t *testing.T) {
+	const id = "memory:x:fifo:1"
+	jobs := fleettest.SampleJobs(1762228800000)
+	fa, a := queueFake(t, "a", map[string]*fleettest.Queue{id: memQueue(id, nil)})
+	fb, b := queueFake(t, "b", map[string]*fleettest.Queue{id: memQueue(id, jobs)})
+	clients := []*api.Client{api.NewClient(a.URL, ""), api.NewClient(b.URL, "")}
+	g, _ := GroupQueues(FetchQueues(context.Background(), clients, byInstance)).Group(id)
+
+	r := FetchJob(context.Background(), g, "fetch-image-1")
+	if !r.Found || r.From != "b" || r.Err != nil || r.Job.ID != "fetch-image-1" || !strings.Contains(string(r.Job.Result), `"width":1600`) {
+		t.Fatalf("FetchJob = %+v", r)
+	}
+	if want := "GET /queues/memory:x:fifo:1/jobs/fetch-image-1"; !slices.Contains(fa.Calls(), want) || !slices.Contains(fb.Calls(), want) {
+		t.Errorf("calls a %v b %v, want %s on both", fa.Calls(), fb.Calls(), want)
+	}
+
+	if r := FetchJob(context.Background(), g, "nope"); r.Found || r.Err != nil || r.NoRoute(g) {
+		t.Errorf("all 404: %+v, want not found", r)
+	}
+
+	fa.Mu.Lock()
+	fa.Queues[id].JobStatus = http.StatusNotFound // router 404: older varmq
+	fa.Mu.Unlock()
+	fb.Mu.Lock()
+	fb.Queues[id].JobStatus = http.StatusNotImplemented
+	fb.Mu.Unlock()
+	if r := FetchJob(context.Background(), g, "fetch-image-1"); r.Found || r.Err != nil || !r.NoRoute(g) || !slices.Equal(r.Unsupported, []string{"a", "b"}) {
+		t.Errorf("all unsupported: %+v", r)
+	}
+
+	fb.Mu.Lock()
+	fb.Queues[id].JobStatus = http.StatusInternalServerError
+	fb.Mu.Unlock()
+	if r := FetchJob(context.Background(), g, "fetch-image-1"); r.Found || r.Err == nil || r.NoRoute(g) {
+		t.Errorf("one fails: %+v, want its error", r)
+	}
+}
+
+// CancelJob stops at the first unit that takes it (202) or says it ended
+// (409); a unit without the job, or the route, gives way to the next.
+func TestCancelJob(t *testing.T) {
+	const id = "memory:x:fifo:1"
+	fa, a := queueFake(t, "a", map[string]*fleettest.Queue{id: memQueue(id, nil)})
+	fb, b := queueFake(t, "b", map[string]*fleettest.Queue{id: memQueue(id, fleettest.SampleJobs(1762228800000))})
+	fc, c := queueFake(t, "c", map[string]*fleettest.Queue{id: memQueue(id, nil)})
+	clients := []*api.Client{api.NewClient(a.URL, ""), api.NewClient(b.URL, ""), api.NewClient(c.URL, "")}
+	g, _ := GroupQueues(FetchQueues(context.Background(), clients, byInstance)).Group(id)
+
+	res := CancelJob(context.Background(), g, nil, instanceNoun, "ord-1042")
+	want := []ActionResult{
+		{Pod: "a", Key: a.URL, Tip: a.URL, Outcome: "no change", Msg: "job not on this instance"},
+		{Pod: "b", Key: b.URL, Tip: b.URL, Outcome: "ok", Msg: "cancel requested"},
+	}
+	if !slices.Equal(res, want) {
+		t.Errorf("results =\n%+v\nwant\n%+v", res, want)
+	}
+	if !slices.Contains(fb.Calls(), "PATCH /queues/memory:x:fifo:1/jobs/ord-1042/actions/cancel") {
+		t.Errorf("b calls %v", fb.Calls())
+	}
+	for _, call := range fc.Calls() {
+		if strings.HasPrefix(call, "PATCH") {
+			t.Errorf("c asked after b took it: %s", call)
+		}
+	}
+	if r := FetchJob(context.Background(), g, "ord-1042"); r.Job.State != contract.JobCancelled {
+		t.Errorf("after cancel: state %s", r.Job.State)
+	}
+
+	res = CancelJob(context.Background(), g, nil, instanceNoun, "ord-1042")
+	if len(res) != 2 || res[1].Outcome != "no change" || res[1].Msg != "already ended" {
+		t.Errorf("ended: %+v", res)
+	}
+
+	fa.Mu.Lock()
+	fa.Queues[id].CancelStatus = http.StatusNotImplemented
+	fa.Mu.Unlock()
+	fb.Mu.Lock()
+	delete(fb.Queues, id)
+	fb.Mu.Unlock()
+	res = CancelJob(context.Background(), g, nil, instanceNoun, "ord-1043")
+	want = []ActionResult{
+		{Pod: "a", Key: a.URL, Tip: a.URL, Outcome: "failed", Msg: "not supported by this instance"},
+		{Pod: "b", Key: b.URL, Tip: b.URL, Outcome: "no change", Msg: "queue not on this instance now"},
+		{Pod: "c", Key: c.URL, Tip: c.URL, Outcome: "no change", Msg: "job not on this instance"},
+	}
+	if !slices.Equal(res, want) {
+		t.Errorf("none takes it: results =\n%+v\nwant\n%+v", res, want)
+	}
+}
