@@ -1177,3 +1177,20 @@ func TestDashboardSortOrders(t *testing.T) {
 		t.Errorf("grid order = %v, want the dashboard's, strangers last", got)
 	}
 }
+
+// TestFleetRatesSameEveryBuild: the fleet sum runs in worker-name order, so
+// one snapshot always renders the same number (the poll's unchanged check
+// hashes the page; a map-order float sum flipped its last digit).
+func TestFleetRatesSameEveryBuild(t *testing.T) {
+	workers := map[string]*Sample{}
+	for i, r := range []float64{0.1, 0.2, 0.3, 1e-9, 7.7, 3.3, 1e9, 0.7} {
+		workers[string(rune('a'+i))] = rated(smp("Running", 1, 0, 1, 0), r, r/3)
+	}
+	s := []*Snapshot{snap(atTick(0), okPod("p0", workers))}
+	first := BuildDashboard(s, "", 5*time.Second, podNoun).KPIs
+	for range 50 {
+		if k := BuildDashboard(s, "", 5*time.Second, podNoun).KPIs; k.Completed[0] != first.Completed[0] || k.Failed[0] != first.Failed[0] {
+			t.Fatalf("fleet rate changed between builds: %v then %v", first.Completed[0], k.Completed[0])
+		}
+	}
+}

@@ -661,8 +661,10 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 			}
 			expected++
 			var got bool
-			for _, sm := range p.Workers {
-				if sm.RateOK {
+			// By name: a float sum in map order differs in its last digit
+			// between renders, which defeats the poll's unchanged check.
+			for _, name := range slices.Sorted(maps.Keys(p.Workers)) {
+				if sm := p.Workers[name]; sm.RateOK {
 					sum += pick(sm)
 					got = true
 				}
