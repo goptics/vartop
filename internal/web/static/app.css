@@ -359,6 +359,7 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .qnm { min-width: 0; overflow-wrap: anywhere; }
 .qnm.mono { font-size: .93em; }
 .sico { flex: none; fill: currentColor; stroke: none; color: var(--subtle); }
+.qinst { color: var(--subtle); font-size: var(--fs-1); }
 .qkind { padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--subtle); font-size: var(--fs-1); font-weight: 500; line-height: 1.5; }
 .qtitle .sico { width: 18px; height: 18px; }
 .qtitle .qkind { letter-spacing: 0; }

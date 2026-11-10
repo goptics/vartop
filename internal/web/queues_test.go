@@ -116,7 +116,7 @@ func TestQueuesPage(t *testing.T) {
 		}
 	}
 	// the cell, not the page text: the page's clock may hold a "20"
-	if !strings.Contains(body, `data-label="Submitted (total)">10</td>`) {
+	if !strings.Contains(body, `data-label="Submitted (all time)">10</td>`) {
 		t.Errorf("GET /queues summed the shared queue:\n%s", text)
 	}
 	if !strings.Contains(body, `href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"`) {
@@ -956,9 +956,9 @@ func TestJobPage(t *testing.T) {
 	// the list links each ID to its page; not "." (a browser drops it)
 	_, body = fetch(t, srv, tenantPath+"?server=multi", false)
 	for _, want := range []string{
-		`<a class="id" href="` + tenantPath + `/jobs/ord-1042?server=multi">ord-1042</a>`,
-		`<a class="id" href="` + tenantPath + `/jobs/a%2Fb%7Bc%7D?server=multi">a/b{c}</a>`,
-		`<span class="id">.</span>`,
+		`<a class="id" href="` + tenantPath + `/jobs/ord-1042?server=multi" title="ord-1042">ord-1042</a>`,
+		`<a class="id" href="` + tenantPath + `/jobs/a%2Fb%7Bc%7D?server=multi" title="a/b{c}">a/b{c}</a>`,
+		`<span class="id" title=".">.</span>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("queue list lacks %q", want)
@@ -1256,5 +1256,33 @@ func TestSourceStateAndCut(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("sources lack %q", want)
 		}
+	}
+}
+
+// TestQueuePageOrderAndEmpty: an in-memory queue's name carries its
+// instance; the job list comes before the workers table; an empty list
+// under a non-zero count says so, not "No pending jobs".
+func TestQueuePageOrderAndEmpty(t *testing.T) {
+	if q := parseQueueID("memory:shop-a:fifo:1"); q.Inst != "shop-a" {
+		t.Errorf("memory queue instance = %q, want shop-a", q.Inst)
+	}
+	if body := run(t, "queues", "qname", parseQueueID("memory:shop-a:fifo:1")); !strings.Contains(body, `<span class="qkind">FIFO</span> <span class="qinst">on shop-a</span>`) {
+		t.Errorf("qname lacks the instance:\n%s", body)
+	}
+	id := "redisq:fifo:{emails}"
+	p := Page{Server: "s", Noun: instanceNoun, Jobs: &JobsView{
+		Queue: fleet.QueueGroup{QueueSummary: api.QueueSummary{ID: id}}, State: contract.JobPending, Total: 1840,
+		Workers: []QueueWorker{{Unit: "i-1", Name: "mailer", URL: "/workers/mailer", Status: "Paused", Class: "paused"}},
+	}}
+	body := run(t, "queue", "layout", p)
+	if !strings.Contains(body, "The count says 1840 pending, but no instance listed any") || strings.Contains(body, "No pending jobs") {
+		t.Errorf("empty list under a count:\n%s", body)
+	}
+	if strings.Index(body, `class="states"`) > strings.Index(body, `id="qworkers-head"`) {
+		t.Error("the workers table comes before the job list")
+	}
+	p.Jobs.Total = 0
+	if body := run(t, "queue", "layout", p); !strings.Contains(body, "No pending jobs. New jobs show here until a worker takes them.") {
+		t.Errorf("empty pending list lacks its next step:\n%s", body)
 	}
 }

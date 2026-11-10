@@ -100,6 +100,9 @@ func (p Page) WorkerSources() *SourcesView {
 		if s.QueueID != "" {
 			n.Queue, n.URL = p.QName(s.QueueID), jobsURL(s.QueueID, p.Server, "", 0, defaultJobLimit)
 			n.Full, n.Queue.Name = n.Queue.Name, midCut(n.Queue.Name, srcNameMax)
+			if n.Queue.Inst != "" {
+				n.Full += " on " + n.Queue.Inst
+			}
 			if g, ok := p.srcGroup(s.QueueID); ok {
 				switch {
 				case g.IsPaused():
