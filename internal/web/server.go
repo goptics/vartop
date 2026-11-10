@@ -136,7 +136,7 @@ func (h *handler) routes(hosts []string) http.Handler {
 	mux.HandleFunc("GET /queues/{id}/jobs/{jobId}", h.job)
 	mux.HandleFunc("GET /workflows", h.workflows)
 	mux.HandleFunc("GET /workflows/{id}", h.workflow)
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", staticFiles(static)))
 	mux.HandleFunc("POST /workers/{name}/actions/{action}", h.action)
 	mux.HandleFunc("POST /workers/{name}/concurrency", h.concurrency)
 	mux.HandleFunc("POST /bulk/{action}", h.bulk)
@@ -144,7 +144,7 @@ func (h *handler) routes(hosts []string) http.Handler {
 	mux.HandleFunc("POST /queues/{id}/jobs/{jobId}/actions/{action}", h.jobAction)
 	mux.HandleFunc("POST /workflows/{id}/actions/{action}", h.workflowAction)
 
-	return denyFraming(allowHosts(hosts, http.NewCrossOriginProtection().Handler(requireHTMX(recoverPanics(h.logf, mux)))))
+	return denyFraming(allowHosts(hosts, http.NewCrossOriginProtection().Handler(requireHTMX(gzipped(skipUnchanged(recoverPanics(h.logf, mux)))))))
 }
 
 // close closes the server files h reads.

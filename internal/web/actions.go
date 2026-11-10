@@ -383,7 +383,7 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 		if err != nil {
 			return "", Page{}, false
 		}
-		ranges = rangesOf(u.Query(), spans) // the charts keep showing the span they did
+		ranges = rangesOf(u.Query(), spans)     // the charts keep showing the span they did
 		sort = sortParam(u.Query().Get("sort")) // and the rows their order
 		set, worker = "", ""
 		path := u.EscapedPath()

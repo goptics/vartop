@@ -1,10 +1,12 @@
 package web
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"html"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1370,5 +1372,135 @@ func TestDashboardRanksTrouble(t *testing.T) {
 	_, body := send(t, srv, req)
 	if live := liveOOB(body); order(live) != "alpha mailer zeta" || !strings.Contains(live, `aria-sort="ascending"`) {
 		t.Errorf("an action's refresh lost ?sort=name: rows %s", order(live))
+	}
+}
+
+// poll GETs path from srv as the page's poller does: an htmx request that
+// sends back the hash pair it has seen, if any. Extra headers go as pairs.
+func poll(t *testing.T, srv *httptest.Server, path, seen string, headers ...string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("HX-Request", "true")
+	if seen != "" {
+		req.Header.Set(seenHeader, seen)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	return send(t, srv, req)
+}
+
+// TestPollSkipsUnchangedPage: a poll that sends back the hash pair of the
+// page it shows gets 204 while nothing changed, the status and banner alone
+// (HX-Reswap none) while only they changed, and the page once #live did. A
+// plain GET is never held back.
+func TestPollSkipsUnchangedPage(t *testing.T) {
+	f := dayFixture(t)
+	const path = "/?server=multi"
+
+	resp, body := poll(t, f.srv, path, "")
+	pair := resp.Header.Get(seenHeader)
+	if resp.StatusCode != 200 || !strings.Contains(body, `<div id="live">`) || !regexp.MustCompile(`^[0-9a-f]{12}-[0-9a-f]{12}$`).MatchString(pair) {
+		t.Fatalf("first poll = %d, %s %q, want the page and its hash pair", resp.StatusCode, seenHeader, pair)
+	}
+	if !strings.Contains(body, `<script src="/static/app.js" defer></script>`) {
+		t.Error("page lacks app.js, which sends the pair back")
+	}
+
+	resp, body = poll(t, f.srv, path, pair)
+	if resp.StatusCode != http.StatusNoContent || body != "" || resp.Header.Get(seenHeader) != pair {
+		t.Errorf("poll of an unchanged page = %d, %d bytes, %s %q, want 204, empty, the same pair", resp.StatusCode, len(body), seenHeader, resp.Header.Get(seenHeader))
+	}
+
+	live, _, _ := strings.Cut(pair, "-")
+	resp, body = poll(t, f.srv, path, live+"-000000000000")
+	if resp.StatusCode != 200 || resp.Header.Get("HX-Reswap") != "none" || resp.Header.Get(seenHeader) != pair {
+		t.Errorf("poll with only the status changed = %d, HX-Reswap %q, want 200, none", resp.StatusCode, resp.Header.Get("HX-Reswap"))
+	}
+	if !strings.Contains(body, `<div id="status">`) || !strings.Contains(body, `<div id="banner"`) || strings.Contains(body, `id="live"`) || strings.Contains(body, "<html") {
+		t.Errorf("poll with only the status changed: want #banner and #status alone, got:\n%s", body)
+	}
+
+	a, b := f.cfg.Servers["multi"].Endpoints[0], f.cfg.Servers["multi"].Endpoints[1]
+	f.write("multi", ordersAt(time.Now().Add(time.Second), a, b, 7, 3))
+	resp, body = poll(t, f.srv, path, pair)
+	if resp.StatusCode != 200 || !strings.Contains(body, `<div id="live">`) || resp.Header.Get("HX-Reswap") != "" || resp.Header.Get(seenHeader) == pair {
+		t.Errorf("poll after a new snapshot = %d, HX-Reswap %q, %s %q: want the page, a new pair", resp.StatusCode, resp.Header.Get("HX-Reswap"), seenHeader, resp.Header.Get(seenHeader))
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, f.srv.URL+path, nil)
+	req.Header.Set(seenHeader, resp.Header.Get(seenHeader))
+	if resp, body := send(t, f.srv, req); resp.StatusCode != 200 || !strings.Contains(body, "<html") {
+		t.Errorf("plain GET with a pair = %d, want the page: only htmx polls are spared", resp.StatusCode)
+	}
+}
+
+// TestStaticCachedAndGzipped: static files carry an ETag and no-cache, and
+// answer 304 to it; text of 1 KB and up goes gzipped to a client that
+// accepts it, with Vary; a small file and a 204 do not.
+func TestStaticCachedAndGzipped(t *testing.T) {
+	f := dayFixture(t)
+	get := func(path string, headers ...string) (*http.Response, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, f.srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(headers); i += 2 {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+		return send(t, f.srv, req)
+	}
+	gunzip := func(body string) string {
+		t.Helper()
+		zr, err := gzip.NewReader(strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("not gzip: %v", err)
+		}
+		plain, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatalf("gunzip: %v", err)
+		}
+		return string(plain)
+	}
+
+	css, _ := assets.ReadFile("static/app.css")
+	resp, body := get("/static/app.css", "Accept-Encoding", "gzip")
+	tag := resp.Header.Get("ETag")
+	if resp.StatusCode != 200 || tag == "" || resp.Header.Get("Cache-Control") != "no-cache" {
+		t.Errorf("app.css = %d, ETag %q, Cache-Control %q, want 200, a tag, no-cache", resp.StatusCode, tag, resp.Header.Get("Cache-Control"))
+	}
+	if resp.Header.Get("Content-Encoding") != "gzip" || resp.Header.Get("Vary") != "Accept-Encoding" || len(body) >= len(css)/2 {
+		t.Errorf("app.css: Content-Encoding %q, Vary %q, %d of %d bytes, want gzip, Accept-Encoding, under half", resp.Header.Get("Content-Encoding"), resp.Header.Get("Vary"), len(body), len(css))
+	} else if gunzip(body) != string(css) {
+		t.Error("app.css: gunzipped body is not the embedded file")
+	}
+	if resp, body := get("/static/app.css"); resp.Header.Get("ETag") != tag || body != string(css) {
+		t.Error("app.css without Accept-Encoding: want the same tag and the plain file")
+	}
+	if resp, body := get("/static/app.css", "If-None-Match", tag); resp.StatusCode != http.StatusNotModified || body != "" {
+		t.Errorf("app.css with its ETag = %d, %d bytes, want 304, empty", resp.StatusCode, len(body))
+	}
+
+	resp, body = get("/static/favicon.svg", "Accept-Encoding", "gzip")
+	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/svg+xml") || resp.Header.Get("Content-Encoding") != "" || !strings.Contains(body, "<svg") {
+		t.Errorf("favicon = %d, %q, Content-Encoding %q: want 200, svg, plain (under 1 KB)", resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Encoding"))
+	}
+
+	resp, body = get("/?server=multi", "Accept-Encoding", "gzip")
+	if resp.Header.Get("Content-Encoding") != "gzip" || resp.Header.Get("Vary") != "Accept-Encoding" {
+		t.Fatalf("page: Content-Encoding %q, Vary %q, want gzip, Accept-Encoding", resp.Header.Get("Content-Encoding"), resp.Header.Get("Vary"))
+	}
+	if page := gunzip(body); !strings.Contains(page, `<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">`) || !strings.Contains(page, "</html>") {
+		t.Error("page: gunzipped body is not the whole page with its favicon link")
+	}
+
+	first, _ := poll(t, f.srv, "/?server=multi", "")
+	resp, body = poll(t, f.srv, "/?server=multi", first.Header.Get(seenHeader), "Accept-Encoding", "gzip")
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Content-Encoding") != "" || body != "" {
+		t.Errorf("unchanged poll, gzip accepted = %d, Content-Encoding %q, want 204, none", resp.StatusCode, resp.Header.Get("Content-Encoding"))
 	}
 }

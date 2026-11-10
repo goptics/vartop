@@ -81,14 +81,14 @@ func TestQueuesPage(t *testing.T) {
 	labels := fleettest.StaticLabels(fakes[0].URL, fakes[1].URL, fakes[2].URL)
 	la, lab := labels[fakes[0].URL], slices.Sorted(slices.Values([]string{labels[fakes[0].URL], labels[fakes[1].URL]}))
 	for _, want := range []string{
-		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"><span class="qn" title="redisq:fifo:{tenant/orders}"><svg class="sico"`,
+		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi" id="q-` + fleet.DOMID(tenantID) + `"><span class="qn" title="redisq:fifo:{tenant/orders}"><svg class="sico"`,
 		`<span class="sr">Redis: </span>`, `<th scope="col">Namespace</th>`, `<td data-label="Namespace"><span class="na">—</span></td>`,
 		`<span class="sr">In memory: </span><span class="qnm">emails #7</span> <span class="qkind">FIFO</span>`, // its worker's name
 		`<td data-label="Namespace">shop</td>`,
 		// the workers consuming it, by queue_ids; none: the instances
 		`<th scope="col">Workers</th>`,
-		`<a class="chip wchip" href="/workers/orders?server=multi" title="runs on ` + strings.Join(lab, ", ") + `">orders</a>`,
-		`<a class="chip wchip" href="/workers/emails?server=multi" title="runs on ` + la + `">emails</a>`,
+		`<a class="chip wchip" href="/workers/orders?server=multi" title="runs on ` + strings.Join(lab, ", ") + `" id="on-` + fleet.DOMID(tenantID+" orders") + `">orders</a>`,
+		`<a class="chip wchip" href="/workers/emails?server=multi" title="runs on ` + la + `" id="on-` + fleet.DOMID(mem+" emails") + `">emails</a>`,
 		`<td class="on" data-label="Workers"><span class="sub">instances</span> <span class="chip">` + la + `</span></td>`,
 	} {
 		if !strings.Contains(body, want) {

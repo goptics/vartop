@@ -12,9 +12,9 @@
     <th scope="col" class="num">Submitted (total)</th>
     <th scope="col">Workers</th>
   </tr></thead>
-  <tbody>{{range .Groups}}{{$q := $.QName .ID}}
+  <tbody>{{range .Groups}}{{$q := $.QName .ID}}{{$id := .ID}}
   <tr>
-    <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}">{{template "qname" $q}}</a>{{if .IsPaused}} <span class="status paused"{{with .PausedAt}} title="paused at {{fullMs .}}"{{end}}>paused</span>{{end}}</th>
+    <th scope="row" class="name"><a href="{{jobsURL .ID $.Server "" 0 50}}" id="q-{{domID .ID}}">{{template "qname" $q}}</a>{{if .IsPaused}} <span class="status paused"{{with .PausedAt}} title="paused at {{fullMs .}}"{{end}}>paused</span>{{end}}</th>
     <td data-label="Namespace">{{with $q.NS}}{{.}}{{else}}<span class="na">—</span>{{end}}</td>{{with .Counts}}
     <td class="num" data-label="Pending">{{.Pending}}</td>
     <td class="num" data-label="Processing">{{.Processing}}</td>
@@ -22,7 +22,7 @@
     <td class="num{{if .Failed}} failed{{end}}" data-label="Failed">{{.Failed}}</td>{{else}}
     <td colspan="4"><span class="err">{{.Err}}</span></td>{{end}}
     <td class="num" data-label="Submitted (total)">{{with .Totals}}{{.Submitted}}{{else}}—{{end}}</td>
-    <td class="on" data-label="Workers">{{range $i, $w := $.WorkersOn .ID}}{{if $i}}<span class="sr">, </span>{{end}}<a class="chip wchip" href="{{$w.URL}}" title="{{$w.Tip}}">{{$w.Name}}</a>{{else}}<span class="sub">instances</span> {{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span>{{end}}{{end}}</td>
+    <td class="on" data-label="Workers">{{range $i, $w := $.WorkersOn .ID}}{{if $i}}<span class="sr">, </span>{{end}}<a class="chip wchip" href="{{$w.URL}}" title="{{$w.Tip}}" id="on-{{domID (print $id " " $w.Name)}}">{{$w.Name}}</a>{{else}}<span class="sub">instances</span> {{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span>{{end}}{{end}}</td>
   </tr>{{end}}
   </tbody>
 </table>

@@ -437,8 +437,8 @@ func TestDashboardRenders(t *testing.T) {
 	if strings.Contains(body, "<script>x") {
 		t.Error("worker name was not escaped")
 	}
-	if n := strings.Count(body, "<script"); n != 1 {
-		t.Errorf("<script occurrences = %d, want exactly the htmx include", n)
+	if n := strings.Count(body, "<script"); n != 2 {
+		t.Errorf("<script occurrences = %d, want exactly the htmx and app.js includes", n)
 	}
 	for _, bad := range []string{"onclick=", "onchange=", "oninput="} {
 		if strings.Contains(body, bad) {
@@ -1441,8 +1441,8 @@ func TestWorkflowRendersHostileFields(t *testing.T) {
 		if !strings.Contains(body, "&lt;script&gt;") || strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") {
 			t.Errorf("%s: a field rendered as markup", name)
 		}
-		if n, want := strings.Count(body, "<script"), map[string]int{"page": 2, "confirm": 0, "list": 1}[name]; n != want {
-			t.Errorf("%s: %d <script, want %d (htmx, workflow.js)", name, n, want)
+		if n, want := strings.Count(body, "<script"), map[string]int{"page": 3, "confirm": 0, "list": 2}[name]; n != want {
+			t.Errorf("%s: %d <script, want %d (htmx, app.js, workflow.js)", name, n, want)
 		}
 	}
 
