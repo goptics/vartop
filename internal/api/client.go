@@ -19,6 +19,10 @@ const InstanceHeader = "X-Varmq-Instance"
 // maxSeenInstances caps how many distinct instance IDs a Client remembers.
 const maxSeenInstances = 16
 
+// maxBody caps a response body read: a hostile or broken endpoint cannot
+// make vartop hold more. Past it a JSON body fails to decode.
+const maxBody = 16 << 20
+
 // Client is a REST API client for a single varmq mux server endpoint.
 // Multi-pod servers get one Client per endpoint through a Pool.
 type Client struct {
@@ -178,10 +182,10 @@ func (c *Client) handleResponse(resp *http.Response, target interface{}) error {
 		if target == nil {
 			return nil
 		}
-		return json.NewDecoder(resp.Body).Decode(target)
+		return json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(target)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err == nil && len(bodyBytes) > 0 {
 		var errData map[string]string
 		if json.Unmarshal(bodyBytes, &errData) == nil {
