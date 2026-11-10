@@ -11,7 +11,10 @@
 //
 // While the workflow runs #live polls and is swapped whole: the view, the
 // open task, the chips pressed and whatever had focus in it are kept
-// across each swap. The page's scroll is CSS's to keep (app.css, #live).
+// across each swap. The panel is hx-preserve'd: while its task's details
+// do not change, its text stays, and its scroll and text selection are
+// set again (htmx moves it: both reset). The page's scroll is CSS's to
+// keep (app.css, #live).
 (() => {
   const MIN = 0.2, MAX = 2.5;
   let view = null; // {k, x, y}: the pan and zoom of the graph shown
@@ -20,6 +23,10 @@
   let free = false; // touch: the graph takes every drag (the Pan button)
   const chips = new Set(); // the state chips pressed
   let drag = null; // the pointer drag under way
+  let swapping = false; // a poll's swap under way: the focus it moves is not a Tab
+  let panelTop = 0; // the panel's scroll before a swap
+  let kept = null; // a text selection in the panel before a swap: [anchor, offset, focus, offset]
+  let marked = null; // the task trace last marked
   const pointers = new Map(); // pointers down on the graph: pinch
 
   function parts() {
@@ -108,7 +115,7 @@
     p.svg.removeAttribute("viewBox"); // user units are px; .view pans and zooms
     p.box.querySelector(".dag-tools").hidden = false;
     p.box.querySelector(".dag-help").hidden = false;
-    for (const c of p.box.querySelectorAll("[data-chip]")) c.disabled = c.dataset.n === "0";
+    for (const c of p.box.querySelectorAll(".dag-legend [data-chip]")) c.disabled = c.dataset.n === "0";
     const page = location.pathname + location.search;
     if (!view || shown !== page) {
       shown = page;
@@ -118,9 +125,23 @@
     } else {
       apply(p);
     }
+    // a chip pressed whose tasks are gone is disabled: no way to unpress
+    // it, so it lets go
+    for (const k of [...chips]) {
+      const c = p.box.querySelector(`.dag-legend [data-chip="${CSS.escape(k)}"]`);
+      if (!c || c.disabled) chips.delete(k);
+    }
     pan(p);
     filter(p);
-    if (open !== null) select(open, false);
+    if (open !== null && !document.getElementById("task-detail-" + open)) open = null; // its task is gone
+    if (open === null) {
+      p.panel.hidden = true; // the panel kept across the swap closes
+      return;
+    }
+    select(open, false);
+    p.panel.scrollTop = panelTop;
+    if (kept && p.panel.contains(kept[0]) && p.panel.contains(kept[2])) getSelection().setBaseAndExtent(...kept);
+    kept = null;
   }
 
   // pan sets the Pan button and the well as free says.
@@ -134,7 +155,7 @@
   // the view moves to the tasks it shows.
   function filter(p, jump) {
     const on = chips.size > 0;
-    for (const c of p.box.querySelectorAll("[data-chip]")) c.setAttribute("aria-pressed", chips.has(c.dataset.chip));
+    for (const c of p.box.querySelectorAll(".dag-legend [data-chip]")) c.setAttribute("aria-pressed", chips.has(c.dataset.chip));
     p.svg.classList.toggle("filter", on);
     const hit = [];
     for (const n of p.svg.querySelectorAll(".node")) {
@@ -188,6 +209,7 @@
   function trace(i) {
     const p = parts();
     if (!p) return;
+    marked = i;
     const svg = p.svg;
     document.querySelectorAll("#live .hl").forEach((el) => el.classList.remove("hl"));
     svg.classList.toggle("trace", i !== null);
@@ -212,7 +234,9 @@
     p.svg.querySelectorAll(".node.sel").forEach((n) => n.classList.remove("sel"));
     const n = node(i);
     if (n) n.classList.add("sel");
-    p.panel.querySelector(".body").innerHTML = src.innerHTML;
+    // the same details: left as they are, so a text selection in them stays
+    const body = p.panel.querySelector(".body");
+    if (body.innerHTML !== src.innerHTML) body.innerHTML = src.innerHTML;
     p.panel.hidden = false;
     // the panel takes its own column beside the well (below it on a
     // phone): the well narrows, nothing hides under the panel. The view
@@ -286,7 +310,8 @@
       if (!portOf(e) || !(e.ctrlKey || e.metaKey)) return; // a plain wheel scrolls the page
       e.preventDefault();
       const p = parts();
-      zoomBy(p, Math.exp(-e.deltaY * 0.002), ...at(p, e));
+      const d = e.deltaY * (e.deltaMode === 1 ? 16 : 1); // Firefox: lines
+      zoomBy(p, Math.exp(-d * 0.002), ...at(p, e));
     },
     { passive: false },
   );
@@ -299,6 +324,7 @@
   document.addEventListener("pointermove", (e) => {
     if (!pointers.has(e.pointerId)) return;
     const p = parts();
+    if (!p) return; // the graph went with a swap mid-drag
     const prev = pointers.get(e.pointerId);
     pointers.set(e.pointerId, [e.clientX, e.clientY]);
     if (pointers.size === 2) {
@@ -437,7 +463,7 @@
   document.addEventListener("pointerover", (e) => {
     const i = taskOf(e.target);
     if (i !== null) hover = i;
-    if (i !== null && !drag) trace(i);
+    if (i !== null && !drag && i !== marked) trace(i); // each child of a node: once
   });
   document.addEventListener("pointerout", (e) => {
     const i = taskOf(e.target);
@@ -449,9 +475,10 @@
     const i = taskOf(e.target);
     if (i === null) return;
     trace(i);
-    // a task tabbed to outside the view: bring it in
+    // a task tabbed to outside the view: bring it in; not one a swap
+    // focused again (htmx by id, or keyOf), or the view snaps back
     const p = parts();
-    if (p && view && e.target.matches(".dag .node:focus-visible")) show(p, e.target);
+    if (p && view && !swapping && e.target.matches(".dag .node:focus-visible")) show(p, e.target);
   });
   document.addEventListener("focusout", (e) => {
     if (taskOf(e.target) !== null && taskOf(e.relatedTarget) === null) trace(hover);
@@ -482,8 +509,14 @@
 
   // the poll swaps #live: keep what had focus, take the new graph over
   // (init reopens the panel first, so its parts can take focus back)
-  document.addEventListener("htmx:beforeSwap", () => {
+  document.addEventListener("htmx:beforeSwap", (e) => {
+    if (e.detail.shouldSwap === false) return; // no swap: no afterSettle to undo the flag
     control = keyOf(document.activeElement);
+    swapping = true;
+    const p = parts();
+    const s = getSelection();
+    panelTop = p ? p.panel.scrollTop : 0;
+    kept = p && s.rangeCount && p.panel.contains(s.anchorNode) ? [s.anchorNode, s.anchorOffset, s.focusNode, s.focusOffset] : null;
   });
   document.addEventListener("htmx:afterSwap", () => {
     init();
@@ -498,6 +531,7 @@
   // class turns back to the server's after the swap, so the marks set
   // here (selected, filtered, traced) go on again
   document.addEventListener("htmx:afterSettle", (e) => {
+    swapping = false; // every focus of the swap is done
     const p = parts();
     if (e.target.id !== "live" || !p || !p.svg.dataset.taken) return;
     filter(p);

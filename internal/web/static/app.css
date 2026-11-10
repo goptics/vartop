@@ -297,6 +297,8 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .crumbs a { color: var(--subtle); text-decoration: none; }
 .crumbs a:hover { color: var(--fg); text-decoration: underline; }
 .crumbs [aria-current] { color: var(--fg); }
+/* a long ID wraps, not past a phone's edge */
+.crumbs [aria-current], .wftitle .qid { min-width: 0; overflow-wrap: anywhere; }
 .detail-layout { display: grid; gap: 16px; }
 @media (min-width: 1200px) {
   .detail-layout { grid-template-columns: minmax(0, 1fr) 300px; align-items: start; }
@@ -460,6 +462,7 @@ a.wchip:hover { border-color: var(--accent); color: var(--accent); }
 .states a:first-child { border-left: 0; }
 .states a:hover { background: var(--raised); }
 .states a[aria-current] { background: var(--raised); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+.states a:focus-visible { outline-offset: -2px; } /* inside: .states clips */
 .states .label { display: flex; align-items: center; gap: 6px; font-size: var(--fs-2); text-transform: capitalize; }
 .states .count { color: var(--fg); font-size: var(--fs-5); font-weight: 600; }
 .states .count.none { color: var(--subtle); font-weight: 400; }
@@ -631,6 +634,7 @@ h2.section .sub { font-weight: 400; }
 .tasks tr:target > *, .tasks tr.hl > * { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 .tasks tr[hidden] { display: none; }
 .tasks .num .chip, .tasks .num .sub { font-size: var(--fs-1); }
+.tasks td.num .sub, .wfs td.num .sub { white-space: nowrap; } /* .sub wraps (text-wrap: pretty): "so far" stays whole */
 #task-shown:empty { display: none; }
 /* rollback: how the undo jobs stand, over the graph; a failed one in the
    danger box of .errors (hairline and tint, no stripe), its words say it */
@@ -720,6 +724,7 @@ h2.section .sub { font-weight: 400; }
   .dag .node .box { transition: none; }
 }
 .dag-tools { position: absolute; z-index: 2; top: 10px; left: 10px; display: flex; gap: 4px; }
+.dag-tools[hidden] { display: none; }
 .dag-tools button { display: inline-flex; padding: 6px; background: var(--panel); }
 .dag-tools button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .dag-tools .pan { display: none; }
@@ -754,6 +759,10 @@ h2.section .sub { font-weight: 400; }
 .wf-panel h2 { margin: 0 28px 10px 0; font-size: var(--fs-3); font-weight: 600; overflow-wrap: anywhere; }
 .wf-panel h3 { margin: 14px 0 6px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--subtle); font-size: var(--fs-2); font-weight: 600; }
 .wf-panel .close { position: absolute; top: 8px; right: 8px; display: inline-flex; padding: 5px; }
+@media (pointer: coarse) {
+  .wf-panel .close { top: 4px; right: 4px; min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
+  .wf-panel h2 { margin-right: 48px; }
+}
 .kv { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 6px 10px; margin: 0; font-size: var(--fs-2); }
 .kv + .kv { margin-top: 6px; }
 .kv dt { color: var(--subtle); }

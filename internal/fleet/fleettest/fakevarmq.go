@@ -62,7 +62,10 @@ type Varmq struct {
 	// NoWorkflowCounts: GET /workflow-counts answers the router's 404, as
 	// varmq before the route. UncountedWorkflows: its entry has no counts.
 	NoWorkflowCounts, UncountedWorkflows bool
-	received                             []string // "METHOD escaped-path" of every request received
+	// CountsDelay holds GET /workflow-counts that long (abandoned if the
+	// client goes away): a slow store.
+	CountsDelay time.Duration
+	received    []string // "METHOD escaped-path" of every request received
 
 	listInFlight, maxListInFlight int // concurrent GET /workers requests
 }

@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"html/template"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1367,7 +1368,7 @@ func TestWorkflowRenders(t *testing.T) {
 		// the hooks workflow.js queries
 		`class="dagbox"`, `<div class="dag-tools" hidden>`, `data-zoom="fit"`, `<div class="dag-port" style="--gh:`, `tabindex="0" role="group" aria-label="Task graph of `,
 		`<svg class="dag"`, `data-w="`, `data-h="`, `<g class="view">`, `data-from="`, `data-to="`,
-		`<aside class="wf-panel" hidden`, `<button type="button" class="close"`, `<div class="body"></div>`,
+		`<aside class="wf-panel" id="wf-panel" hx-preserve="true" hidden`, `<button type="button" class="close"`, `<div class="body"></div>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("running workflow page lacks %q", want)
@@ -1623,10 +1624,22 @@ func TestTaskTimes(t *testing.T) {
 		"no times":          {contract.TaskRecord{State: contract.JobCompleted}, false, "", "", false},
 		"cancelled waiting": {contract.TaskRecord{State: contract.JobCancelled, EnqueuedAt: 1000, FinishedAt: 9000}, false, "", "", false},
 		"clocks apart":      {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 5000, StartedAt: 4000, FinishedAt: 3000}, false, "", "", false},
+		"finish far ahead":  {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 1000, StartedAt: 2000, FinishedAt: math.MaxInt64}, false, "1.0s", "", false},
+		"negative enqueue":  {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: -5, StartedAt: 2000, FinishedAt: 3000}, false, "", "1.0s", false},
+		"start past a day":  {contract.TaskRecord{State: contract.JobProcessing, EnqueuedAt: 1000, StartedAt: 100_000 + 25*3600_000}, true, "", "", false},
+		"within a day":      {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 1000, StartedAt: 2000, FinishedAt: 100_000 + 23*3600_000}, false, "1.0s", "23h 01m", false},
 	} {
 		if wait, run, soFar := taskTimes(c.t, c.running, now); wait != c.wait || run != c.run || soFar != c.soFar {
 			t.Errorf("%s: taskTimes = %q, %q, %v; want %q, %q, %v", name, wait, run, soFar, c.wait, c.run, c.soFar)
 		}
+	}
+	for _, w := range []contract.WorkflowRecord{{CreatedAt: 1000, FinishedAt: math.MaxInt64}, {CreatedAt: math.MinInt64, FinishedAt: 5}, {CreatedAt: -1}, {CreatedAt: math.MaxInt64}} {
+		if got, soFar := runSpan(w, now); got != "—" || soFar {
+			t.Errorf("runSpan(%d, %d) = %q, %v; want —", w.CreatedAt, w.FinishedAt, got, soFar)
+		}
+	}
+	if msSpan(math.MaxInt64) <= 0 || msSpan(math.MinInt64) >= 0 {
+		t.Error("msSpan overflows")
 	}
 	if got := thousands(1_284_007); got != "1,284,007" || thousands(999) != "999" || thousands(0) != "0" {
 		t.Errorf("thousands = %q", got)
@@ -1647,7 +1660,7 @@ func TestWorkflowDurations(t *testing.T) {
 		t.Errorf("diamond: timed %v, tasks %+v", diamond.Timed, diamond.Tasks)
 	}
 	for _, want := range []string{
-		`<th scope="col" class="num">Waited</th>`, `<th scope="col" class="num">Ran</th>`,
+		`<th scope="col" class="num" title="From its first enqueue: includes earlier attempts">Waited</th>`, `<th scope="col" class="num">Ran</th>`,
 		`<td class="num" data-label="Ran">24s <span class="chip">slowest</span></td>`,
 		`completed · 24s</text>`, `<g class="slow"`, `slowest task on the path to the end`, `<dt>Ran</dt><dd>24s <span class="chip">slowest on the path</span></dd>`,
 	} {
@@ -1677,6 +1690,21 @@ func TestWorkflowDurations(t *testing.T) {
 			t.Errorf("page without times has %q", bad)
 		}
 	}
+
+	// a chain whose two tasks end in the same ms: the dependent is last,
+	// the path two long
+	tie := []contract.TaskRecord{{Name: "a", StartedAt: 1000, FinishedAt: 2000}, {Name: "b", Deps: []string{"a"}, StartedAt: 2000, FinishedAt: 2000}}
+	if got := slowestOnPath(tie, [][]int{nil, {0}}, time.Now()); got != 0 {
+		t.Errorf("tie: slowest = %d, want 0", got)
+	}
+	// after a rollback the undo jobs set the end: no slowest mark
+	chain := contract.WorkflowRecord{ID: "c", CreatedAt: 1, FinishedAt: 3000, Tasks: tie}
+	for st, want := range map[contract.WorkflowState]bool{contract.WorkflowCompleted: true, contract.WorkflowCompensated: false, contract.WorkflowCompensationFailed: false, contract.WorkflowCompensating: false} {
+		chain.State = st
+		if v, _ := render(chain); v.Tasks[0].Slowest != want {
+			t.Errorf("%s: slowest %v, want %v", st, v.Tasks[0].Slowest, want)
+		}
+	}
 }
 
 // A rollback that failed is loud: a danger summary over the graph names
@@ -1690,7 +1718,8 @@ func TestWorkflowRollback(t *testing.T) {
 	rec := contract.WorkflowRecord{ID: "checkout-1", State: contract.WorkflowCompensationFailed, CreatedAt: 1, FinishedAt: 9, Tasks: []contract.TaskRecord{
 		{Name: "reserve", JobID: "r-1", State: contract.JobCompleted, Undo: undo("release-1", contract.JobCompleted, "")},
 		{Name: "charge", JobID: "c-1", State: contract.JobCompleted, Deps: []string{"reserve"}, Undo: undo("refund-1", contract.JobFailed, "refund: card network timeout")},
-		{Name: "ship", JobID: "s-1", State: contract.JobFailed, Deps: []string{"charge"}, Reason: "carrier down"},
+		// never completed: its undo record waits, never runs, not counted
+		{Name: "ship", JobID: "s-1", State: contract.JobFailed, Deps: []string{"charge"}, Reason: "carrier down", Undo: undo("unship-1", contract.JobWaiting, "")},
 	}}
 	if got := rollbackNote(rec); got != "1 of 2 not rolled back" {
 		t.Errorf("rollbackNote(failed) = %q", got)
@@ -1713,6 +1742,9 @@ func TestWorkflowRollback(t *testing.T) {
 	if i, j := strings.Index(body, `id="rollback"`), strings.Index(body, `class="dagbox"`); i < 0 || i > j {
 		t.Error("the rollback summary is not over the graph")
 	}
+	if left := v.Rollback.Left; len(left) != 1 || left[0].Name != "charge" {
+		t.Errorf("not rolled back = %+v, want charge only", left)
+	}
 	list := run(t, "workflows", "layout", Page{Server: "dev", WorkflowList: &WorkflowsView{Read: true, Rows: []WorkflowRow{
 		{ID: rec.ID, URL: workflowURL(rec.ID, "dev", 0), State: stateView(string(rec.State)), Note: rollbackNote(rec)}}}})
 	if !strings.Contains(list, `<span class="wst s-compensation-failed">rollback failed</span><small class="reason">1 of 2 not rolled back</small>`) {
@@ -1732,6 +1764,22 @@ func TestWorkflowRollback(t *testing.T) {
 			t.Errorf("rolling back page lacks %q", want)
 		}
 	}
+	// a long reason: cut in the summary and table, whole in the panel
+	rec.State = contract.WorkflowCompensationFailed
+	long := strings.Repeat("é", maxReason+20)
+	rec.Tasks[2].Reason = long
+	v = workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now())
+	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
+	short := strings.Repeat("é", maxReason) + "…"
+	for _, want := range []string{`<code class="err">` + short + `</code>`, `<small class="reason">` + short + `</small>`, `<dd><code class="err">` + long + `</code></dd>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("long reason: page lacks %.60q", want)
+		}
+	}
+	if brief("carrier down") != "carrier down" {
+		t.Error("brief cuts a short reason")
+	}
+
 	rec.State = contract.WorkflowCompleted
 	if got := rollbackNote(rec); got != "" {
 		t.Errorf("rollbackNote(completed) = %q", got)

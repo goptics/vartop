@@ -123,12 +123,17 @@ func (f *Varmq) workflows(w http.ResponseWriter, r *http.Request) {
 
 // workflowCounts answers as varmq's GET /workflow-counts: one entry, every
 // state present.
-func (f *Varmq) workflowCounts(w http.ResponseWriter, _ *http.Request) {
+func (f *Varmq) workflowCounts(w http.ResponseWriter, r *http.Request) {
 	f.Mu.Lock()
 	all, status := slices.Clone(f.Workflows), f.WorkflowStatus
 	e := api.WorkflowCounts{Store: f.WorkflowStore, Shared: f.WorkflowStore != ""}
-	missing, uncounted := f.NoWorkflowCounts, f.UncountedWorkflows
+	missing, uncounted, delay := f.NoWorkflowCounts, f.UncountedWorkflows, f.CountsDelay
 	f.Mu.Unlock()
+	select {
+	case <-time.After(delay):
+	case <-r.Context().Done():
+		return
+	}
 	switch {
 	case all == nil || missing:
 		http.NotFound(w, nil)

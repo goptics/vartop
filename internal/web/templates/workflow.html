@@ -36,16 +36,16 @@
   {{if .Failed}}<p><strong>{{len .Left}} of {{.Total}} {{if eq .Total 1}}step was{{else}}steps were{{end}} not rolled back.</strong> The changes {{if eq (len .Left) 1}}its task{{else}}their tasks{{end}} made are still in place.</p>
   {{else}}<p><strong>{{.Done}} of {{.Total}} undone.</strong> The undo jobs run from the last completed task back.</p>{{end}}
   {{with .Left}}<h3>{{if $.Failed}}Not rolled back{{else}}Still to undo{{end}}</h3>
-  <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a>{{with .Undo}}<span class="what">undo {{template "wf_state" .State}}</span>{{if .JobURL}}<a href="{{.JobURL}}">Undo job <span class="mono">{{.JobID}}</span></a>{{end}}{{with .Reason}}<code class="err">{{.}}</code>{{end}}{{end}}</li>{{end}}</ul>{{end}}
+  <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a>{{with .Undo}}<span class="what">undo {{template "wf_state" .State}}</span>{{if .JobURL}}<a href="{{.JobURL}}">Undo job <span class="mono">{{.JobID}}</span></a>{{end}}{{with .Brief}}<code class="err">{{.}}</code>{{end}}{{end}}</li>{{end}}</ul>{{end}}
   {{with .Undone}}<h3>Rolled back</h3>
   <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a>{{with .Undo}}{{with .Run}}<span class="sub">undone in {{.}}</span>{{end}}{{end}}</li>{{end}}</ul>{{end}}
   {{with .Cause}}<h3>Why it rolled back</h3>
-  <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a><span class="what">{{template "wf_state" .State}}</span>{{with .Reason}}<code class="err">{{.}}</code>{{end}}</li>{{end}}</ul>{{end}}
+  <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a><span class="what">{{template "wf_state" .State}}</span>{{with .Brief}}<code class="err">{{.}}</code>{{end}}</li>{{end}}</ul>{{end}}
 </section>{{end}}
 
 {{/* task_detail: a task's facts (TaskView), in the side panel and for each undo job */}}
 {{define "task_facts"}}<dl class="kv">
-  <dt>State</dt><dd>{{template "wf_state" .State}}{{if .Live}} <span class="sub">queued or running</span>{{end}}</dd>
+  <dt>State</dt><dd>{{template "wf_state" .State}}{{if and .Live (eq .State.Class "pending")}} <span class="sub">queued or running</span>{{end}}</dd>
   <dt>Queue</dt><dd>{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</dd>
   <dt>Job ID</dt><dd>{{if .JobURL}}<a class="mono" href="{{.JobURL}}">{{.JobID}}</a>{{else if .JobID}}<span class="mono">{{.JobID}}</span>{{else}}—{{end}}</dd>
   <dt>Result</dt><dd>{{or .Result "—"}}</dd>
@@ -85,7 +85,7 @@
     <button type="button" class="pan" data-pan aria-pressed="false" aria-label="Pan with one finger" title="Pan with one finger"><svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M8 2v12M2 8h12M6 4l2-2 2 2M6 12l2 2 2-2M4 6 2 8l2 2M12 6l2 2-2 2"/></svg></button>
   </div>
   <div class="dag-port" style="--gh:{{.Graph.WellH}}px" tabindex="0" role="group" aria-label="Task graph of {{.ID}}" aria-describedby="dag-help">{{template "graph" .Graph}}</div>
-  <aside class="wf-panel" hidden aria-label="Task details" tabindex="-1">
+  <aside class="wf-panel" id="wf-panel" hx-preserve="true" hidden aria-label="Task details" tabindex="-1">
     <button type="button" class="close" aria-label="Close task details"><svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
     <div class="body"></div>
   </aside>
@@ -109,7 +109,7 @@
     <th scope="col">Depends on</th>
     <th scope="col">Queue</th>
     <th scope="col">Job ID</th>
-    {{if .Timed}}<th scope="col" class="num">Waited</th>
+    {{if .Timed}}<th scope="col" class="num" title="From its first enqueue: includes earlier attempts">Waited</th>
     <th scope="col" class="num">Ran</th>{{end}}
     <th scope="col" class="num">Result</th>
     <th scope="col">Undo</th>
@@ -117,14 +117,14 @@
   <tbody>{{range .Tasks}}
   <tr id="task-{{.I}}"{{with .Chip}} data-chip="{{.}}"{{end}}>
     <th scope="row" class="name">{{if $.Workflow.Graph.Nodes}}<a class="mono" href="#node-{{.I}}">{{.Name}}</a>{{else}}<span class="mono">{{.Name}}</span>{{end}}{{if .Always}} <span class="chip">always</span>{{end}}</th>
-    <td data-label="State">{{template "wf_state" .State}}{{with .Reason}}<small class="reason">{{.}}</small>{{end}}</td>
+    <td data-label="State">{{template "wf_state" .State}}{{with .Brief}}<small class="reason">{{.}}</small>{{end}}</td>
     <td data-label="Depends on">{{range $i, $d := .Deps}}{{if $i}}, {{end}}<span class="mono">{{$d}}</span>{{else}}—{{end}}</td>
     <td data-label="Queue">{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</td>
     <td data-label="Job ID">{{if .JobURL}}<a class="mono" href="{{.JobURL}}">{{.JobID}}</a>{{else if .JobID}}<span class="mono">{{.JobID}}</span>{{else}}—{{end}}</td>
     {{if $.Workflow.Timed}}<td class="num" data-label="Waited">{{or .Wait "—"}}</td>
     <td class="num" data-label="Ran">{{if .Run}}{{.Run}}{{if .RunSoFar}} <span class="sub">so far</span>{{end}}{{if .Slowest}} <span class="chip">slowest</span>{{end}}{{else}}—{{end}}</td>{{end}}
     <td class="num" data-label="Result">{{or .Result "—"}}</td>
-    <td data-label="Undo">{{with .Undo}}{{template "wf_state" .State}}{{with .Run}} <span class="sub">{{.}}</span>{{end}}{{if .JobURL}} <a href="{{.JobURL}}">undo job</a>{{end}}{{with .Reason}}<small class="reason">{{.}}</small>{{end}}{{else}}—{{end}}</td>
+    <td data-label="Undo">{{with .Undo}}{{template "wf_state" .State}}{{with .Run}} <span class="sub">{{.}}</span>{{end}}{{if .JobURL}} <a href="{{.JobURL}}">undo job</a>{{end}}{{with .Brief}}<small class="reason">{{.}}</small>{{end}}{{else}}—{{end}}</td>
   </tr>{{end}}
   </tbody>
 </table>

@@ -26,7 +26,7 @@
   </tbody>
 </table>
 </div>{{else if .NoRoutes}}<p class="empty">No workflow data: no {{$.Noun.One}} serves the workflow routes. They need varmq API 1.3.0.</p>
-{{else if and .Read (not .Failed)}}<p class="empty">No {{with .State}}{{$.WorkflowList.StateLabel}} {{end}}workflows{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
+{{else if and .Read (not .Failed)}}<p class="empty">{{.Empty}}{{if .Offset}} past {{.Offset}}{{end}}.</p>{{end}}
 {{if or .Prev .Next}}<nav class="pager" aria-label="Pages">{{with .Prev}}<a href="{{.}}" rel="prev">{{template "arrow" "left"}}Previous</a>{{end}}{{if .Rows}}<span class="nums"><span class="gap">{{.First}}–{{.Last}}</span></span>{{end}}{{with .Next}}<a href="{{.}}" rel="next">Next{{template "arrow" "right"}}</a>{{end}}</nav>{{end}}
 {{if and .Rows .Unsupported}}<p class="note" role="note">No workflow routes on: {{range $i, $l := .Unsupported}}{{if $i}}, {{end}}{{$l}}{{end}}</p>{{end}}
 {{range .Failed}}<p class="err">{{.}}</p>{{end}}

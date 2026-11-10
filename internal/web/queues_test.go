@@ -538,7 +538,7 @@ func TestWorkflowsPage(t *testing.T) {
 		t.Errorf("compensated list, or its poller:\n%s", body)
 	}
 	_, body = fetch(t, srv, "/workflows?server=multi&state=compensation_failed", false)
-	if !strings.Contains(body, "No rollback failed workflows.") {
+	if !strings.Contains(body, "No workflows whose rollback failed.") {
 		t.Errorf("empty state list:\n%s", visibleText(body))
 	}
 	if _, body = fetch(t, srv, "/workflows?server=multi&offset=2", false); strings.Contains(body, `id="poller"`) || !strings.Contains(body, `rel="prev"`) || !strings.Contains(body, "<span class=\"gap\">3–4</span>") {
@@ -1316,5 +1316,33 @@ func TestWorkflowTabsCount(t *testing.T) {
 	if _, body = fetch(t, srv, "/workflows?server=multi", false); strings.Contains(body, `class="count"`) || strings.Contains(body, ` zero"`) ||
 		!strings.Contains(body, `aria-label="Rollback in progress"><span class="label">In progress</span></a>`) {
 		t.Errorf("a unit without counts: tabs show counts")
+	}
+
+	// slow counts: the list comes at the timeout, its tabs without counts
+	defer func(d time.Duration) { countsTimeout = d }(countsTimeout)
+	countsTimeout = 200 * time.Millisecond
+	varmqs, fakes, _ := workflowFakes(t)
+	varmqs[0].Mu.Lock()
+	varmqs[0].CountsDelay = time.Minute
+	varmqs[0].Mu.Unlock()
+	srv, _ = newTestServer(t, fakes[0], fakes[1])
+	start := time.Now()
+	_, body = fetch(t, srv, "/workflows?server=multi", false)
+	if took := time.Since(start); took > 10*time.Second || strings.Contains(body, `class="count"`) || !strings.Contains(body, ">"+fleettest.RunningID+"</a>") {
+		t.Errorf("slow counts: took %v, counts %v, rows %v", took, strings.Contains(body, `class="count"`), strings.Contains(body, ">"+fleettest.RunningID+"</a>"))
+	}
+}
+
+// The empty list reads well in every tab.
+func TestWorkflowsEmptyWords(t *testing.T) {
+	for state, want := range map[contract.WorkflowState]string{
+		"": "No workflows", contract.WorkflowRunning: "No running workflows", contract.WorkflowCompleted: "No completed workflows",
+		contract.WorkflowFailed: "No failed workflows", contract.WorkflowCancelled: "No cancelled workflows",
+		contract.WorkflowCompensating: "No workflows rolling back", contract.WorkflowCompensated: "No workflows rolled back",
+		contract.WorkflowCompensationFailed: "No workflows whose rollback failed",
+	} {
+		if got := (&WorkflowsView{State: state}).Empty(); got != want {
+			t.Errorf("%q: %q, want %q", state, got, want)
+		}
 	}
 }

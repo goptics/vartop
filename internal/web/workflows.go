@@ -2,7 +2,9 @@ package web
 
 import (
 	"cmp"
+	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -21,6 +23,10 @@ import (
 // task graph, polled while it runs. The one write is the cancel.
 
 const defaultWorkflowLimit = 25
+
+// countsTimeout bounds GET /workflow-counts on the list page (a var: tests
+// shorten it).
+var countsTimeout = 2 * time.Second
 
 // WorkflowsView is the list page: one page of the server's workflows in
 // State ("" for all), merged (see fleet.MergeWorkflows).
@@ -42,8 +48,21 @@ type WorkflowsView struct {
 func (v *WorkflowsView) First() int { return v.Offset + 1 }
 func (v *WorkflowsView) Last() int  { return v.Offset + len(v.Rows) }
 
-// StateLabel is State in words.
-func (v *WorkflowsView) StateLabel() string { return stateView(string(v.State)).Label }
+// Empty is what a page without rows says, by state: "No failed
+// workflows", "No workflows rolling back".
+func (v *WorkflowsView) Empty() string {
+	switch v.State {
+	case "":
+		return "No workflows"
+	case contract.WorkflowCompensating:
+		return "No workflows rolling back"
+	case contract.WorkflowCompensated:
+		return "No workflows rolled back"
+	case contract.WorkflowCompensationFailed:
+		return "No workflows whose rollback failed"
+	}
+	return "No " + stateView(string(v.State)).Label + " workflows"
+}
 
 // WorkflowTab is the link to one state of the list ("" for all). Count is
 // its workflows, "" when the fleet's counts are not known (then no tab has
@@ -206,21 +225,39 @@ func span(d time.Duration) string {
 	return fmt.Sprintf("%dd %dh", int(d.Hours())/24, int(d.Hours())%24)
 }
 
+// timeOK: a record time (Unix ms) the pages trust: set, and at most a day
+// past now (clocks apart a little; more is broken or hostile).
+func timeOK(ms int64, now time.Time) bool {
+	return ms > 0 && ms <= now.UnixMilli()+24*time.Hour.Milliseconds()
+}
+
+// msSpan is d ms as a Duration, clamped: the product cannot overflow.
+func msSpan(d int64) time.Duration {
+	const lim = math.MaxInt64 / int64(time.Millisecond)
+	return time.Duration(min(max(d, -lim), lim)) * time.Millisecond
+}
+
 // runSpan is how long w ran: to its end, or so far at now (running true).
+// "—" for a time not to trust (timeOK).
 func runSpan(w contract.WorkflowRecord, now time.Time) (string, bool) {
-	if w.CreatedAt == 0 {
+	if !timeOK(w.CreatedAt, now) {
 		return "—", false
 	}
-	if w.FinishedAt > 0 {
-		return span(time.Duration(w.FinishedAt-w.CreatedAt) * time.Millisecond), false
+	if w.FinishedAt != 0 {
+		if !timeOK(w.FinishedAt, now) {
+			return "—", false
+		}
+		return span(msSpan(w.FinishedAt - w.CreatedAt)), false
 	}
 	return span(now.Sub(time.UnixMilli(w.CreatedAt))), !fleet.WorkflowEnded(w)
 }
 
-// rollbackOf counts w's undo jobs, and those that completed.
+// rollbackOf counts w's undo jobs to run, and those that completed. Only a
+// completed task is undone: a task that never completed shows an undo
+// record (waiting) all the same, never run, not counted.
 func rollbackOf(w contract.WorkflowRecord) (total, done int) {
 	for _, t := range w.Tasks {
-		if t.Undo != nil {
+		if t.State == contract.JobCompleted && t.Undo != nil {
 			total++
 			if t.Undo.State == contract.JobCompleted {
 				done++
@@ -245,24 +282,31 @@ func rollbackNote(w contract.WorkflowRecord) string {
 }
 
 // taskTimes is how long t waited in its queue and ran, as the pages show
-// them; "" for a time the record does not carry. A task in flight of a
-// running workflow ran so far, at now.
+// them; "" for a time the record does not carry or not to trust
+// (timeOK). A task in flight of a running workflow ran so far, at now.
 func taskTimes(t contract.TaskRecord, running bool, now time.Time) (wait, run string, soFar bool) {
+	at := func(ms int64) int64 {
+		if timeOK(ms, now) {
+			return ms
+		}
+		return 0
+	}
+	enq, start, fin := at(t.EnqueuedAt), at(t.StartedAt), at(t.FinishedAt)
 	ms := func(d int64) string {
 		if d < 50 { // "0.0s" reads as no time
 			return "<0.1s"
 		}
-		return span(time.Duration(d) * time.Millisecond)
+		return span(msSpan(d))
 	}
-	if t.EnqueuedAt > 0 && t.StartedAt >= t.EnqueuedAt {
-		wait = ms(t.StartedAt - t.EnqueuedAt)
+	if enq > 0 && start >= enq {
+		wait = ms(start - enq)
 	}
 	switch {
-	case t.StartedAt == 0:
-	case t.FinishedAt >= t.StartedAt:
-		run = ms(t.FinishedAt - t.StartedAt)
-	case t.FinishedAt == 0 && running && taskLive(t.State) && now.UnixMilli() >= t.StartedAt:
-		run, soFar = ms(now.UnixMilli()-t.StartedAt), true
+	case start == 0:
+	case fin >= start:
+		run = ms(fin - start)
+	case fin == 0 && running && taskLive(t.State) && now.UnixMilli() >= start:
+		run, soFar = ms(now.UnixMilli()-start), true
 	}
 	return wait, run, soFar
 }
@@ -270,12 +314,17 @@ func taskTimes(t contract.TaskRecord, running bool, now time.Time) (wait, run st
 // slowestOnPath is the task that ran longest on the path that set the
 // workflow's end: from the last task to finish, back through each one's
 // last dependency to finish. -1: no times, or a path of one task.
-func slowestOnPath(tasks []contract.TaskRecord, deps [][]int) int {
-	timed := func(i int) bool { return tasks[i].StartedAt > 0 && tasks[i].FinishedAt >= tasks[i].StartedAt }
+func slowestOnPath(tasks []contract.TaskRecord, deps [][]int, now time.Time) int {
+	timed := func(i int) bool {
+		t := tasks[i]
+		return timeOK(t.StartedAt, now) && timeOK(t.FinishedAt, now) && t.FinishedAt >= t.StartedAt
+	}
+	// a tie (same ms) goes to the later task: varmq adds a task after its
+	// deps, so a dependent beats its dependency
 	last := func(of []int) int {
 		at := -1
 		for _, i := range of {
-			if timed(i) && (at < 0 || tasks[i].FinishedAt > tasks[at].FinishedAt) {
+			if timed(i) && (at < 0 || tasks[i].FinishedAt >= tasks[at].FinishedAt) {
 				at = i
 			}
 		}
@@ -373,7 +422,11 @@ func (h *handler) workflows(w http.ResponseWriter, r *http.Request) {
 			v.Read = true
 			var wg sync.WaitGroup
 			wg.Go(func() {
-				if counts, ok := fleet.CountWorkflows(r.Context(), clients); ok {
+				// slow counts do not hold the list long: past the
+				// timeout, tabs without counts
+				ctx, cancel := context.WithTimeout(r.Context(), countsTimeout)
+				defer cancel()
+				if counts, ok := fleet.CountWorkflows(ctx, clients); ok {
 					v.setCounts(counts)
 				}
 			})
@@ -466,6 +519,7 @@ type TaskView struct {
 	JobURL        string // its job's page, "" for none (see jobURL)
 	QueueShort    string // Queue's name as a node shows it, cut
 	JobID, Reason string
+	Brief         string // Reason cut (see brief): the summary and table; the panel has it whole
 	Result        string // stored result size, "" for none
 	Deps          []string
 	Always        bool
@@ -587,8 +641,10 @@ func workflowView(g fleet.WorkflowGroup, server string, owners queueOwners, now 
 			}
 		}
 	}
-	// the path that set the end: known once the workflow ended
-	if i := slowestOnPath(w.Tasks, deps); i >= 0 && v.Ctl.Final {
+	// the path that set the end: known once the workflow ended; not after
+	// a rollback (its undo jobs set the end)
+	rolled := w.State == contract.WorkflowCompensating || w.State == contract.WorkflowCompensated || w.State == contract.WorkflowCompensationFailed
+	if i := slowestOnPath(w.Tasks, deps, now); i >= 0 && v.Ctl.Final && !rolled {
 		v.Tasks[i].Slowest = true
 		v.Tasks[i].Label += ", slowest on the path to the end"
 	}
@@ -600,9 +656,10 @@ func workflowView(g fleet.WorkflowGroup, server string, owners queueOwners, now 
 		rb.Total, rb.Done = rollbackOf(w)
 		for _, t := range slices.Backward(v.Tasks) {
 			switch {
-			case t.Undo != nil && t.Undo.State.Class == "completed":
+			case t.State.Class != "completed" || t.Undo == nil: // never undone: see rollbackOf
+			case t.Undo.State.Class == "completed":
 				rb.Undone = append(rb.Undone, t)
-			case t.Undo != nil:
+			default:
 				rb.Left = append(rb.Left, t)
 			}
 		}
@@ -629,7 +686,7 @@ const maxNodeQueue = 12
 func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, running bool, now time.Time) TaskView {
 	v := TaskView{I: i, Name: t.Name, Short: cut(t.Name, maxNodeName), State: stateView(string(t.State)),
 		Live: running && taskLive(t.State), Queue: owners.name(t.QueueID),
-		JobID: t.JobID, Reason: t.Reason, Deps: t.Deps, Always: t.Always}
+		JobID: t.JobID, Reason: t.Reason, Brief: brief(t.Reason), Deps: t.Deps, Always: t.Always}
 	v.Wait, v.Run, v.RunSoFar = taskTimes(t, running, now)
 	if c := v.State.Class; slices.Contains(chipStates, c) {
 		v.Chip = c
@@ -668,6 +725,17 @@ func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, r
 	return v
 }
 
+// maxReason is the most of a failure reason the summary and table show.
+const maxReason = 500
+
+// brief is s, past maxReason runes cut there with "…".
+func brief(s string) string {
+	if r := []rune(s); len(r) > maxReason {
+		return string(r[:maxReason]) + "…"
+	}
+	return s
+}
+
 // cut is s cut to n runes, "…" ending a cut one.
 func cut(s string, n int) string {
 	if r := []rune(s); len(r) > n {
@@ -688,7 +756,8 @@ func byteSize(n int) string {
 }
 
 // chipStates are the task states the graph's chips count and filter, in
-// order; a processing task counts as pending (queued or running).
+// order; a processing task counts as pending: the chip "pending or
+// processing".
 var chipStates = []string{"waiting", "pending", "completed", "failed", "cancelled"}
 
 // StateChip is one state of the graph's legend: its tasks, and the key the
@@ -753,7 +822,7 @@ func graphView(l dagLayout, tasks []TaskView) GraphView {
 	for _, k := range chipStates {
 		label := k
 		if k == "pending" {
-			label = "pending (queued or running)"
+			label = "pending or processing"
 		}
 		g.Chips = append(g.Chips, StateChip{Key: k, Label: label, Count: count[k]})
 	}
