@@ -341,6 +341,9 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .confirm h2 { margin: 0 0 4px; font-size: var(--fs-4); font-weight: 600; }
 .confirm p { margin: 0 0 12px; color: var(--subtle); }
 .confirm .table-wrap { margin-bottom: 12px; }
+/* narrow side panel: cells wrap and pack tight so every instance column shows */
+.confirm th, .confirm td { padding: 8px 6px; white-space: normal; }
+.confirm .name { min-width: 0; overflow-wrap: normal; }
 .confirm form { display: flex; justify-content: flex-end; }
 /* foot: Keep first (focused), then the action, its edge in its tone */
 .confirm .acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
