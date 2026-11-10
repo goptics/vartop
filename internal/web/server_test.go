@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"regexp"
@@ -1503,4 +1504,37 @@ func TestStaticCachedAndGzipped(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Content-Encoding") != "" || body != "" {
 		t.Errorf("unchanged poll, gzip accepted = %d, Content-Encoding %q, want 204, none", resp.StatusCode, resp.Header.Get("Content-Encoding"))
 	}
+}
+
+// TestWorkerPageBoundsQueuesRead: one instance whose GET /queues hangs must
+// not hold the worker page for the client timeout. The read stops at 2s; the
+// sources render with no state.
+func TestWorkerPageBoundsQueuesRead(t *testing.T) {
+	_, good := fleettest.NewVarmq(t, "a", fleettest.SourceWorkers("redisq:shop:fifo:{orders}", "sqliteq:9f86d081:fifo:images", "memory:a:fifo:1"))
+	_, real := fleettest.NewVarmq(t, "b", fleettest.SourceWorkers("redisq:shop:fifo:{orders}", "sqliteq:9f86d081:fifo:images", "memory:a:fifo:1"))
+	proxy := httputil.NewSingleHostReverseProxy(mustURL(t, real.URL))
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/queues" {
+			<-r.Context().Done()
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(hang.Close)
+	srv, _ := newTestServer(t, good, hang)
+
+	start := time.Now()
+	status, body := fetch(t, srv, "/workers/orders?server=multi", false)
+	if took := time.Since(start); status != http.StatusOK || took > 5*time.Second || !strings.Contains(body, `id="src-head"`) {
+		t.Errorf("worker page with one hung /queues = %d in %v, want 200 under 5s with the sources:\n%s", status, took, body)
+	}
+}
+
+func mustURL(t *testing.T, s string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }

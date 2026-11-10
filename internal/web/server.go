@@ -5,6 +5,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -88,7 +89,7 @@ type Source struct {
 // handler serves the pages of every configured server from the store.
 // Pages only read it; only the POST routes in actions.go, queues.go (queue
 // pause and resume), job.go (job cancel) and workflows.go (workflow cancel)
-// call varmq, and the queue, job and workflow pages, which read it live.
+// call varmq, and the worker, queue, job and workflow pages, which read it live.
 type handler struct {
 	src   Source
 	tmpl  map[string]*template.Template
@@ -290,7 +291,10 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 				// The sources' pending and paused, read as the queue list
 				// reads them; a failed read shows none, says nothing.
 				// ponytail: one queue read per instance per poll, as /queues; cache per snapshot if it weighs
-				if v, read := h.readQueues(r, new(p), snaps); read {
+				// Bounded to 2s: one hung instance must not hold the page (and every poll) for the client timeout.
+				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+				defer cancel()
+				if v, read := h.readQueues(r.WithContext(ctx), new(p), snaps); read {
 					p.srcq = &v
 				}
 			}
