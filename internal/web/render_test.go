@@ -708,11 +708,9 @@ func TestDetailRenders(t *testing.T) {
 		`hx-post="/workers/a%2Fb%20c/actions/resume"`,
 		`hx-post="/workers/a%2Fb%20c/actions/restart"`,
 		`hx-post="/workers/a%2Fb%20c/actions/stop"`,
-		`hx-confirm="Stop a/b c on all pods (dev)?"`,
-		`hx-confirm="Restart a/b c on all pods (dev)?"`,
 		`hx-post="/workers/a%2Fb%20c/concurrency"`,
 		`type="range"`, `max="64"`, `min="1"`, `name="n"`, `type="number"`,
-		`hx-trigger="change delay:600ms"`, // keys fire change per step: one write per pause
+		`<button type="submit">Set</button>`, // only Set applies a concurrency
 		`hx-sync="#page:replace"`,
 		`id="results"`,
 		`name="pod" value=""`,
@@ -722,10 +720,10 @@ func TestDetailRenders(t *testing.T) {
 		}
 	}
 
-	// Scope names the selected pod, in the confirm text and the pod field.
+	// Scope names the selected pod, in the heading and the pod field.
 	p.Pod = "a"
 	body = run(t, "detail", "layout", p)
-	for _, want := range []string{`hx-confirm="Stop a/b c on a (dev)?"`, `name="pod" value="a"`, `href="/?pod=a&amp;server=dev"`} {
+	for _, want := range []string{`on a</span>`, `name="pod" value="a"`, `href="/?pod=a&amp;server=dev"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("pod-scoped body lacks %q", want)
 		}
@@ -845,7 +843,6 @@ func TestCopyFollowsNoun(t *testing.T) {
 				"per "+one+", on all "+many+"<",
 				`aria-label="Concurrency per `+one+`"`,
 				`aria-label="Concurrency per `+one+`, exact"`,
-				`hx-confirm="Stop a/b c on all `+many+` (dev)?"`,
 			)
 
 			p = gridPage()
@@ -1521,5 +1518,35 @@ func TestDashboardSortControls(t *testing.T) {
 	p.Stale = "old"
 	if body = run(t, "dashboard", "layout", p); strings.Contains(body, "fails hot") || strings.Contains(body, ">2.5<") {
 		t.Error("a stale page shows a failed rate")
+	}
+}
+
+// TestWorkerControlsAskAndFit: no native confirm and no apply on slider
+// change; Pause and Resume are hidden by the status dot in #live (CSS
+// :has), so they stay right across polls with no swap of the controls.
+func TestWorkerControlsAskAndFit(t *testing.T) {
+	body := run(t, "detail", "layout", detailPage())
+	for _, bad := range []string{"hx-confirm", "delay:600ms", "stops moving"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("worker page has %q", bad)
+		}
+	}
+	for _, want := range []string{`class="act-pause"`, `class="act-resume"`, `class="danger act-stop"`, `Restart…</button>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("worker page lacks %q", want)
+		}
+	}
+	css, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		".detail-layout:has(.detail-head .status.active) .act-resume",
+		".detail-layout:has(.detail-head .status.paused) .act-pause",
+		".detail-layout:has(.detail-head .status.stopped) :is(.act-pause, .act-resume, .act-stop) { display: none; }",
+	} {
+		if !strings.Contains(string(css), want) {
+			t.Errorf("app.css lacks %q", want)
+		}
 	}
 }

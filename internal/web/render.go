@@ -99,6 +99,7 @@ type Page struct {
 
 	owners   queueOwners             // of the newest snapshot: names in-memory queues
 	qworkers map[string][]WorkerChip // the queue list's workers, by Queue ID
+	srcq     *fleet.QueuesView       // the worker page's queues, read live; nil: not read
 }
 
 // WorkersOn are the workers consuming queue id, for the queue list.
@@ -154,14 +155,55 @@ type ResultsView struct {
 	Noun    fleet.Noun
 }
 
-// ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
-// on Server, scoped to the unit labelled Pod ("" for every unit). A down
-// unit's column carries its Err.
+// ConfirmView is the confirmation panel of a worker action: Rows (workers)
+// × Pods on Server, scoped to the unit labelled Pod ("" for every unit). A
+// down unit's column carries its Err. Post is the route the confirmed form
+// posts to, "" for the bulk route of Action.
 type ConfirmView struct {
 	Action, Server, Pod string
+	Post                string
 	Noun                fleet.Noun
 	Pods                []fleet.PodColumn
 	Rows                []ConfirmRow
+}
+
+// PostURL is the route the confirmed form posts to.
+func (v ConfirmView) PostURL() string { return cmp.Or(v.Post, "/bulk/"+url.PathEscape(v.Action)) }
+
+// Scope is the units the action reaches, in words.
+func (v ConfirmView) Scope() string { return cmp.Or(v.Pod, "all "+v.Noun.Many) }
+
+// Acts is the panel's buttons: verb + object ("Stop orders", "Pause 3
+// workers").
+func (v ConfirmView) Acts() ConfirmActs {
+	what := strconv.Itoa(len(v.Rows)) + " workers"
+	if len(v.Rows) == 1 {
+		what = v.Rows[0].Name
+	}
+	return confirmActs(v.Action, what)
+}
+
+// ConfirmActs is the foot of every confirm panel: Keep (first, focused,
+// closes the panel, sends nothing), then the action's button: Label, in
+// Tone ("danger", "warn" or "primary").
+type ConfirmActs struct{ Label, Tone string }
+
+// confirmActs is the foot of a panel for action (pause, resume, restart,
+// stop, cancel) on what. Tone by severity: stop and cancel danger, restart
+// and pause warn, the rest primary.
+func confirmActs(action, what string) ConfirmActs {
+	tone := "primary"
+	switch action {
+	case "stop", "cancel":
+		tone = "danger"
+	case "restart", "pause":
+		tone = "warn"
+	}
+	label := action
+	if action != "" {
+		label = strings.ToUpper(action[:1]) + action[1:]
+	}
+	return ConfirmActs{Label: strings.TrimSpace(label + " " + what), Tone: tone}
 }
 
 // ConfirmRow is one worker of the confirmation panel. Absent is aligned with
@@ -198,6 +240,7 @@ var funcs = template.FuncMap{
 	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
 	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
 	"fullMs":        func(ms int64) string { full, _ := msTime(ms); return full },
+	"confirmActs":   confirmActs,
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",

@@ -313,6 +313,11 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .conc { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 8px; }
 .conc input[type=range] { width: 100%; }
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
+/* only what the worker's status (its dot in #live) allows; stays right
+   across polls, no script. Mixed, unknown, transitional: all shown. */
+.detail-layout:has(.detail-head .status.active) .act-resume,
+.detail-layout:has(.detail-head .status.paused) .act-pause,
+.detail-layout:has(.detail-head .status.stopped) :is(.act-pause, .act-resume, .act-stop) { display: none; }
 .bulk {
   position: sticky; bottom: 16px; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; width: fit-content;
   margin: 12px 0 0; padding: 8px 8px 8px 14px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-3);
@@ -326,6 +331,10 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 .confirm p { margin: 0 0 12px; color: var(--subtle); }
 .confirm .table-wrap { margin-bottom: 12px; }
 .confirm form { display: flex; justify-content: flex-end; }
+/* foot: Keep first (focused), then the action, its edge in its tone */
+.confirm .acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.confirm .acts button.danger { border-color: color-mix(in srgb, var(--bad) 55%, var(--line-strong)); }
+.confirm .acts button.warn { border-color: color-mix(in srgb, var(--warn) 55%, var(--line-strong)); }
 /* action results: one line per instance, an icon per outcome */
 .results { margin: 16px 0; padding: 4px 0; list-style: none; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-3); }
 .results li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 6px 14px; }
@@ -359,7 +368,7 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 /* worker page: its sources fan into it (no JS): a node per source in pick
    order, edges into one bus, an arrow to the worker; stacked under 640px */
 .fan {
-  --edge: color-mix(in srgb, var(--subtle) 70%, transparent);
+  --edge: color-mix(in srgb, var(--subtle) 85%, transparent); /* >= 3:1 on bg, both themes */
   display: grid; grid-template-columns: minmax(0, max-content) 44px minmax(0, max-content); align-items: center; justify-content: start;
   margin: 0 0 8px; padding: 14px 16px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-3);
 }
@@ -374,6 +383,10 @@ small.err { display: block; margin: 0; font-size: var(--fs-1); font-weight: 400;
 a.srcn:hover, a.srcn:focus-visible { border-color: var(--accent); }
 a.srcn:hover .qnm { color: var(--accent); text-decoration: underline; }
 .srcn .qnm.none { color: var(--subtle); font-style: italic; }
+/* live state of the queue: "N pending", "empty" (subtle), paused (dot) */
+.srcst, .srcn .status { font-size: var(--fs-1); font-variant-numeric: tabular-nums; }
+.srcst { color: var(--subtle); }
+.srcn .qnm { white-space: nowrap; }
 .prio { padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; background: var(--raised); color: var(--subtle); font-size: var(--fs-1); font-variant-numeric: tabular-nums; }
 .fan .link { position: relative; border-top: 1.5px solid var(--edge); }
 .fan .link::after { content: ""; position: absolute; right: -1px; top: -6px; border: 5px solid transparent; border-right: 0; border-left: 7px solid var(--edge); }

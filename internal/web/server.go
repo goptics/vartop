@@ -286,6 +286,14 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 		} else if d, found := fleet.BuildDetail(snaps, p.Pod, name, 0, p.Noun); found {
 			slices.SortFunc(d.QueueIDs, p.cmpQName) // by name, as the line shows them
 			p.Detail = &d
+			if len(d.Sources) > 0 || len(d.QueueIDs) > 0 {
+				// The sources' pending and paused, read as the queue list
+				// reads them; a failed read shows none, says nothing.
+				// ponytail: one queue read per instance per poll, as /queues; cache per snapshot if it weighs
+				if v, read := h.readQueues(r, new(p), snaps); read {
+					p.srcq = &v
+				}
+			}
 			h.dayCharts(&p, h.feeds.get(p.Server, p.Interval(), time.Now()), name, latestOf(snaps).At)
 		} else {
 			where := "any " + p.Noun.One

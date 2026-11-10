@@ -24,6 +24,9 @@ import (
 var (
 	workerActions = []string{"pause", "resume", "restart", "stop"}
 	bulkActions   = []string{"pause", "resume"}
+	// askFirst: worker actions that answer the confirm panel until the form
+	// says confirm=1.
+	askFirst = []string{"restart", "stop"}
 )
 
 // settlePoll is how often a request waiting for a snapshot syncs its feed.
@@ -208,6 +211,8 @@ func (t *target) scope() (fleet.ActScope, error) {
 // action runs pause, resume, restart or stop on one worker across the unit
 // scope of the form. Restart is refused when the scope holds a unit behind
 // a load balancer: it would reach whichever instance the balancer picks.
+// Restart and stop answer the confirm panel, calling nothing, until the
+// form says confirm=1.
 func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 	name, action := r.PathValue("name"), r.PathValue("action")
 	if !slices.Contains(workerActions, action) {
@@ -227,6 +232,12 @@ func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, fleet.RestartRefusedMsg)
 		return
 	}
+	if slices.Contains(askFirst, action) && r.PostFormValue("confirm") != "1" {
+		cv := confirmView(t, sc, action, []string{name})
+		cv.Post = "/workers/" + url.PathEscape(name) + "/actions/" + action
+		h.fragments(w, fragment{"confirm", "confirm", cv})
+		return
+	}
 	results := fleet.Act(mutationCtx(r), sc, fleet.UnitsOf(t.latest), t.noun, []string{name}, fleet.ActionSender(action))
 	h.respond(w, r, t, name, results[0])
 }
@@ -237,7 +248,12 @@ func (h *handler) action(w http.ResponseWriter, r *http.Request) {
 // one already at n, which is no change.
 func (h *handler) concurrency(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	n, err := strconv.Atoi(r.PostFormValue("n"))
+	// The form sends the slider's n, then the box's: the box is exact (the
+	// slider stops at its max), so the last one counts.
+	n, err := 0, r.ParseForm()
+	if ns := r.PostForm["n"]; err == nil && len(ns) > 0 {
+		n, err = strconv.Atoi(ns[len(ns)-1])
+	}
 	if err != nil || n < 1 {
 		badRequest(w, "concurrency must be a whole number of at least 1")
 		return
@@ -301,24 +317,7 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.PostFormValue("confirm") != "1" {
-		cv := ConfirmView{Action: action, Server: t.key, Pod: t.label, Noun: t.noun, Rows: make([]ConfirmRow, len(names))}
-		for i, name := range names {
-			cv.Rows[i].Name = name
-		}
-		cols := slices.Concat(sc.Balanced, sc.Dead) // the units in scope, as act lists their results
-		for _, c := range sc.Direct {
-			cols = append(cols, units[c.PrimaryEndpoint()])
-		}
-		slices.SortStableFunc(cols, func(a, b fleet.PodSnapshot) int { return sc.Listed(a.Key, b.Key) })
-		for _, u := range cols {
-			cv.Pods = append(cv.Pods, fleet.PodColumn{Key: u.Key, Label: cmp.Or(u.Label, config.ShortOrigin(u.Key)), Err: u.Err, Tip: u.Tip()})
-			for i := range cv.Rows {
-				name := cv.Rows[i].Name
-				absent := u.Err == "" && u.Workers[name] == nil && !u.IsUnreached(name)
-				cv.Rows[i].Absent = append(cv.Rows[i].Absent, absent)
-			}
-		}
-		h.fragments(w, fragment{"confirm", "confirm", cv})
+		h.fragments(w, fragment{"confirm", "confirm", confirmView(t, sc, action, names)})
 		return
 	}
 
@@ -329,6 +328,30 @@ func (h *handler) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.respond(w, r, t, "", slices.Concat(perName...))
+}
+
+// confirmView is the confirm panel of action on names: names × the units
+// in sc, as act lists their results.
+func confirmView(t *target, sc fleet.ActScope, action string, names []string) ConfirmView {
+	units := fleet.UnitsOf(t.latest)
+	cv := ConfirmView{Action: action, Server: t.key, Pod: t.label, Noun: t.noun, Rows: make([]ConfirmRow, len(names))}
+	for i, name := range names {
+		cv.Rows[i].Name = name
+	}
+	cols := slices.Concat(sc.Balanced, sc.Dead)
+	for _, c := range sc.Direct {
+		cols = append(cols, units[c.PrimaryEndpoint()])
+	}
+	slices.SortStableFunc(cols, func(a, b fleet.PodSnapshot) int { return sc.Listed(a.Key, b.Key) })
+	for _, u := range cols {
+		cv.Pods = append(cv.Pods, fleet.PodColumn{Key: u.Key, Label: cmp.Or(u.Label, config.ShortOrigin(u.Key)), Err: u.Err, Tip: u.Tip()})
+		for i := range cv.Rows {
+			name := cv.Rows[i].Name
+			absent := u.Err == "" && u.Workers[name] == nil && !u.IsUnreached(name)
+			cv.Rows[i].Absent = append(cv.Rows[i].Absent, absent)
+		}
+	}
+	return cv
 }
 
 // respond answers an executed action: results, after poking the server

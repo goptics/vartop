@@ -567,7 +567,7 @@ func TestInstanceParamResolves(t *testing.T) {
 		`<input type="hidden" name="instance" value="instance-2">`,
 		`href="/?instance=instance-2&amp;server=multi"`,
 		"Instances reporting: <span",
-		`hx-confirm="Stop orders on instance-2 (multi)?"`,
+		"on instance-2</span>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail of instance-2 lacks %q", want)
@@ -1262,14 +1262,14 @@ func TestControlsBehindBalancer(t *testing.T) {
 	if body = html.UnescapeString(body); !strings.Contains(body, note) {
 		t.Errorf("detail of one balanced unit lacks the note %q", note)
 	}
-	for _, control := range []string{">Pause</button>", ">Restart</button>", "/concurrency"} {
+	for _, control := range []string{">Pause</button>", ">Restart…</button>", "/concurrency"} {
 		if strings.Contains(body, control) {
 			t.Errorf("detail of one balanced unit has %q", control)
 		}
 	}
 
 	_, body = fetch(t, srv, "/workers/w?server=multi", false)
-	if !strings.Contains(body, ">Pause</button>") || !strings.Contains(body, "/concurrency") || strings.Contains(body, ">Restart</button>") {
+	if !strings.Contains(body, ">Pause</button>") || !strings.Contains(body, "/concurrency") || strings.Contains(body, ">Restart…</button>") {
 		t.Errorf("merged detail behind a balancer should have controls but no Restart:\n%s", body)
 	}
 	if strings.Contains(html.UnescapeString(body), note) {
@@ -1289,7 +1289,7 @@ func TestControlsBehindBalancer(t *testing.T) {
 	plain, _ := newTestServer(t, aSrv, bSrv)
 	label := fleettest.StaticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
 	for _, path := range []string{"/workers/orders?server=multi", "/workers/orders?server=multi&instance=" + label} {
-		if _, body := fetch(t, plain, path, false); !strings.Contains(body, ">Restart</button>") {
+		if _, body := fetch(t, plain, path, false); !strings.Contains(body, ">Restart…</button>") {
 			t.Errorf("GET %s on a server without balancers lacks Restart", path)
 		}
 	}
