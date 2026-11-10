@@ -238,6 +238,7 @@ Small, consistent corners: 4px (focus ring, range segment, tooltip), 6px (contro
 
 ### Rail / shell
 Brand (20px three-line SVG mark in accent, wordmark 16px/650). Nav: Dashboard, Instance grid, Queues, Workflows (three linked nodes), each with a 16px stroke icon; Workflows always shown (a note on the page when no instance serves the routes, not a probe per page); links `subtle`, hover and current `raised` + `fg`, current icon teal. Scope: server and instance pickers together (`#pick-server`, `#pick-unit`). `#status`: health with 7px dot (ok / warn / bad by healthy share), refresh interval, "updated" (warn when stale), optional `.note`.
+- **Live poll:** `#poller` sends back `X-Seen` (hash of `#live` - hash of `#banner`+`#status`, `app.js`). Same pair: 204, no swap. Same `#live`: `#banner` + `#status` only, `HX-Reswap: none` (focus, selection, scroll in `#live` kept). Else the page. Text bodies >= 1 KB gzipped (`Vary: Accept-Encoding`). Static files: weak content `ETag` + `no-cache` (304 on revalidate; a new binary never serves old CSS/JS). `favicon.svg`: the teal three-line mark. On a real swap, text selection inside `#live` is lost; focus survives only on elements with stable ids.
 
 ### Page header
 `h1` + `.sub` scope line on one baseline, wrapping. Worker, queue and job pages add breadcrumbs (`/` separator, 13px, `subtle`).
@@ -256,7 +257,7 @@ Under the worker's counters, `h2.section` "Sources" ("N, in the worker's order; 
 
 ### Tables
 Inside `.table-wrap` panel. Head `raised`, 12px/500 `subtle`; cells 8px 12px, hairline rows, no zebra. Row hover `raised` 60%; selected row accent 8%. Names `fg`/500, accent + underline on hover. Queue list: the page `.sub` says what the numbers are (Pending to Failed held now, retention may drop old ended ones; "Submitted (all time)"); "Failed" stays `bad` when non-zero (no rate to tell recent from old). "Workers" column: a chip per worker whose `queue_ids` hold the queue (link to its page, title "runs on <instances>"); none known: a 12px `subtle` "instances" then the instance chips. Under 640px worker and queue rows stack into a labelled grid (head moved off-screen, `data-label` captions, status on its own line).
-- **Gap:** no column sorting; needs a server-side sort param (no new JS).
+- **Dashboard order:** default "Trouble first": failing now (Failed /min > 0), then paused or stopped with pending, then the rest; inside a bucket by its measure, name breaks ties. `?sort=` name | pending | failed: header links (`aria-sort` on the active one, 4px caret) and a `caption` `.seg` switch ("Order"); poll URL, pickers and action refresh keep it. "Failed /min" column: mean over the last minute, `bad` 600 when > 0. Grid rows follow the same order. Row ids stable, checkboxes `hx-preserve`.
 
 ### Status dot
 7px dot (`--c`) + label in `fg`, always both. Worker label: varmq's status in lower case ("running", "idle", "paused"; raw per instance in `title`), "active" / "transitional" when instances differ inside one class, "mixed" across classes; same words on dashboard, grid, worker page, queue workers table. Filled: active (`ok`), paused (`paused`), stopped (`bad`). Hollow (1.5px inset ring, `subtle`): transitional, unknown, mixed. Mixed adds a `.split` per-instance line.
