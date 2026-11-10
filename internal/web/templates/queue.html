@@ -52,7 +52,7 @@
 <div class="table-wrap"><table class="queues qworkers">
   <thead><tr><th scope="col">{{$.Noun.Cap}}</th><th scope="col">Worker</th><th scope="col">Status</th><th scope="col" class="num">Concurrency</th></tr></thead>
   <tbody>{{range .}}
-  <tr><td title="{{.Tip}}" data-label="{{$.Noun.Cap}}">{{.Unit}}</td><th scope="row" class="name"><a href="{{.URL}}">{{.Name}}</a></th><td data-label="Status"><span class="status {{.Class}}">{{.Status}}</span></td><td class="num" data-label="Concurrency">{{.Concurrency}}</td></tr>{{end}}
+  <tr><td title="{{.Tip}}" data-label="{{$.Noun.Cap}}">{{.Unit}}</td><th scope="row" class="name"><a href="{{.URL}}">{{.Name}}</a></th><td data-label="Status"><span class="status {{.Class}}">{{word .Status}}</span></td><td class="num" data-label="Concurrency">{{.Concurrency}}</td></tr>{{end}}
   </tbody>
 </table></div></section>{{end}}
 {{end}}{{end}}

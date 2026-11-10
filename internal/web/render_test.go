@@ -832,8 +832,8 @@ func TestCopyFollowsNoun(t *testing.T) {
 				`<p class="sub">`+one+" × worker</p>",
 			)
 			body := run(t, "dashboard", "layout", p)
-			if got := strings.Count(body, "Pending (max/"+one+")") - strings.Count(body, `data-label="Pending (max/`+one+`)"`); got != 2 {
-				t.Errorf("Pending (max/%s) appears %d times, want in the card and the column header", one, got)
+			if got := strings.Count(body, "Pending (max/"+one+")") - strings.Count(body, `data-label="Pending (max/`+one+`)"`); got != 1 || !strings.Contains(body, "each worker's max per "+one+", summed") {
+				t.Errorf("Pending (max/%s) appears %d times, want in the column header; the card says it sums", one, got)
 			}
 
 			p = detailPage()
@@ -855,7 +855,7 @@ func TestCopyFollowsNoun(t *testing.T) {
 				Action: "pause", Server: "dev", Noun: n,
 				Pods: []fleet.PodColumn{{Key: "#a", Label: "a"}},
 				Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true}}},
-			}), "pause each worker on each "+one+" below:", `<span class="na">not on this `+one+`</span>`)
+			}), "Pause each worker on each "+one+" below:", `<span class="na">not on this `+one+`</span>`)
 
 			check(t, "no results", run(t, "results", "results", ResultsView{Noun: n}),
 				`<p class="empty">No `+many+" were targeted.</p>")
@@ -1571,5 +1571,35 @@ func TestCoarseTargets(t *testing.T) {
 	}
 	if body := run(t, "dashboard", "layout", dashboardPage()); !strings.Contains(body, `<td class="sel"><label class="hit"><input type="checkbox"`) {
 		t.Error("row checkbox has no hit label")
+	}
+}
+
+// TestStateWords: one word per worker state on every non-workflow page:
+// varmq's status in lower case, the status tile counting by the same
+// words, and the word always shown beside the dot (grid cells too).
+func TestStateWords(t *testing.T) {
+	chips := statusChips(map[string]int{"Paused": 1, "Running": 3, "Idle": 2, "Stopping": 1, "Weird": 1, "Stopped": 0})
+	var got []string
+	for _, c := range chips {
+		got = append(got, strconv.Itoa(c.N)+" "+c.Word+" "+c.Class)
+	}
+	if want := []string{"2 idle active", "3 running active", "1 stopping transitional", "1 paused paused", "1 weird unknown"}; !slices.Equal(got, want) {
+		t.Errorf("status chips = %q, want %q", got, want)
+	}
+
+	p := dashboardPage()
+	p.Dashboard.KPIs.StatusCounts = map[string]int{"Running": 3, "Paused": 1}
+	body := run(t, "dashboard", "layout", p)
+	for _, want := range []string{`<li class="status active">3 running</li>`, `<li class="status paused">1 paused</li>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard lacks %q", want)
+		}
+	}
+	if body := run(t, "grid", "layout", gridPage()); !strings.Contains(body, `<span class="status active">running</span>`) {
+		t.Error("grid cell lacks the state word")
+	}
+	css, _ := assets.ReadFile("static/app.css")
+	if strings.Contains(string(css), ".cell .status { font-size: 0") {
+		t.Error("grid cells hide the active word: status by colour alone")
 	}
 }

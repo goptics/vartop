@@ -658,7 +658,7 @@ func TestActionResponseReflectsNewState(t *testing.T) {
 	req.Header.Set("HX-Current-URL", srv.URL+"/workers/orders?server=multi")
 	_, body := send(t, srv, req)
 	live := liveOOB(body)
-	if !strings.Contains(live, "<h1>orders</h1>") || !strings.Contains(live, paused) || !strings.Contains(live, ">Paused</span>") {
+	if !strings.Contains(live, "<h1>orders</h1>") || !strings.Contains(live, paused) || !strings.Contains(live, ">paused</span>") {
 		t.Errorf("response's #live should show orders paused:\n%s", body)
 	}
 	if strings.Index(body, `<ul class="results">`) > strings.Index(body, `id="live"`) {
@@ -1301,7 +1301,7 @@ func TestActionPokesAndShowsResult(t *testing.T) {
 	if n := f.pokes("multi") - before; n != 1 {
 		t.Errorf("the action poked %d times, want once", n)
 	}
-	if live := liveOOB(body); !strings.Contains(live, ">Paused</span>") {
+	if live := liveOOB(body); !strings.Contains(live, ">paused</span>") {
 		t.Errorf("response's #live should show orders paused, from the poked snapshot:\n%s", live)
 	}
 	if latest := f.latest("multi"); !latest.At.After(first.At) {

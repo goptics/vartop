@@ -183,6 +183,31 @@ func (v ConfirmView) Acts() ConfirmActs {
 	return confirmActs(v.Action, what)
 }
 
+// StatusChip is one status of the dashboard's status tile: its word (as
+// rows show it), dot class and pod×worker count.
+type StatusChip struct {
+	Word, Class string
+	N           int
+}
+
+// statusClassOrder orders the status tile: well, in between, held, down.
+var statusClassOrder = []string{"active", "transitional", "paused", "stopped", "unknown"}
+
+// statusChips are counts (varmq status → n) as the status tile lists
+// them: by class (statusClassOrder), then word.
+func statusChips(counts map[string]int) []StatusChip {
+	var chips []StatusChip
+	for st, n := range counts {
+		if n > 0 {
+			chips = append(chips, StatusChip{Word: strings.ToLower(st), Class: fleet.StatusClass(st), N: n})
+		}
+	}
+	slices.SortFunc(chips, func(a, b StatusChip) int {
+		return cmp.Or(cmp.Compare(slices.Index(statusClassOrder, a.Class), slices.Index(statusClassOrder, b.Class)), strings.Compare(a.Word, b.Word))
+	})
+	return chips
+}
+
 // ConfirmActs is the foot of every confirm panel: Keep (first, focused,
 // closes the panel, sends nothing), then the action's button: Label, in
 // Tone ("danger", "warn" or "primary").
@@ -237,7 +262,8 @@ var funcs = template.FuncMap{
 	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
 	"spanParam":     spanParam,
 	"rangeSwitch":   rangeSwitch,
-	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
+	"statusChips":   statusChips,
+	"word":          strings.ToLower,
 	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
 	"fullMs":        func(ms int64) string { full, _ := msTime(ms); return full },
 	"confirmActs":   confirmActs,

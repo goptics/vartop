@@ -5,7 +5,7 @@
   </div>{{end}}
 {{define "confirm"}}<section class="confirm" aria-labelledby="confirm-head">
   <h2 id="confirm-head">{{.Acts.Label}} on {{.Scope}} of {{.Server}}?</h2>
-  <p>{{.Action}} each worker on each {{.Noun.One}} below:</p>
+  <p>{{(confirmActs .Action "").Label}} each worker on each {{.Noun.One}} below:</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>Worker</th>{{range .Pods}}<th title="{{.Tip}}">{{.Label}}{{with .Err}}<small class="err">{{.}}</small>{{end}}</th>{{end}}</tr></thead>

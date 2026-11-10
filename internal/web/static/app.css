@@ -247,9 +247,9 @@ th.name a:hover { color: var(--accent); text-decoration: underline; }
 .grid td { padding: 6px 10px; border-left: 1px solid var(--line); }
 .grid td:nth-child(2) { border-left: 0; }
 .cell { display: grid; grid-template-columns: auto auto 1fr; align-items: baseline; gap: 0 6px; }
-.cell .status { font-size: 0; gap: 0; } /* active: the dot only (the label stays for screen readers); other states show it */
+/* every state's word on its own line: status never by colour alone, every cell one height */
+.cell .status { grid-column: 1 / -1; font-size: var(--fs-1); color: var(--subtle); }
 .cell .status::before { width: 8px; height: 8px; }
-.cell .status.paused, .cell .status.stopped, .cell .status.transitional, .cell .status.unknown { font-size: var(--fs-1); gap: 6px; grid-column: 1 / -1; color: var(--subtle); }
 .cell .status { align-self: center; }
 .cell .load { font-weight: 600; }
 .cell { position: relative; padding-bottom: 6px; }

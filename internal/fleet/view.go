@@ -66,7 +66,7 @@ type HealthView struct {
 type KPIView struct {
 	CompletedPerSec, FailedPerMin float64
 	PendingMax                    int            // Σ over workers of max-per-pod pending
-	StatusCounts                  map[string]int // status class → pod×worker instances
+	StatusCounts                  map[string]int // varmq status → pod×worker instances
 	Completed, Failed, Pending    []Point        // last 10 min; Failed is per minute
 }
 
@@ -324,7 +324,7 @@ func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) Dash
 			continue
 		}
 		for _, sm := range p.Workers {
-			v.KPIs.StatusCounts[StatusClass(sm.Status)]++
+			v.KPIs.StatusCounts[sm.Status]++ // by status, the words the rows show
 		}
 	}
 	k := &v.KPIs

@@ -12,14 +12,15 @@
     {{template "spark" (sparkline $k.Failed trendWindow $.Interval 160 32)}}
   </div>
   <div class="card pending">
-    <h2>Pending (max/{{$.Noun.One}})</h2>
+    <h2>Pending</h2>
     <p class="big">{{if or $.Stale (noData $k.Pending)}}—{{else}}{{$k.PendingMax}}{{end}}</p>
+    <p class="sub">each worker's max per {{$.Noun.One}}, summed</p>
     {{template "spark" (sparkline $k.Pending trendWindow $.Interval 160 32)}}
   </div>
   <div class="card">
     <h2>Workers by status</h2>
     <p class="sub">{{$.Noun.One}} × worker</p>
-    <ul class="chips">{{if $.Stale}}<li>—</li>{{else}}{{range statusClasses}}{{$n := index $k.StatusCounts .}}{{if $n}}<li class="status {{.}}">{{$n}} {{.}}</li>{{end}}{{end}}{{if not $k.StatusCounts}}<li>—</li>{{end}}{{end}}</ul>
+    <ul class="chips">{{if $.Stale}}<li>—</li>{{else}}{{range statusChips $k.StatusCounts}}<li class="status {{.Class}}">{{.N}} {{.Word}}</li>{{else}}<li>—</li>{{end}}{{end}}</ul>
   </div>
 </section>
 {{if .Rows}}<div class="table-wrap">
@@ -45,7 +46,7 @@
   <tr id="{{.ID}}">
     <td class="sel"><label class="hit"><input type="checkbox" id="sel-{{.ID}}" form="bulk" name="names" value="{{.Name}}" aria-label="Select {{.Name}}" hx-preserve></label></td>
     <td class="name"><a id="link-{{.ID}}" href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></td>
-    <td>{{if $.Stale}}—{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}{{end}}</td>
+    <td>{{if $.Stale}}—{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{word .Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}{{end}}</td>
     <td data-label="Concurrency (per {{$.Noun.One}})">{{if $.Stale}}—{{else}}{{.Concurrency}}{{end}}</td>
     <td class="num" data-label="Busy">{{if or .Unknown $.Stale}}—{{else}}{{.Busy}}{{end}}</td>
     <td class="num" data-label="Idle">{{if or .Unknown $.Stale}}—{{else}}{{.Idle}}{{end}}</td>

@@ -277,7 +277,7 @@ func TestMessagesUseNoun(t *testing.T) {
 
 			// The confirmation panel.
 			_, body = post(t, srv, "/bulk/pause", multi("names", "orders", "names", "emails"), true)
-			for _, want := range []string{"pause each worker on each " + one + " below:", `<span class="na">not on this ` + one + `</span>`} {
+			for _, want := range []string{"Pause each worker on each " + one + " below:", `<span class="na">not on this ` + one + `</span>`} {
 				if !strings.Contains(body, want) {
 					t.Errorf("confirm panel lacks %q:\n%s", want, body)
 				}

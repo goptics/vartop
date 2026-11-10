@@ -372,7 +372,7 @@ func TestKPIsPendingIsMaxPerPodSummedOverWorkers(t *testing.T) {
 	if k.FailedPerMin != 135 {
 		t.Errorf("FailedPerMin = %v, want 2.25/s*60 = 135", k.FailedPerMin)
 	}
-	wantCounts := map[string]int{"active": 4, "paused": 1, "stopped": 1}
+	wantCounts := map[string]int{"Running": 3, "Idle": 1, "Paused": 1, "Stopped": 1}
 	if !reflect.DeepEqual(k.StatusCounts, wantCounts) {
 		t.Errorf("StatusCounts = %v, want %v (pod×worker instances)", k.StatusCounts, wantCounts)
 	}

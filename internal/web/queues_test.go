@@ -146,7 +146,7 @@ func TestQueueJobsPage(t *testing.T) {
 		"<title>tenant/orders · multi</title>",
 		// a and b's orders consume it; c, an older varmq, says nothing
 		`<h2 class="section" id="qworkers-head">Workers on this queue</h2>`,
-		`<th scope="row" class="name"><a href="/workers/orders?server=multi">orders</a></th><td data-label="Status"><span class="status active">Running</span></td><td class="num" data-label="Concurrency">4</td>`,
+		`<th scope="row" class="name"><a href="/workers/orders?server=multi">orders</a></th><td data-label="Status"><span class="status active">running</span></td><td class="num" data-label="Concurrency">4</td>`,
 		"order-42", "2 attempts",
 		`<span class="preview err">out of stock</span>`, // list line: the final error
 		"1–1 of 1",
