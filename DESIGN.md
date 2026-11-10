@@ -218,7 +218,8 @@ Six-step scale: 12 / 13 / 14 / 16 / 20 / 28px (`--fs-1`..`--fs-6`).
   - **760px (min):** job body two columns (1fr / 1.3fr): times + errors | payload.
   - **1024px (min):** rail becomes left column (see Shell).
   - **1200px (min):** worker page splits into main + 300px side column (controls, results), side sticky at 24px.
-- **Overflow:** tables scroll inside their wrapper, never the page. Instance grid capped at `100vh - 140px`, sticky header row and worker column.
+- **Touch (`pointer: coarse`, any width):** buttons, selects, number box, slider, nav links, crumbs, segments, pager, sort headers, row name links, job rows and IDs, source nodes, worker chips: min-height 44px; row checkbox 20px inside a 44px `label.hit`. Mouse density unchanged.
+- **Overflow:** tables scroll inside their wrapper, never the page (0px page overflow at 375px on dashboard, grid, worker, queues, queue, job pages). Instance grid capped at `100vh - 140px`, sticky header row and worker column.
 
 ## Elevation & Depth
 

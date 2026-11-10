@@ -1550,3 +1550,26 @@ func TestWorkerControlsAskAndFit(t *testing.T) {
 		}
 	}
 }
+
+// TestCoarseTargets: on touch every control and row link is 44px tall and
+// the row checkbox has a 44px label around it; mouse density is untouched
+// (the rule lives only under pointer: coarse).
+func TestCoarseTargets(t *testing.T) {
+	css, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, block, ok := strings.Cut(string(css), "@media (pointer: coarse) {")
+	block, _, _ = strings.Cut(block, "\n}")
+	if !ok {
+		t.Fatal("app.css has no pointer: coarse block")
+	}
+	for _, want := range []string{"button, select, input[type=number], .rail nav a, .seg a", "td.name a", "a.wchip { min-height: 44px; }", ".sel .hit {", "min-width: 44px; min-height: 44px;"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("coarse block lacks %q:\n%s", want, block)
+		}
+	}
+	if body := run(t, "dashboard", "layout", dashboardPage()); !strings.Contains(body, `<td class="sel"><label class="hit"><input type="checkbox"`) {
+		t.Error("row checkbox has no hit label")
+	}
+}
