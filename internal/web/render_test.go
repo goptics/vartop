@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"html/template"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1312,7 +1313,7 @@ func TestWorkflowView(t *testing.T) {
 
 func TestWorkflowWords(t *testing.T) {
 	for in, want := range map[string]StateView{
-		"compensation_failed": {"compensation failed", "compensation-failed"},
+		"compensation_failed": {"rollback failed", "compensation-failed"},
 		"running":             {"running", "running"},
 		"paused":              {"paused", "unknown"}, // a state a later varmq adds: as it is
 		"":                    {"unknown", "unknown"},
@@ -1356,18 +1357,18 @@ func TestWorkflowRenders(t *testing.T) {
 	body := run(t, "workflow", "layout", page(1))
 	for _, want := range []string{
 		`<div id="live" hx-disinherit="*" hx-get="/workflows/x?server=dev" hx-trigger="every 5s" hx-select="#live"`,
-		`<a class="node t-pending live" href="#task-2" data-i="2" aria-label="audit-log, pending, after extract"`,
+		`<a class="node t-pending live" id="node-2" href="#task-2" data-i="2" data-chip="pending" data-job="/queues/`, ` aria-label="audit-log, pending, after extract"`,
 		`<rect class="halo"`, `<path class="flow"`, `<path class="edge always"`, `marker-end="url(#dag-arrow)"`,
-		`<tr id="task-6">`, `<div id="task-detail-6">`, `<span class="chip">always</span>`,
+		`<tr id="task-6" data-chip="waiting">`, `<div id="task-detail-6">`, `<span class="chip">always</span>`,
 		`hx-post="/workflows/` + fleettest.RunningID + `/actions/cancel">Cancel workflow</button>`,
 		`name="undo" value="false"`, `<input type="hidden" name="at" value="`, `<dt>On cancel</dt><dd>undo jobs run</dd>`,
 		`<div id="results" aria-live="polite" hx-preserve="true"></div>`,
 		`<script src="/static/workflow.js" defer></script>`,
 		`aria-current="page"><svg class="ico" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="3.5"`, // the Workflows nav entry
 		// the hooks workflow.js queries
-		`class="dagbox"`, `<div class="dag-tools" hidden>`, `data-zoom="fit"`, `<div class="dag-port" tabindex="0"`,
+		`class="dagbox"`, `<div class="dag-tools" hidden>`, `data-zoom="fit"`, `<div class="dag-port" style="--gh:`, `tabindex="0" role="group" aria-label="Task graph of `,
 		`<svg class="dag"`, `data-w="`, `data-h="`, `<g class="view">`, `data-from="`, `data-to="`,
-		`<aside class="wf-panel" hidden`, `<button type="button" class="close"`, `<div class="body"></div>`,
+		`<aside class="wf-panel" id="wf-panel" hx-preserve="true" hidden`, `<button type="button" class="close"`, `<div class="body"></div>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("running workflow page lacks %q", want)
@@ -1378,7 +1379,7 @@ func TestWorkflowRenders(t *testing.T) {
 	}
 
 	body = run(t, "workflow", "layout", page(2))
-	for _, want := range []string{`<g class="undo t-completed"`, "carrier API: 503", `<span class="wst s-compensated">compensated</span>`} {
+	for _, want := range []string{`<g class="undo t-completed"`, "carrier API: 503", `<span class="wst s-compensated">rolled back</span>`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("compensated page lacks %q", want)
 		}
@@ -1411,7 +1412,7 @@ func TestWorkflowRenders(t *testing.T) {
 	}
 	big := workflowView(fleet.WorkflowGroup{WorkflowRecord: contract.WorkflowRecord{ID: "big", State: contract.WorkflowRunning, CreatedAt: 1, Tasks: tasks}}, "dev", nil, time.Now())
 	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: big})
-	if !strings.Contains(body, "200 tasks: too many edges to draw a graph") || !strings.Contains(body, `<tr id="task-199">`) || strings.Contains(body, `<svg class="dag"`) {
+	if !strings.Contains(body, "200 tasks: too many edges to draw a graph") || !strings.Contains(body, `<tr id="task-199" data-chip="waiting">`) || strings.Contains(body, `<svg class="dag"`) {
 		t.Errorf("over-cap workflow: no note, a graph, or tasks missing")
 	}
 }
@@ -1601,5 +1602,189 @@ func TestStateWords(t *testing.T) {
 	css, _ := assets.ReadFile("static/app.css")
 	if strings.Contains(string(css), ".cell .status { font-size: 0") {
 		t.Error("grid cells hide the active word: status by colour alone")
+	}
+}
+
+// Task times: waited and ran from the record's times, ran so far while it
+// runs; nothing where the record has no times (an older varmq, a store
+// without them), never "0s".
+func TestTaskTimes(t *testing.T) {
+	now := time.UnixMilli(100_000)
+	for name, c := range map[string]struct {
+		t         contract.TaskRecord
+		running   bool
+		wait, run string
+		soFar     bool
+	}{
+		"ended":             {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 1000, StartedAt: 3500, FinishedAt: 41_500}, false, "2.5s", "38s", false},
+		"instant":           {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 1000, StartedAt: 1020, FinishedAt: 1060}, false, "<0.1s", "<0.1s", false},
+		"runs":              {contract.TaskRecord{State: contract.JobProcessing, EnqueuedAt: 1000, StartedAt: 5000}, true, "4.0s", "1m 35s", true},
+		"workflow ended":    {contract.TaskRecord{State: contract.JobProcessing, EnqueuedAt: 1000, StartedAt: 5000}, false, "4.0s", "", false},
+		"queued":            {contract.TaskRecord{State: contract.JobPending, EnqueuedAt: 1000}, true, "", "", false},
+		"no times":          {contract.TaskRecord{State: contract.JobCompleted}, false, "", "", false},
+		"cancelled waiting": {contract.TaskRecord{State: contract.JobCancelled, EnqueuedAt: 1000, FinishedAt: 9000}, false, "", "", false},
+		"clocks apart":      {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 5000, StartedAt: 4000, FinishedAt: 3000}, false, "", "", false},
+		"finish far ahead":  {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 1000, StartedAt: 2000, FinishedAt: math.MaxInt64}, false, "1.0s", "", false},
+		"negative enqueue":  {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: -5, StartedAt: 2000, FinishedAt: 3000}, false, "", "1.0s", false},
+		"start past a day":  {contract.TaskRecord{State: contract.JobProcessing, EnqueuedAt: 1000, StartedAt: 100_000 + 25*3600_000}, true, "", "", false},
+		"within a day":      {contract.TaskRecord{State: contract.JobCompleted, EnqueuedAt: 1000, StartedAt: 2000, FinishedAt: 100_000 + 23*3600_000}, false, "1.0s", "23h 01m", false},
+	} {
+		if wait, run, soFar := taskTimes(c.t, c.running, now); wait != c.wait || run != c.run || soFar != c.soFar {
+			t.Errorf("%s: taskTimes = %q, %q, %v; want %q, %q, %v", name, wait, run, soFar, c.wait, c.run, c.soFar)
+		}
+	}
+	for _, w := range []contract.WorkflowRecord{{CreatedAt: 1000, FinishedAt: math.MaxInt64}, {CreatedAt: math.MinInt64, FinishedAt: 5}, {CreatedAt: -1}, {CreatedAt: math.MaxInt64}} {
+		if got, soFar := runSpan(w, now); got != "—" || soFar {
+			t.Errorf("runSpan(%d, %d) = %q, %v; want —", w.CreatedAt, w.FinishedAt, got, soFar)
+		}
+	}
+	if msSpan(math.MaxInt64) <= 0 || msSpan(math.MinInt64) >= 0 {
+		t.Error("msSpan overflows")
+	}
+	if got := thousands(1_284_007); got != "1,284,007" || thousands(999) != "999" || thousands(0) != "0" {
+		t.Errorf("thousands = %q", got)
+	}
+}
+
+// Durations on the page: the table's Waited and Ran columns, the node's
+// run time, the undo job's; the slowest task on the path that set the
+// end marked. Without times: no columns, no time anywhere.
+func TestWorkflowDurations(t *testing.T) {
+	wfs := fleettest.SampleWorkflows(time.Now().UnixMilli())
+	render := func(rec contract.WorkflowRecord) (*WorkflowView, string) {
+		v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now())
+		return v, run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
+	}
+	diamond, body := render(wfs[0].Record())
+	if !diamond.Timed || !diamond.Tasks[1].Slowest || diamond.Tasks[0].Slowest || diamond.Tasks[1].Run != "24s" {
+		t.Errorf("diamond: timed %v, tasks %+v", diamond.Timed, diamond.Tasks)
+	}
+	for _, want := range []string{
+		`<th scope="col" class="num" title="From its first enqueue: includes earlier attempts">Waited</th>`, `<th scope="col" class="num">Ran</th>`,
+		`<td class="num" data-label="Ran">24s <span class="chip">slowest</span></td>`,
+		`completed · 24s</text>`, `<g class="slow"`, `slowest task on the path to the end`, `<dt>Ran</dt><dd>24s <span class="chip">slowest on the path</span></dd>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("timed page lacks %q", want)
+		}
+	}
+	if etl, _ := render(wfs[1].Record()); !etl.Timed || slices.ContainsFunc(etl.Tasks, func(t TaskView) bool { return t.Slowest }) {
+		t.Error("running workflow: no times, or a slowest mark before its end is known")
+	}
+	_, body = render(wfs[2].Record()) // the saga: undo jobs timed too
+	if !strings.Contains(body, `data-label="Undo"><span class="wst s-completed">completed</span> <span class="sub">0.3s</span> <a href=`) {
+		t.Errorf("saga: no undo run time")
+	}
+
+	rec := wfs[0].Record()
+	rec.Tasks = slices.Clone(rec.Tasks)
+	for i := range rec.Tasks {
+		rec.Tasks[i].EnqueuedAt, rec.Tasks[i].StartedAt, rec.Tasks[i].FinishedAt = 0, 0, 0
+	}
+	plain, body := render(rec)
+	if plain.Timed || slices.ContainsFunc(plain.Tasks, func(t TaskView) bool { return t.Slowest || t.Run != "" }) {
+		t.Errorf("no times: %+v", plain)
+	}
+	for _, bad := range []string{">Waited<", ">Ran<", `class="slow"`, "slowest", "0s"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("page without times has %q", bad)
+		}
+	}
+
+	// a chain whose two tasks end in the same ms: the dependent is last,
+	// the path two long
+	tie := []contract.TaskRecord{{Name: "a", StartedAt: 1000, FinishedAt: 2000}, {Name: "b", Deps: []string{"a"}, StartedAt: 2000, FinishedAt: 2000}}
+	if got := slowestOnPath(tie, [][]int{nil, {0}}, time.Now()); got != 0 {
+		t.Errorf("tie: slowest = %d, want 0", got)
+	}
+	// after a rollback the undo jobs set the end: no slowest mark
+	chain := contract.WorkflowRecord{ID: "c", CreatedAt: 1, FinishedAt: 3000, Tasks: tie}
+	for st, want := range map[contract.WorkflowState]bool{contract.WorkflowCompleted: true, contract.WorkflowCompensated: false, contract.WorkflowCompensationFailed: false, contract.WorkflowCompensating: false} {
+		chain.State = st
+		if v, _ := render(chain); v.Tasks[0].Slowest != want {
+			t.Errorf("%s: slowest %v, want %v", st, v.Tasks[0].Slowest, want)
+		}
+	}
+}
+
+// A rollback that failed is loud: a danger summary over the graph names
+// the steps not rolled back, their undo jobs and why, then what was
+// undone and what failed first; the list row says it too. One that runs
+// shows how far it got.
+func TestWorkflowRollback(t *testing.T) {
+	undo := func(job string, s contract.JobState, reason string) *contract.TaskRecord {
+		return &contract.TaskRecord{QueueID: "redisq:shop:fifo:{undo}", JobID: job, State: s, Reason: reason}
+	}
+	rec := contract.WorkflowRecord{ID: "checkout-1", State: contract.WorkflowCompensationFailed, CreatedAt: 1, FinishedAt: 9, Tasks: []contract.TaskRecord{
+		{Name: "reserve", JobID: "r-1", State: contract.JobCompleted, Undo: undo("release-1", contract.JobCompleted, "")},
+		{Name: "charge", JobID: "c-1", State: contract.JobCompleted, Deps: []string{"reserve"}, Undo: undo("refund-1", contract.JobFailed, "refund: card network timeout")},
+		// never completed: its undo record waits, never runs, not counted
+		{Name: "ship", JobID: "s-1", State: contract.JobFailed, Deps: []string{"charge"}, Reason: "carrier down", Undo: undo("unship-1", contract.JobWaiting, "")},
+	}}
+	if got := rollbackNote(rec); got != "1 of 2 not rolled back" {
+		t.Errorf("rollbackNote(failed) = %q", got)
+	}
+	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now())
+	body := run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
+	for _, want := range []string{
+		`<section id="rollback" class="rollback bad" aria-labelledby="rollback-h">`, `<h2 id="rollback-h">Rollback failed</h2>`,
+		"<strong>1 of 2 steps were not rolled back.</strong> The changes its task made are still in place.",
+		`<h3>Not rolled back</h3>`, `<a class="mono" href="#task-1">charge</a>`, `href="/queues/redisq:shop:fifo:%7Bundo%7D/jobs/refund-1?server=dev">Undo job <span class="mono">refund-1</span></a>`,
+		`<code class="err">refund: card network timeout</code>`,
+		`<h3>Rolled back</h3>`, `<a class="mono" href="#task-0">reserve</a>`,
+		`<h3>Why it rolled back</h3>`, `<code class="err">carrier down</code>`,
+		`<span class="wst s-compensation-failed">rollback failed</span>`, `class="node t-completed undo-failed"`, `<text x="23" y="13">undo failed</text>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("failed rollback page lacks %q", want)
+		}
+	}
+	if i, j := strings.Index(body, `id="rollback"`), strings.Index(body, `class="dagbox"`); i < 0 || i > j {
+		t.Error("the rollback summary is not over the graph")
+	}
+	if left := v.Rollback.Left; len(left) != 1 || left[0].Name != "charge" {
+		t.Errorf("not rolled back = %+v, want charge only", left)
+	}
+	list := run(t, "workflows", "layout", Page{Server: "dev", WorkflowList: &WorkflowsView{Read: true, Rows: []WorkflowRow{
+		{ID: rec.ID, URL: workflowURL(rec.ID, "dev", 0), State: stateView(string(rec.State)), Note: rollbackNote(rec)}}}})
+	if !strings.Contains(list, `<span class="wst s-compensation-failed">rollback failed</span><small class="reason">1 of 2 not rolled back</small>`) {
+		t.Error("list row: the failed rollback is not spelled out")
+	}
+
+	rec.State, rec.FinishedAt = contract.WorkflowCompensating, 0
+	rec.Tasks = slices.Clone(rec.Tasks)
+	rec.Tasks[0].Undo, rec.Tasks[1].Undo = undo("release-1", contract.JobWaiting, ""), undo("refund-1", contract.JobCompleted, "")
+	if got := rollbackNote(rec); got != "1 of 2 undone" {
+		t.Errorf("rollbackNote(compensating) = %q", got)
+	}
+	v = workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now())
+	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
+	for _, want := range []string{`<section id="rollback" class="rollback" `, `<h2 id="rollback-h">Rolling back</h2>`, "<strong>1 of 2 undone.</strong>", `<h3>Still to undo</h3>`, `<span class="wst s-compensating">rolling back</span>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rolling back page lacks %q", want)
+		}
+	}
+	// a long reason: cut in the summary and table, whole in the panel
+	rec.State = contract.WorkflowCompensationFailed
+	long := strings.Repeat("é", maxReason+20)
+	rec.Tasks[2].Reason = long
+	v = workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now())
+	body = run(t, "workflow", "layout", Page{Server: "dev", OwnPoll: true, Workflow: v})
+	short := strings.Repeat("é", maxReason) + "…"
+	for _, want := range []string{`<code class="err">` + short + `</code>`, `<small class="reason">` + short + `</small>`, `<dd><code class="err">` + long + `</code></dd>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("long reason: page lacks %.60q", want)
+		}
+	}
+	if brief("carrier down") != "carrier down" {
+		t.Error("brief cuts a short reason")
+	}
+
+	rec.State = contract.WorkflowCompleted
+	if got := rollbackNote(rec); got != "" {
+		t.Errorf("rollbackNote(completed) = %q", got)
+	}
+	if v = workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now()); v.Rollback != nil {
+		t.Error("a completed workflow has a rollback summary")
 	}
 }

@@ -179,6 +179,73 @@ func MergeWorkflows(units []UnitWorkflows, offset, limit int) WorkflowsView {
 	return v
 }
 
+// CountWorkflows asks every client at once for GET /workflow-counts and
+// merges the answers (see mergeWorkflowCounts). ok false: no counts.
+func CountWorkflows(ctx context.Context, clients []*api.Client) (counts map[contract.WorkflowState]int64, ok bool) {
+	reads := make([][]api.WorkflowCounts, len(clients))
+	known := make([]bool, len(clients))
+	var wg sync.WaitGroup
+	for i, c := range clients {
+		wg.Go(func() {
+			entries, ok, err := c.ListWorkflowCounts(ctx)
+			reads[i], known[i] = entries, ok && err == nil
+		})
+	}
+	wg.Wait()
+	if len(clients) == 0 || slices.Contains(known, false) {
+		return nil, false
+	}
+	return mergeWorkflowCounts(reads)
+}
+
+// maxCountEntries caps one instance's /workflow-counts entries; more: a
+// broken or hostile answer, no counts.
+const maxCountEntries = 256
+
+// mergeWorkflowCounts is the workflows per state over the units' entries:
+// a shared store counted once (its first read, in client order; reads of
+// one store may differ, a later one is not truer), the rest summed. States
+// varmq does not list are ignored. All or nothing: an entry without
+// counts, a negative count, a sum past int64 or too many entries, and no
+// number is right, so ok is false.
+func mergeWorkflowCounts(reads [][]api.WorkflowCounts) (map[contract.WorkflowState]int64, bool) {
+	seen := map[string]bool{}
+	sum := map[contract.WorkflowState]int64{}
+	var all int64 // every state's sum: the "All" tab
+	for _, entries := range reads {
+		if len(entries) > maxCountEntries {
+			return nil, false
+		}
+		for _, e := range entries {
+			if e.Counts == nil {
+				return nil, false
+			}
+			for _, c := range e.Counts {
+				if c < 0 {
+					return nil, false
+				}
+			}
+			if e.Shared && e.Store != "" {
+				if seen[e.Store] {
+					continue
+				}
+				seen[e.Store] = true
+			}
+			for s, c := range e.Counts {
+				if !slices.Contains(api.WorkflowStates, s) {
+					continue
+				}
+				if sum[s]+c < 0 || all+c < 0 {
+					return nil, false
+				}
+				sum[s] += c
+				all += c
+			}
+		}
+	}
+	return sum, true
+}
+
 // WorkflowRead is what the units answered to GET /workflows/{id}: the
 // workflows of that ID (one, but for in-memory ones of several processes),
 // newest first; the units that hold it in several storages (409: nothing

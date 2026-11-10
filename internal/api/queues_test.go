@@ -348,3 +348,33 @@ func TestCancelJob(t *testing.T) {
 		t.Errorf("request = %+v", r)
 	}
 }
+
+// ListWorkflowCounts decodes the entries as sent: a store without counts
+// keeps Counts nil. The router's 404 (older varmq) is no counts, not an
+// error; a 503 is one.
+func TestListWorkflowCounts(t *testing.T) {
+	srv, reqs := recordingServer(t, http.StatusOK, nil, `[
+		{"shared":false,"counts":{"running":2,"completed":1,"failed":1,"compensating":0,"compensated":0,"compensation_failed":0,"cancelled":0}},
+		{"store":"3f9a1c0e77b2","shared":true,"counts":{"running":4,"completed":9,"failed":0,"compensating":0,"compensated":3,"compensation_failed":1,"cancelled":0}},
+		{"store":"a81b22c0d9ef","shared":true}]`)
+	es, ok, err := NewClient(srv.URL, "tok").ListWorkflowCounts(context.Background())
+	if err != nil || !ok || len(es) != 3 {
+		t.Fatalf("ListWorkflowCounts = %+v, ok %v, err %v", es, ok, err)
+	}
+	if es[0].Shared || es[0].Store != "" || es[0].Counts[contract.WorkflowRunning] != 2 ||
+		!es[1].Shared || es[1].Store != "3f9a1c0e77b2" || es[1].Counts[contract.WorkflowCompensationFailed] != 1 ||
+		!es[2].Shared || es[2].Counts != nil {
+		t.Errorf("entries = %+v", es)
+	}
+	if r := reqs()[0]; r.Path != "/workflow-counts" || r.Auth != "Bearer tok" {
+		t.Errorf("request = %+v", r)
+	}
+	srv, _ = recordingServer(t, http.StatusNotFound, nil, "404 page not found\n")
+	if es, ok, err := NewClient(srv.URL, "").ListWorkflowCounts(context.Background()); err != nil || ok || es != nil {
+		t.Errorf("404: %+v, ok %v, err %v", es, ok, err)
+	}
+	srv, _ = recordingServer(t, http.StatusServiceUnavailable, nil, `{"error":"redis down"}`)
+	if _, ok, err := NewClient(srv.URL, "").ListWorkflowCounts(context.Background()); ok || err == nil {
+		t.Errorf("503: ok %v, err %v", ok, err)
+	}
+}

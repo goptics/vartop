@@ -45,6 +45,28 @@ func (c *Client) ListWorkflows(ctx context.Context, state contract.WorkflowState
 	return wfs, true, nil
 }
 
+// WorkflowCounts is one entry of GET /workflow-counts: a durable store
+// (Store its ID, Shared: every instance on it reports the same one) or all
+// in-memory stores of the process (no Store, not Shared). Counts nil: the
+// store lists workflows but cannot count them.
+type WorkflowCounts struct {
+	Store  string                           `json:"store,omitempty"`
+	Shared bool                             `json:"shared"`
+	Counts map[contract.WorkflowState]int64 `json:"counts,omitempty"`
+}
+
+// ListWorkflowCounts fetches GET /workflow-counts. ok is false, with no
+// error, when the server does not serve the route (an older varmq).
+func (c *Client) ListWorkflowCounts(ctx context.Context) (entries []WorkflowCounts, ok bool, err error) {
+	if err := c.getJSON(ctx, "/workflow-counts", "count workflows", &entries); err != nil {
+		if RouteMissing(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return entries, true, nil
+}
+
 // GetWorkflow fetches GET /workflows/{id}. Errors are *APIError as sent:
 // JSON 404 (no such workflow here), 409 (several storages here hold the
 // ID: see WorkflowAmbiguous), 503; or the router's 404 (RouteMissing).

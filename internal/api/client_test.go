@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -621,5 +622,24 @@ func TestGetWorkerSources(t *testing.T) {
 	srv, _ = recordingServer(t, http.StatusOK, nil, `{"name":"w","status":"Running","concurrency":1,"num_processing":0,"num_pending":0,"num_idle_workers":1,"metrics":{"submitted":3,"completed":0,"successful":0,"failed":0}}`)
 	if w, err := NewClient(srv.URL, "").GetWorkerCtx(context.Background(), "w"); err != nil || w.Strategy != "" || w.Sources != nil {
 		t.Errorf("older varmq: %+v, %v", w, err)
+	}
+}
+
+// A body past maxBody is cut there: an error, not a read of all of it.
+func TestResponseBodyCapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"name":"`)
+		chunk := strings.Repeat("a", 1<<16)
+		for n := 0; n <= maxBody; n += len(chunk) {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `"}]`)
+	}))
+	t.Cleanup(srv.Close)
+	if _, err := NewClient(srv.URL, "").ListWorkers(); err == nil {
+		t.Fatal("oversized body decoded")
 	}
 }

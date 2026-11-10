@@ -121,6 +121,39 @@ func (f *Varmq) workflows(w http.ResponseWriter, r *http.Request) {
 	writeFakeJSON(w, http.StatusOK, recs[min(offset, len(recs)):min(offset+limit, len(recs))])
 }
 
+// workflowCounts answers as varmq's GET /workflow-counts: one entry, every
+// state present.
+func (f *Varmq) workflowCounts(w http.ResponseWriter, r *http.Request) {
+	f.Mu.Lock()
+	all, status := slices.Clone(f.Workflows), f.WorkflowStatus
+	e := api.WorkflowCounts{Store: f.WorkflowStore, Shared: f.WorkflowStore != ""}
+	missing, uncounted, delay := f.NoWorkflowCounts, f.UncountedWorkflows, f.CountsDelay
+	f.Mu.Unlock()
+	select {
+	case <-time.After(delay):
+	case <-r.Context().Done():
+		return
+	}
+	switch {
+	case all == nil || missing:
+		http.NotFound(w, nil)
+		return
+	case status != 0:
+		writeFakeError(w, status, http.StatusText(status))
+		return
+	}
+	if !uncounted {
+		e.Counts = make(map[contract.WorkflowState]int64, len(api.WorkflowStates))
+		for _, s := range api.WorkflowStates {
+			e.Counts[s] = 0
+		}
+		for _, wf := range all {
+			e.Counts[wf.Record().State]++
+		}
+	}
+	writeFakeJSON(w, http.StatusOK, []api.WorkflowCounts{e})
+}
+
 // one is the workflow of r's ID, or false after answering 404 (the router's
 // with no Workflows; JSON when none has the ID) or 409 (several have it).
 func (f *Varmq) one(w http.ResponseWriter, r *http.Request) (*Workflow, bool) {
@@ -188,7 +221,9 @@ const (
 // tests and screenshots: a diamond whose join is always, a running ETL
 // with a long edge, a saga compensated after a failure, and a cancelled
 // report. Their queues are on every backend the pages name: redisq,
-// sqliteq, in-memory and other storage. Each call returns new ones.
+// sqliteq, in-memory and other storage. Tasks that were queued carry
+// their times (contract v0.9.0), undo jobs too; one in flight has no end,
+// one never queued none. Each call returns new ones.
 func SampleWorkflows(now int64) []*Workflow {
 	const (
 		sec    = int64(1000)
@@ -197,6 +232,18 @@ func SampleWorkflows(now int64) []*Workflow {
 	t := func(name, queue string, state contract.JobState, deps ...string) contract.TaskRecord {
 		return contract.TaskRecord{Name: name, QueueID: queue, JobID: name + "-1", State: state, Deps: deps}
 	}
+	// timed sets t's times, ms after its workflow's creation; start or
+	// end 0: not yet
+	timed := func(t *contract.TaskRecord, created, enqueued, started, finished int64) {
+		t.EnqueuedAt = created + enqueued
+		if started > 0 {
+			t.StartedAt = created + started
+		}
+		if finished > 0 {
+			t.FinishedAt = created + finished
+		}
+	}
+	diamondAt, etlAt, sagaAt, reportAt := now-12*minute, now-95*sec, now-31*minute, now-2*60*minute
 	diamond := []contract.TaskRecord{
 		t("fetch-image", "sqliteq:9f86d081:fifo:images", contract.JobCompleted),
 		t("resize", "sqliteq:9f86d081:fifo:images", contract.JobCompleted, "fetch-image"),
@@ -206,6 +253,10 @@ func SampleWorkflows(now int64) []*Workflow {
 	diamond[0].ResultSize, diamond[1].ResultSize = 48213, 9120
 	diamond[2].Reason = "classifier: model not loaded"
 	diamond[3].Always = true
+	timed(&diamond[0], diamondAt, 0, 200, 6400)
+	timed(&diamond[1], diamondAt, 6400, 6500, 31*sec)
+	timed(&diamond[2], diamondAt, 6400, 7900, 9100)
+	timed(&diamond[3], diamondAt, 31*sec, 31200, 38*sec)
 
 	etl := []contract.TaskRecord{
 		t("extract", "redisq:shop:fifo:{etl}", contract.JobCompleted),
@@ -218,6 +269,11 @@ func SampleWorkflows(now int64) []*Workflow {
 	}
 	etl[0].ResultSize, etl[1].ResultSize, etl[3].ResultSize = 1_204_311, 112, 802_144
 	etl[6].Always = true
+	timed(&etl[0], etlAt, 0, 300, 21*sec)
+	timed(&etl[1], etlAt, 21*sec, 21100, 24500)
+	timed(&etl[2], etlAt, 21*sec, 0, 0) // queued still
+	timed(&etl[3], etlAt, 24500, 25*sec, 61*sec)
+	timed(&etl[4], etlAt, 24500, 26*sec, 0) // runs
 
 	saga := []contract.TaskRecord{
 		t("reserve-stock", "redisq:shop:fifo:{inventory}", contract.JobCompleted),
@@ -230,6 +286,11 @@ func SampleWorkflows(now int64) []*Workflow {
 	saga[1].ResultSize = 256
 	saga[2].Reason = "carrier API: 503 Service Unavailable after 3 attempts"
 	saga[3].Reason = "dependency failed"
+	timed(&saga[0], sagaAt, 0, 40, 420)
+	timed(&saga[1], sagaAt, 420, 450, 1900)
+	timed(&saga[2], sagaAt, 1900, 1950, 3100)
+	timed(saga[1].Undo, sagaAt, 3100, 3150, 3900) // undo runs last task first
+	timed(saga[0].Undo, sagaAt, 3900, 3920, 4200)
 
 	report := []contract.TaskRecord{
 		t("gather", "memory:shop-a:fifo:1", contract.JobCompleted),
@@ -240,11 +301,12 @@ func SampleWorkflows(now int64) []*Workflow {
 	for i := 1; i < 4; i++ {
 		report[i].Reason = "workflow cancelled"
 	}
+	timed(&report[0], reportAt, 0, sec, 40*sec)
 
 	return []*Workflow{
-		NewWorkflow(contract.WorkflowRecord{ID: DiamondID, State: contract.WorkflowCompleted, CreatedAt: now - 12*minute, FinishedAt: now - 12*minute + 38*sec, UndoOnCancel: true, Tasks: diamond}),
-		NewWorkflow(contract.WorkflowRecord{ID: RunningID, State: contract.WorkflowRunning, CreatedAt: now - 95*sec, UndoOnCancel: true, Tasks: etl}),
-		NewWorkflow(contract.WorkflowRecord{ID: SagaID, State: contract.WorkflowCompensated, CreatedAt: now - 31*minute, FinishedAt: now - 31*minute + 4200, UndoOnCancel: true, Tasks: saga}),
-		NewWorkflow(contract.WorkflowRecord{ID: CancelID, State: contract.WorkflowCancelled, CreatedAt: now - 2*60*minute, FinishedAt: now - 2*60*minute + 41*sec, Tasks: report}),
+		NewWorkflow(contract.WorkflowRecord{ID: DiamondID, State: contract.WorkflowCompleted, CreatedAt: diamondAt, FinishedAt: diamondAt + 38*sec, UndoOnCancel: true, Tasks: diamond}),
+		NewWorkflow(contract.WorkflowRecord{ID: RunningID, State: contract.WorkflowRunning, CreatedAt: etlAt, UndoOnCancel: true, Tasks: etl}),
+		NewWorkflow(contract.WorkflowRecord{ID: SagaID, State: contract.WorkflowCompensated, CreatedAt: sagaAt, FinishedAt: sagaAt + 4200, UndoOnCancel: true, Tasks: saga}),
+		NewWorkflow(contract.WorkflowRecord{ID: CancelID, State: contract.WorkflowCancelled, CreatedAt: reportAt, FinishedAt: reportAt + 41*sec, Tasks: report}),
 	}
 }

@@ -56,7 +56,16 @@ type Varmq struct {
 	// WorkflowStatus, when non-zero, makes every workflow route reply with
 	// it and {"error":"..."}: storage that cannot be read.
 	WorkflowStatus int
-	received       []string // "METHOD escaped-path" of every request received
+	// WorkflowStore names the durable store that holds Workflows: GET
+	// /workflow-counts answers one shared entry. "": one in-memory entry.
+	WorkflowStore string
+	// NoWorkflowCounts: GET /workflow-counts answers the router's 404, as
+	// varmq before the route. UncountedWorkflows: its entry has no counts.
+	NoWorkflowCounts, UncountedWorkflows bool
+	// CountsDelay holds GET /workflow-counts that long (abandoned if the
+	// client goes away): a slow store.
+	CountsDelay time.Duration
+	received    []string // "METHOD escaped-path" of every request received
 
 	listInFlight, maxListInFlight int // concurrent GET /workers requests
 }
@@ -81,6 +90,7 @@ func NewVarmq(t *testing.T, instance string, workers map[string]*Worker) (*Varmq
 	mux.HandleFunc("PATCH /queues/{id}/jobs/{jobId}/actions/cancel", f.jobCancel)
 	mux.HandleFunc("PATCH /queues/{id}/actions/{action}", f.queueAction)
 	mux.HandleFunc("GET /workflows", f.workflows)
+	mux.HandleFunc("GET /workflow-counts", f.workflowCounts)
 	mux.HandleFunc("GET /workflows/{id}", f.workflow)
 	mux.HandleFunc("PATCH /workflows/{id}/actions/{action}", f.workflowAction)
 

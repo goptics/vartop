@@ -520,9 +520,9 @@ func TestWorkflowsPage(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`<span class="n">3/7</span>`, `<span class="sub">so far</span>`, `<span class="wst s-compensated">compensated</span>`,
+		`<span class="n">3/7</span>`, `<span class="sub">so far</span>`, `<span class="wst s-compensated">rolled back</span>`,
 		"No workflow routes on: instance-", `href="/workflows?server=multi" aria-current="page"><svg`,
-		`<a href="/workflows?server=multi" class="s-all" aria-current="page">`,
+		`<a href="/workflows?server=multi" class="s-all" aria-current="page" aria-label="All">`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("list lacks %q", want)
@@ -538,7 +538,7 @@ func TestWorkflowsPage(t *testing.T) {
 		t.Errorf("compensated list, or its poller:\n%s", body)
 	}
 	_, body = fetch(t, srv, "/workflows?server=multi&state=compensation_failed", false)
-	if !strings.Contains(body, "No compensation failed workflows.") {
+	if !strings.Contains(body, "No workflows whose rollback failed.") {
 		t.Errorf("empty state list:\n%s", visibleText(body))
 	}
 	if _, body = fetch(t, srv, "/workflows?server=multi&offset=2", false); strings.Contains(body, `id="poller"`) || !strings.Contains(body, `rel="prev"`) || !strings.Contains(body, "<span class=\"gap\">3–4</span>") {
@@ -603,7 +603,7 @@ func TestWorkflowPage(t *testing.T) {
 	for _, want := range []string{
 		`hx-get="/workflows/` + fleettest.RunningID + `?server=multi" hx-trigger="every 1s"`,
 		`<h1 class="qid">` + fleettest.RunningID + `</h1>`, "Running for", "refresh every 1s",
-		`<a class="node t-pending live" href="#task-4"`, "Cancel without undo",
+		`<a class="node t-pending live" id="node-4" href="#task-4"`, "Cancel without undo",
 		`<a class="ql" href="/queues/redisq:shop:fifo:%7Betl%7D?server=multi"><span class="qn" title="redisq:shop:fifo:{etl}">`,
 		`<span class="qnm">etl</span> <span class="qkind">FIFO</span></span></a>`, `<text class="meta" x="30" y="42">pending · audit</text>`, `<title>audit-log · redisq:shop:fifo:{audit}</title>`,
 		// a task's job ID links to its job page, in the table and the panel
@@ -1284,5 +1284,65 @@ func TestQueuePageOrderAndEmpty(t *testing.T) {
 	p.Jobs.Total = 0
 	if body := run(t, "queue", "layout", p); !strings.Contains(body, "No pending jobs. New jobs show here until a worker takes them.") {
 		t.Errorf("empty pending list lacks its next step:\n%s", body)
+	}
+}
+
+// Tabs count when every unit counts: in-memory entries summed, "All" their
+// sum, a zero dimmed, each count in the tab's name; the rollback states a
+// group of their own. One unit without counts: no tab counts.
+func TestWorkflowTabsCount(t *testing.T) {
+	_, fakes, _ := workflowFakes(t)
+	srv, _ := newTestServer(t, fakes[0], fakes[1]) // c, an older varmq, left out
+	_, body := fetch(t, srv, "/workflows?server=multi&state=failed", false)
+	for _, want := range []string{
+		`class="s-all" aria-label="All, 7 workflows"><span class="label">All</span><span class="count">7</span></a>`,
+		`class="s-running" aria-label="Running, 2 workflows"><span class="label">Running</span><span class="count">2</span>`,
+		`class="s-failed zero" aria-current="page" aria-label="Failed, 0 workflows"><span class="label">Failed</span><span class="count">0</span>`,
+		`class="s-cancelled" aria-label="Cancelled, 1 workflow">`,
+		`<div class="grp" role="group" aria-label="Rollback"><span class="grp-label" aria-hidden="true">Rollback:</span><a href="/workflows?server=multi&amp;state=compensating" class="s-compensating zero" aria-label="Rollback in progress, 0 workflows"><span class="label">In progress</span>`,
+		`class="s-compensated" aria-label="Rollback done, 2 workflows"><span class="label">Done</span><span class="count">2</span>`,
+		`class="s-compensation-failed zero" aria-label="Rollback failed, 0 workflows"><span class="label">Failed</span>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("tabs lack %q", want)
+		}
+	}
+	// the poll brings the counts with the rows
+	if _, body = fetch(t, srv, "/workflows?server=multi", true); !strings.Contains(body, `<span class="count">7</span>`) {
+		t.Error("the poll's answer has no counts")
+	}
+
+	srv, _ = newTestServer(t, fakes...)
+	if _, body = fetch(t, srv, "/workflows?server=multi", false); strings.Contains(body, `class="count"`) || strings.Contains(body, ` zero"`) ||
+		!strings.Contains(body, `aria-label="Rollback in progress"><span class="label">In progress</span></a>`) {
+		t.Errorf("a unit without counts: tabs show counts")
+	}
+
+	// slow counts: the list comes at the timeout, its tabs without counts
+	defer func(d time.Duration) { countsTimeout = d }(countsTimeout)
+	countsTimeout = 200 * time.Millisecond
+	varmqs, fakes, _ := workflowFakes(t)
+	varmqs[0].Mu.Lock()
+	varmqs[0].CountsDelay = time.Minute
+	varmqs[0].Mu.Unlock()
+	srv, _ = newTestServer(t, fakes[0], fakes[1])
+	start := time.Now()
+	_, body = fetch(t, srv, "/workflows?server=multi", false)
+	if took := time.Since(start); took > 10*time.Second || strings.Contains(body, `class="count"`) || !strings.Contains(body, ">"+fleettest.RunningID+"</a>") {
+		t.Errorf("slow counts: took %v, counts %v, rows %v", took, strings.Contains(body, `class="count"`), strings.Contains(body, ">"+fleettest.RunningID+"</a>"))
+	}
+}
+
+// The empty list reads well in every tab.
+func TestWorkflowsEmptyWords(t *testing.T) {
+	for state, want := range map[contract.WorkflowState]string{
+		"": "No workflows", contract.WorkflowRunning: "No running workflows", contract.WorkflowCompleted: "No completed workflows",
+		contract.WorkflowFailed: "No failed workflows", contract.WorkflowCancelled: "No cancelled workflows",
+		contract.WorkflowCompensating: "No workflows rolling back", contract.WorkflowCompensated: "No workflows rolled back",
+		contract.WorkflowCompensationFailed: "No workflows whose rollback failed",
+	} {
+		if got := (&WorkflowsView{State: state}).Empty(); got != want {
+			t.Errorf("%q: %q, want %q", state, got, want)
+		}
 	}
 }
