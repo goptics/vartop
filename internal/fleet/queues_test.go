@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -657,5 +658,61 @@ func TestFetchAndCancelJobPastFailure(t *testing.T) {
 	}
 	if !slices.Contains(fb.Calls(), "PATCH /queues/memory:x:fifo:1/jobs/ord-1042/actions/cancel") {
 		t.Errorf("b calls %v", fb.Calls())
+	}
+}
+
+// Counts over units: a shared store is counted once (the read with more
+// workflows when two differ), in-memory entries are summed, and one entry
+// without counts, one unit without the route or one that fails leaves no
+// counts at all.
+func TestCountWorkflows(t *testing.T) {
+	n := func(running, completed, failed int64) map[contract.WorkflowState]int64 {
+		return map[contract.WorkflowState]int64{contract.WorkflowRunning: running, contract.WorkflowCompleted: completed, contract.WorkflowFailed: failed}
+	}
+	got, ok := mergeWorkflowCounts([][]api.WorkflowCounts{
+		{{Counts: n(1, 2, 0)}, {Store: "s1", Shared: true, Counts: n(4, 9, 1)}},
+		{{Counts: n(2, 0, 1)}, {Store: "s1", Shared: true, Counts: n(3, 11, 1)}, {Store: "s2", Shared: true, Counts: n(0, 5, 0)}},
+		{}, // an instance with no store
+	})
+	if want := n(1+2+3, 2+11+5, 1+1); !ok || !maps.Equal(got, want) {
+		t.Errorf("merged = %v, ok %v; want %v", got, ok, want)
+	}
+	if got, ok := mergeWorkflowCounts([][]api.WorkflowCounts{{{Counts: n(1, 2, 0)}}, {{Store: "s1", Shared: true}}}); ok || got != nil {
+		t.Errorf("an entry without counts: %v, ok %v", got, ok)
+	}
+
+	wfs := fleettest.SampleWorkflows(1762228800000)
+	fa, a := workflowFake(t, "a", wfs...)
+	fb, b := workflowFake(t, "b", wfs...)
+	clients := []*api.Client{api.NewClient(a.URL, ""), api.NewClient(b.URL, "")}
+	count := func() (map[contract.WorkflowState]int64, bool) { return CountWorkflows(context.Background(), clients) }
+	set := func(f *fleettest.Varmq, change func()) {
+		f.Mu.Lock()
+		change()
+		f.Mu.Unlock()
+	}
+	// in-memory on both: summed
+	if got, ok := count(); !ok || got[contract.WorkflowRunning] != 2 || got[contract.WorkflowCancelled] != 2 || got[contract.WorkflowFailed] != 0 || len(got) != len(api.WorkflowStates) {
+		t.Errorf("in-memory = %v, ok %v", got, ok)
+	}
+	// one durable store both see: once
+	set(fa, func() { fa.WorkflowStore = "3f9a1c0e77b2" })
+	set(fb, func() { fb.WorkflowStore = "3f9a1c0e77b2" })
+	if got, ok := count(); !ok || got[contract.WorkflowRunning] != 1 || got[contract.WorkflowCompensated] != 1 {
+		t.Errorf("shared = %v, ok %v", got, ok)
+	}
+	for name, change := range map[string]func(on bool){
+		"no route":  func(on bool) { fb.NoWorkflowCounts = on },
+		"uncounted": func(on bool) { fb.UncountedWorkflows = on },
+		"failing":   func(on bool) { fb.WorkflowStatus = map[bool]int{true: http.StatusServiceUnavailable}[on] },
+	} {
+		set(fb, func() { change(true) })
+		if got, ok := count(); ok || got != nil {
+			t.Errorf("%s: %v, ok %v; want no counts", name, got, ok)
+		}
+		set(fb, func() { change(false) })
+	}
+	if _, ok := CountWorkflows(context.Background(), nil); ok {
+		t.Error("no client: counts")
 	}
 }

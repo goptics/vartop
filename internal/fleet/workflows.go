@@ -179,6 +179,64 @@ func MergeWorkflows(units []UnitWorkflows, offset, limit int) WorkflowsView {
 	return v
 }
 
+// CountWorkflows asks every client at once for GET /workflow-counts and
+// merges the answers (see mergeWorkflowCounts). ok false: no counts.
+func CountWorkflows(ctx context.Context, clients []*api.Client) (counts map[contract.WorkflowState]int64, ok bool) {
+	reads := make([][]api.WorkflowCounts, len(clients))
+	known := make([]bool, len(clients))
+	var wg sync.WaitGroup
+	for i, c := range clients {
+		wg.Go(func() {
+			entries, ok, err := c.ListWorkflowCounts(ctx)
+			reads[i], known[i] = entries, ok && err == nil
+		})
+	}
+	wg.Wait()
+	if len(clients) == 0 || slices.Contains(known, false) {
+		return nil, false
+	}
+	return mergeWorkflowCounts(reads)
+}
+
+// mergeWorkflowCounts is the workflows per state over the units' entries:
+// a shared store counted once (two reads of one store that differ: the one
+// with more workflows, the later read of a store that only grows), the
+// rest summed. All or nothing: one entry without counts and no number is
+// right, so ok is false.
+func mergeWorkflowCounts(reads [][]api.WorkflowCounts) (map[contract.WorkflowState]int64, bool) {
+	total := func(e api.WorkflowCounts) (n int64) {
+		for _, c := range e.Counts {
+			n += c
+		}
+		return n
+	}
+	shared := map[string]api.WorkflowCounts{}
+	sum := map[contract.WorkflowState]int64{}
+	add := func(e api.WorkflowCounts) {
+		for s, c := range e.Counts {
+			sum[s] += c
+		}
+	}
+	for _, entries := range reads {
+		for _, e := range entries {
+			switch {
+			case e.Counts == nil:
+				return nil, false
+			case !e.Shared || e.Store == "":
+				add(e)
+			default:
+				if old, seen := shared[e.Store]; !seen || total(e) > total(old) {
+					shared[e.Store] = e
+				}
+			}
+		}
+	}
+	for _, e := range shared {
+		add(e)
+	}
+	return sum, true
+}
+
 // WorkflowRead is what the units answered to GET /workflows/{id}: the
 // workflows of that ID (one, but for in-memory ones of several processes),
 // newest first; the units that hold it in several storages (409: nothing
