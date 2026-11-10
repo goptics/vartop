@@ -1,13 +1,16 @@
 package web
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"html"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"regexp"
@@ -275,7 +278,7 @@ func TestMessagesUseNoun(t *testing.T) {
 
 			// The confirmation panel.
 			_, body = post(t, srv, "/bulk/pause", multi("names", "orders", "names", "emails"), true)
-			for _, want := range []string{"pause each worker on each " + one + " below:", `<span class="na">not on this ` + one + `</span>`} {
+			for _, want := range []string{"Pause each worker on each " + one + " below:", `<span class="na">not on this ` + one + `</span>`} {
 				if !strings.Contains(body, want) {
 					t.Errorf("confirm panel lacks %q:\n%s", want, body)
 				}
@@ -565,7 +568,7 @@ func TestInstanceParamResolves(t *testing.T) {
 		`<input type="hidden" name="instance" value="instance-2">`,
 		`href="/?instance=instance-2&amp;server=multi"`,
 		"Instances reporting: <span",
-		`hx-confirm="Stop orders on instance-2 (multi)?"`,
+		"on instance-2</span>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail of instance-2 lacks %q", want)
@@ -1260,14 +1263,14 @@ func TestControlsBehindBalancer(t *testing.T) {
 	if body = html.UnescapeString(body); !strings.Contains(body, note) {
 		t.Errorf("detail of one balanced unit lacks the note %q", note)
 	}
-	for _, control := range []string{">Pause</button>", ">Restart</button>", "/concurrency"} {
+	for _, control := range []string{">Pause</button>", ">Restart…</button>", "/concurrency"} {
 		if strings.Contains(body, control) {
 			t.Errorf("detail of one balanced unit has %q", control)
 		}
 	}
 
 	_, body = fetch(t, srv, "/workers/w?server=multi", false)
-	if !strings.Contains(body, ">Pause</button>") || !strings.Contains(body, "/concurrency") || strings.Contains(body, ">Restart</button>") {
+	if !strings.Contains(body, ">Pause</button>") || !strings.Contains(body, "/concurrency") || strings.Contains(body, ">Restart…</button>") {
 		t.Errorf("merged detail behind a balancer should have controls but no Restart:\n%s", body)
 	}
 	if strings.Contains(html.UnescapeString(body), note) {
@@ -1287,7 +1290,7 @@ func TestControlsBehindBalancer(t *testing.T) {
 	plain, _ := newTestServer(t, aSrv, bSrv)
 	label := fleettest.StaticLabels(aSrv.URL, bSrv.URL)[aSrv.URL]
 	for _, path := range []string{"/workers/orders?server=multi", "/workers/orders?server=multi&instance=" + label} {
-		if _, body := fetch(t, plain, path, false); !strings.Contains(body, ">Restart</button>") {
+		if _, body := fetch(t, plain, path, false); !strings.Contains(body, ">Restart…</button>") {
 			t.Errorf("GET %s on a server without balancers lacks Restart", path)
 		}
 	}
@@ -1318,4 +1321,220 @@ func TestFillMarksBalancedScope(t *testing.T) {
 			t.Errorf("pod %q: ScopeBalanced %v OneBalanced %v, want %v %v", tc.pod, p.ScopeBalanced, p.OneBalanced, tc.scope, tc.oneBal)
 		}
 	}
+}
+
+// The dashboard ranks trouble: a failing worker first, then a paused one
+// with a backlog, then the rest. ?sort= orders by one column; the poll, an
+// action's refresh and the grid keep the order.
+func TestDashboardRanksTrouble(t *testing.T) {
+	fa, aSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{
+		"alpha":  {Status: "Running", Concurrency: 2},
+		"mailer": {Status: "Paused", Concurrency: 2, Pending: 50},
+		"zeta":   {Status: "Running", Concurrency: 2, Pending: 5},
+	})
+	srv, f := newTestServer(t, aSrv)
+	order := func(body string) string {
+		names := []string{"alpha", "mailer", "zeta"}
+		slices.SortFunc(names, func(a, b string) int {
+			return strings.Index(body, `id="link-`+fleet.DOMID(a)+`"`) - strings.Index(body, `id="link-`+fleet.DOMID(b)+`"`)
+		})
+		return strings.Join(names, " ")
+	}
+	check := func(path, want string, has ...string) {
+		t.Helper()
+		_, body := fetch(t, srv, path, false)
+		if got := order(body); got != want {
+			t.Errorf("%s: rows %s, want %s", path, got, want)
+		}
+		for _, h := range has {
+			if !strings.Contains(body, h) {
+				t.Errorf("%s lacks %s", path, h)
+			}
+		}
+	}
+	check("/", "mailer zeta alpha", `hx-get="/?server=multi"`)
+
+	fa.Mu.Lock()
+	fa.Workers["zeta"].Failed += 9
+	fa.Mu.Unlock()
+	f.waitFor("multi", "zeta's failed rate", func(s *fleet.Snapshot) bool {
+		sm := s.Pods[0].Workers["zeta"]
+		return sm != nil && sm.RateOK && sm.FailedRate > 0
+	})
+	check("/", "zeta mailer alpha", `<td class="num fails hot"`)
+	check("/?sort=bogus", "zeta mailer alpha", `hx-get="/?server=multi"`)
+	check("/?sort=name", "alpha mailer zeta", `hx-get="/?server=multi&amp;sort=name"`, `aria-sort="ascending"`)
+	check("/?sort=pending", "mailer zeta alpha", `hx-get="/?server=multi&amp;sort=pending"`)
+	check("/?sort=failed", "zeta alpha mailer")
+	check("/grid", "zeta mailer alpha")
+
+	req := postRequest(t, srv, "/workers/alpha/actions/pause", multi())
+	req.Header.Set("HX-Current-URL", srv.URL+"/?server=multi&sort=name")
+	_, body := send(t, srv, req)
+	if live := liveOOB(body); order(live) != "alpha mailer zeta" || !strings.Contains(live, `aria-sort="ascending"`) {
+		t.Errorf("an action's refresh lost ?sort=name: rows %s", order(live))
+	}
+}
+
+// poll GETs path from srv as the page's poller does: an htmx request that
+// sends back the hash pair it has seen, if any. Extra headers go as pairs.
+func poll(t *testing.T, srv *httptest.Server, path, seen string, headers ...string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("HX-Request", "true")
+	if seen != "" {
+		req.Header.Set(seenHeader, seen)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	return send(t, srv, req)
+}
+
+// TestPollSkipsUnchangedPage: a poll that sends back the hash pair of the
+// page it shows gets 204 while nothing changed, the status and banner alone
+// (HX-Reswap none) while only they changed, and the page once #live did. A
+// plain GET is never held back.
+func TestPollSkipsUnchangedPage(t *testing.T) {
+	f := dayFixture(t)
+	const path = "/?server=multi"
+
+	resp, body := poll(t, f.srv, path, "")
+	pair := resp.Header.Get(seenHeader)
+	if resp.StatusCode != 200 || !strings.Contains(body, `<div id="live">`) || !regexp.MustCompile(`^[0-9a-f]{12}-[0-9a-f]{12}$`).MatchString(pair) {
+		t.Fatalf("first poll = %d, %s %q, want the page and its hash pair", resp.StatusCode, seenHeader, pair)
+	}
+	if !strings.Contains(body, `<script src="/static/app.js" defer></script>`) {
+		t.Error("page lacks app.js, which sends the pair back")
+	}
+
+	resp, body = poll(t, f.srv, path, pair)
+	if resp.StatusCode != http.StatusNoContent || body != "" || resp.Header.Get(seenHeader) != pair {
+		t.Errorf("poll of an unchanged page = %d, %d bytes, %s %q, want 204, empty, the same pair", resp.StatusCode, len(body), seenHeader, resp.Header.Get(seenHeader))
+	}
+
+	live, _, _ := strings.Cut(pair, "-")
+	resp, body = poll(t, f.srv, path, live+"-000000000000")
+	if resp.StatusCode != 200 || resp.Header.Get("HX-Reswap") != "none" || resp.Header.Get(seenHeader) != pair {
+		t.Errorf("poll with only the status changed = %d, HX-Reswap %q, want 200, none", resp.StatusCode, resp.Header.Get("HX-Reswap"))
+	}
+	if !strings.Contains(body, `<div id="status">`) || !strings.Contains(body, `<div id="banner"`) || strings.Contains(body, `id="live"`) || strings.Contains(body, "<html") {
+		t.Errorf("poll with only the status changed: want #banner and #status alone, got:\n%s", body)
+	}
+
+	a, b := f.cfg.Servers["multi"].Endpoints[0], f.cfg.Servers["multi"].Endpoints[1]
+	f.write("multi", ordersAt(time.Now().Add(time.Second), a, b, 7, 3))
+	resp, body = poll(t, f.srv, path, pair)
+	if resp.StatusCode != 200 || !strings.Contains(body, `<div id="live">`) || resp.Header.Get("HX-Reswap") != "" || resp.Header.Get(seenHeader) == pair {
+		t.Errorf("poll after a new snapshot = %d, HX-Reswap %q, %s %q: want the page, a new pair", resp.StatusCode, resp.Header.Get("HX-Reswap"), seenHeader, resp.Header.Get(seenHeader))
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, f.srv.URL+path, nil)
+	req.Header.Set(seenHeader, resp.Header.Get(seenHeader))
+	if resp, body := send(t, f.srv, req); resp.StatusCode != 200 || !strings.Contains(body, "<html") {
+		t.Errorf("plain GET with a pair = %d, want the page: only htmx polls are spared", resp.StatusCode)
+	}
+}
+
+// TestStaticCachedAndGzipped: static files carry an ETag and no-cache, and
+// answer 304 to it; text of 1 KB and up goes gzipped to a client that
+// accepts it, with Vary; a small file and a 204 do not.
+func TestStaticCachedAndGzipped(t *testing.T) {
+	f := dayFixture(t)
+	get := func(path string, headers ...string) (*http.Response, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, f.srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(headers); i += 2 {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+		return send(t, f.srv, req)
+	}
+	gunzip := func(body string) string {
+		t.Helper()
+		zr, err := gzip.NewReader(strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("not gzip: %v", err)
+		}
+		plain, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatalf("gunzip: %v", err)
+		}
+		return string(plain)
+	}
+
+	css, _ := assets.ReadFile("static/app.css")
+	resp, body := get("/static/app.css", "Accept-Encoding", "gzip")
+	tag := resp.Header.Get("ETag")
+	if resp.StatusCode != 200 || tag == "" || resp.Header.Get("Cache-Control") != "no-cache" {
+		t.Errorf("app.css = %d, ETag %q, Cache-Control %q, want 200, a tag, no-cache", resp.StatusCode, tag, resp.Header.Get("Cache-Control"))
+	}
+	if resp.Header.Get("Content-Encoding") != "gzip" || resp.Header.Get("Vary") != "Accept-Encoding" || len(body) >= len(css)/2 {
+		t.Errorf("app.css: Content-Encoding %q, Vary %q, %d of %d bytes, want gzip, Accept-Encoding, under half", resp.Header.Get("Content-Encoding"), resp.Header.Get("Vary"), len(body), len(css))
+	} else if gunzip(body) != string(css) {
+		t.Error("app.css: gunzipped body is not the embedded file")
+	}
+	if resp, body := get("/static/app.css"); resp.Header.Get("ETag") != tag || body != string(css) {
+		t.Error("app.css without Accept-Encoding: want the same tag and the plain file")
+	}
+	if resp, body := get("/static/app.css", "If-None-Match", tag); resp.StatusCode != http.StatusNotModified || body != "" {
+		t.Errorf("app.css with its ETag = %d, %d bytes, want 304, empty", resp.StatusCode, len(body))
+	}
+
+	resp, body = get("/static/favicon.svg", "Accept-Encoding", "gzip")
+	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/svg+xml") || resp.Header.Get("Content-Encoding") != "" || !strings.Contains(body, "<svg") {
+		t.Errorf("favicon = %d, %q, Content-Encoding %q: want 200, svg, plain (under 1 KB)", resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Encoding"))
+	}
+
+	resp, body = get("/?server=multi", "Accept-Encoding", "gzip")
+	if resp.Header.Get("Content-Encoding") != "gzip" || resp.Header.Get("Vary") != "Accept-Encoding" {
+		t.Fatalf("page: Content-Encoding %q, Vary %q, want gzip, Accept-Encoding", resp.Header.Get("Content-Encoding"), resp.Header.Get("Vary"))
+	}
+	if page := gunzip(body); !strings.Contains(page, `<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">`) || !strings.Contains(page, "</html>") {
+		t.Error("page: gunzipped body is not the whole page with its favicon link")
+	}
+
+	first, _ := poll(t, f.srv, "/?server=multi", "")
+	resp, body = poll(t, f.srv, "/?server=multi", first.Header.Get(seenHeader), "Accept-Encoding", "gzip")
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Content-Encoding") != "" || body != "" {
+		t.Errorf("unchanged poll, gzip accepted = %d, Content-Encoding %q, want 204, none", resp.StatusCode, resp.Header.Get("Content-Encoding"))
+	}
+}
+
+// TestWorkerPageBoundsQueuesRead: one instance whose GET /queues hangs must
+// not hold the worker page for the client timeout. The read stops at 2s; the
+// sources render with no state.
+func TestWorkerPageBoundsQueuesRead(t *testing.T) {
+	_, good := fleettest.NewVarmq(t, "a", fleettest.SourceWorkers("redisq:shop:fifo:{orders}", "sqliteq:9f86d081:fifo:images", "memory:a:fifo:1"))
+	_, real := fleettest.NewVarmq(t, "b", fleettest.SourceWorkers("redisq:shop:fifo:{orders}", "sqliteq:9f86d081:fifo:images", "memory:a:fifo:1"))
+	proxy := httputil.NewSingleHostReverseProxy(mustURL(t, real.URL))
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/queues" {
+			<-r.Context().Done()
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(hang.Close)
+	srv, _ := newTestServer(t, good, hang)
+
+	start := time.Now()
+	status, body := fetch(t, srv, "/workers/orders?server=multi", false)
+	if took := time.Since(start); status != http.StatusOK || took > 5*time.Second || !strings.Contains(body, `id="src-head"`) {
+		t.Errorf("worker page with one hung /queues = %d in %v, want 200 under 5s with the sources:\n%s", status, took, body)
+	}
+}
+
+func mustURL(t *testing.T, s string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }

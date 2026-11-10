@@ -81,14 +81,14 @@ func TestQueuesPage(t *testing.T) {
 	labels := fleettest.StaticLabels(fakes[0].URL, fakes[1].URL, fakes[2].URL)
 	la, lab := labels[fakes[0].URL], slices.Sorted(slices.Values([]string{labels[fakes[0].URL], labels[fakes[1].URL]}))
 	for _, want := range []string{
-		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"><span class="qn" title="redisq:fifo:{tenant/orders}"><svg class="sico"`,
+		`<a href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi" id="q-` + fleet.DOMID(tenantID) + `"><span class="qn" title="redisq:fifo:{tenant/orders}"><svg class="sico"`,
 		`<span class="sr">Redis: </span>`, `<th scope="col">Namespace</th>`, `<td data-label="Namespace"><span class="na">—</span></td>`,
 		`<span class="sr">In memory: </span><span class="qnm">emails #7</span> <span class="qkind">FIFO</span>`, // its worker's name
 		`<td data-label="Namespace">shop</td>`,
 		// the workers consuming it, by queue_ids; none: the instances
 		`<th scope="col">Workers</th>`,
-		`<a class="chip wchip" href="/workers/orders?server=multi" title="runs on ` + strings.Join(lab, ", ") + `">orders</a>`,
-		`<a class="chip wchip" href="/workers/emails?server=multi" title="runs on ` + la + `">emails</a>`,
+		`<a class="chip wchip" href="/workers/orders?server=multi" title="runs on ` + strings.Join(lab, ", ") + `" id="on-` + fleet.DOMID(tenantID+" orders") + `">orders</a>`,
+		`<a class="chip wchip" href="/workers/emails?server=multi" title="runs on ` + la + `" id="on-` + fleet.DOMID(mem+" emails") + `">emails</a>`,
 		`<td class="on" data-label="Workers"><span class="sub">instances</span> <span class="chip">` + la + `</span></td>`,
 	} {
 		if !strings.Contains(body, want) {
@@ -116,7 +116,7 @@ func TestQueuesPage(t *testing.T) {
 		}
 	}
 	// the cell, not the page text: the page's clock may hold a "20"
-	if !strings.Contains(body, `data-label="Submitted (total)">10</td>`) {
+	if !strings.Contains(body, `data-label="Submitted (all time)">10</td>`) {
 		t.Errorf("GET /queues summed the shared queue:\n%s", text)
 	}
 	if !strings.Contains(body, `href="/queues/redisq:fifo:%7Btenant%2Forders%7D?server=multi"`) {
@@ -146,7 +146,7 @@ func TestQueueJobsPage(t *testing.T) {
 		"<title>tenant/orders · multi</title>",
 		// a and b's orders consume it; c, an older varmq, says nothing
 		`<h2 class="section" id="qworkers-head">Workers on this queue</h2>`,
-		`<th scope="row" class="name"><a href="/workers/orders?server=multi">orders</a></th><td data-label="Status"><span class="status active">Running</span></td><td class="num" data-label="Concurrency">4</td>`,
+		`<th scope="row" class="name"><a href="/workers/orders?server=multi">orders</a></th><td data-label="Status"><span class="status active">running</span></td><td class="num" data-label="Concurrency">4</td>`,
 		"order-42", "2 attempts",
 		`<span class="preview err">out of stock</span>`, // list line: the final error
 		"1–1 of 1",
@@ -192,7 +192,7 @@ func TestQueueJobsPage(t *testing.T) {
 	}
 	// the worker page links back, by name
 	_, body = fetch(t, srv, "/workers/orders?server=multi", false)
-	if !strings.Contains(body, `<li><a class="srcn" href="`+tenantPath+`?server=multi"><span class="qn" title="`+tenantID+`">`) || !strings.Contains(body, "From <code>queue_ids</code>") {
+	if !strings.Contains(body, `<li><a class="srcn" href="`+tenantPath+`?server=multi" aria-label="tenant/orders, FIFO, 2 pending"><span class="qn" title="`+tenantID+`">`) || !strings.Contains(body, "From <code>queue_ids</code>") {
 		t.Errorf("worker page lacks its queue:\n%s", body)
 	}
 	urls := []string{fakes[0].URL, fakes[1].URL, fakes[2].URL}
@@ -280,7 +280,7 @@ func TestQueuePauseResume(t *testing.T) {
 	}
 
 	resp, body := post(t, srv, esc+"/actions/pause", multi(), true)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `Confirm pause of queue <span class="qn" title="`+tenantID+`">`) || !strings.Contains(body, tenantName) ||
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `Pause queue <span class="qn" title="`+tenantID+`">`) || !strings.Contains(body, tenantName) ||
 		!strings.Contains(body, "also ones that serve no API") || !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) {
 		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
 	}
@@ -956,9 +956,9 @@ func TestJobPage(t *testing.T) {
 	// the list links each ID to its page; not "." (a browser drops it)
 	_, body = fetch(t, srv, tenantPath+"?server=multi", false)
 	for _, want := range []string{
-		`<a class="id" href="` + tenantPath + `/jobs/ord-1042?server=multi">ord-1042</a>`,
-		`<a class="id" href="` + tenantPath + `/jobs/a%2Fb%7Bc%7D?server=multi">a/b{c}</a>`,
-		`<span class="id">.</span>`,
+		`<a class="id" href="` + tenantPath + `/jobs/ord-1042?server=multi" title="ord-1042">ord-1042</a>`,
+		`<a class="id" href="` + tenantPath + `/jobs/a%2Fb%7Bc%7D?server=multi" title="a/b{c}">a/b{c}</a>`,
+		`<span class="id" title=".">.</span>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("queue list lacks %q", want)
@@ -1117,14 +1117,14 @@ func TestWorkerSourcesPage(t *testing.T) {
 
 	_, body := fetch(t, srv, "/workers/orders?server=multi", false)
 	var order []string
-	for _, m := range regexp.MustCompile(`<li><a class="srcn" href="([^"]+)"><span class="qn" title="[^"]+"><svg class="sico"[^>]*><path d="[^"]{0,12}[^"]*"/></svg><span class="sr">([^<]+)</span>`).FindAllStringSubmatch(body, -1) {
+	for _, m := range regexp.MustCompile(`<li><a class="srcn" href="([^"]+)" aria-label="[^"]+"><span class="qn" title="[^"]+"><svg class="sico"[^>]*><path d="[^"]{0,12}[^"]*"/></svg><span class="sr">([^<]+)</span>`).FindAllStringSubmatch(body, -1) {
 		order = append(order, m[1]+" "+m[2])
 	}
 	if want := []string{esc(redis) + " Redis: ", esc(sqlite) + " SQLite: ", esc(memory) + " In memory: ", esc(extra) + " Redis: "}; !slices.Equal(order, want) {
 		t.Errorf("source nodes = %q, want %q", order, want)
 	}
 	for _, want := range []string{
-		`<h2 class="section" id="src-head">Sources <span class="sub">4, by priority; the strategy picks among them</span></h2>`,
+		`<h2 class="section" id="src-head">Sources <span class="sub">4, in the worker's order; the strategy picks among them</span></h2>`,
 		`<span class="qnm">orders</span> <span class="qkind">FIFO</span></span><span class="prio" title="bind priority: lower picks first">p 1</span></a>`,
 		`<span class="prio" title="bind priority: lower picks first">p 5</span>`,
 		`<span class="qnm">orders #1</span>`, // in-memory: named by its worker
@@ -1213,5 +1213,76 @@ func TestWorkerChipsSkipsDownPod(t *testing.T) {
 	got := workerChips(snap(viewT0, okPod("http://a", map[string]*fleet.Sample{"new": up}), down), "dev")
 	if len(got["q"]) != 1 || got["q"][0].Name != "new" {
 		t.Errorf("chips = %+v, want only new", got["q"])
+	}
+}
+
+// TestSourceStateAndCut: a source node says its queue's live state
+// (paused, empty, N pending; none when not read), cuts a long name in the
+// middle and keeps the whole one in its accessible name.
+func TestSourceStateAndCut(t *testing.T) {
+	long := "redisq:fifo:{tenant-eu-west-1-orders-priority-retry}"
+	ids := []string{"redisq:fifo:{a}", "redisq:fifo:{b}", "redisq:fifo:{c}", long}
+	yes := true
+	q := func(id string, pending int64, paused *bool) fleet.QueueGroup {
+		return fleet.QueueGroup{QueueSummary: api.QueueSummary{ID: id, Counts: &contract.JobCounts{Pending: pending}, Paused: paused}}
+	}
+	v := fleet.QueuesView{Groups: []fleet.QueueGroup{q(ids[0], 1840, nil), q(ids[1], 0, nil), q(ids[2], 5, &yes)}}
+	slices.SortFunc(v.Groups, func(a, b fleet.QueueGroup) int { return strings.Compare(a.ID, b.ID) })
+	p := Page{Server: "s", Detail: &fleet.DetailView{Name: "w", QueueIDs: ids}, srcq: &v}
+	src := p.WorkerSources()
+	for i, want := range []string{"1840 pending", "empty", "paused", ""} {
+		if got := src.Nodes[i].State; got != want {
+			t.Errorf("node %d state = %q, want %q", i, got, want)
+		}
+	}
+	n := src.Nodes[3]
+	if r := []rune(n.Queue.Name); len(r) != srcNameMax || !strings.Contains(n.Queue.Name, "…") || !strings.HasPrefix(n.Queue.Name, "tenant") || !strings.HasSuffix(n.Queue.Name, "retry") {
+		t.Errorf("cut name = %q", n.Queue.Name)
+	}
+	if n.Full != "tenant-eu-west-1-orders-priority-retry" || !strings.HasPrefix(n.Aria(), n.Full+", FIFO") {
+		t.Errorf("full = %q, aria = %q", n.Full, n.Aria())
+	}
+	if got := midCut("short", 28); got != "short" {
+		t.Errorf("midCut(short) = %q", got)
+	}
+
+	body := run(t, "detail", "layout", p)
+	for _, want := range []string{
+		`aria-label="a, FIFO, 1840 pending"`, `<span class="srcst">1840 pending</span>`,
+		`<span class="srcst">empty</span>`, `<span class="status paused">paused</span>`,
+		`<ol class="srcs" aria-label="Sources of w, in the worker's order">`,
+		"4, in the worker's order",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("sources lack %q", want)
+		}
+	}
+}
+
+// TestQueuePageOrderAndEmpty: an in-memory queue's name carries its
+// instance; the job list comes before the workers table; an empty list
+// under a non-zero count says so, not "No pending jobs".
+func TestQueuePageOrderAndEmpty(t *testing.T) {
+	if q := parseQueueID("memory:shop-a:fifo:1"); q.Inst != "shop-a" {
+		t.Errorf("memory queue instance = %q, want shop-a", q.Inst)
+	}
+	if body := run(t, "queues", "qname", parseQueueID("memory:shop-a:fifo:1")); !strings.Contains(body, `<span class="qkind">FIFO</span> <span class="qinst">on shop-a</span>`) {
+		t.Errorf("qname lacks the instance:\n%s", body)
+	}
+	id := "redisq:fifo:{emails}"
+	p := Page{Server: "s", Noun: instanceNoun, Jobs: &JobsView{
+		Queue: fleet.QueueGroup{QueueSummary: api.QueueSummary{ID: id}}, State: contract.JobPending, Total: 1840,
+		Workers: []QueueWorker{{Unit: "i-1", Name: "mailer", URL: "/workers/mailer", Status: "Paused", Class: "paused"}},
+	}}
+	body := run(t, "queue", "layout", p)
+	if !strings.Contains(body, "The count says 1840 pending, but no instance listed any") || strings.Contains(body, "No pending jobs") {
+		t.Errorf("empty list under a count:\n%s", body)
+	}
+	if strings.Index(body, `class="states"`) > strings.Index(body, `id="qworkers-head"`) {
+		t.Error("the workers table comes before the job list")
+	}
+	p.Jobs.Total = 0
+	if body := run(t, "queue", "layout", p); !strings.Contains(body, "No pending jobs. New jobs show here until a worker takes them.") {
+		t.Errorf("empty pending list lacks its next step:\n%s", body)
 	}
 }

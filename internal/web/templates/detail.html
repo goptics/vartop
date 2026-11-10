@@ -5,7 +5,7 @@
 {{define "live_body"}}{{with .Detail}}
 <div class="detail-head">
   <h1>{{.Name}}</h1>
-  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{end}}
+  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{word .Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{end}}
 </div>
 <section class="counters" aria-label="Counters">{{if $.Stale}}
   <div class="card"><h2>Completed</h2><p class="big">—</p></div>
@@ -18,10 +18,10 @@
   <div class="card"><h2>Success rate</h2><p class="big">{{.SuccessRate}}</p></div>{{end}}
 </section>
 {{with $.WorkerSources}}{{$n := len .Nodes}}<section class="sources" aria-labelledby="src-head">
-<h2 class="section" id="src-head">Sources <span class="sub">{{if gt $n 1}}{{$n}}, by priority; the strategy picks among them{{else}}what the worker pulls from{{end}}</span></h2>
+<h2 class="section" id="src-head">Sources <span class="sub">{{if gt $n 1}}{{$n}}, in the worker's order; the strategy picks among them{{else}}what the worker pulls from{{end}}</span></h2>
 <div class="fan">
-  <ol class="srcs">{{range .Nodes}}
-    <li>{{if .URL}}<a class="srcn" href="{{.URL}}">{{template "qname" .Queue}}{{template "prio" .}}</a>{{else}}<span class="srcn">{{if eq .Kind "topic"}}{{template "topic_icon"}}<span class="qnm">topic</span>{{else if eq .Kind "queue"}}<span class="qnm none">custom storage</span>{{else}}<span class="qnm">{{.Kind}}</span>{{end}}{{template "prio" .}}</span>{{end}}</li>{{end}}
+  <ol class="srcs" aria-label="Sources of {{$.Detail.Name}}, in the worker's order">{{range .Nodes}}
+    <li>{{if .URL}}<a class="srcn" href="{{.URL}}" aria-label="{{.Aria}}">{{template "qname" .Queue}}{{template "prio" .}}{{with .State}}{{if eq . "paused"}}<span class="status paused">paused</span>{{else}}<span class="srcst">{{.}}</span>{{end}}{{end}}</a>{{else}}<span class="srcn">{{if eq .Kind "topic"}}{{template "topic_icon"}}<span class="qnm">topic</span>{{else if eq .Kind "queue"}}<span class="qnm none">custom storage</span>{{else}}<span class="qnm">{{.Kind}}</span>{{end}}{{template "prio" .}}</span>{{end}}</li>{{end}}
   </ol>
   <div class="link" aria-hidden="true"></div>
   <div class="wnode"><span class="nm"><span class="status {{$.Detail.Class}}"></span>{{$.Detail.Name}}</span>{{with .Label}}<small>{{.}}</small>{{end}}</div>
@@ -50,26 +50,22 @@
 {{if $.OneBalanced}}<p class="note">{{oneBalanced}}</p>
 {{else}}<section class="controls" aria-label="Controls">
   <h2>Concurrency <span class="sub">per {{$.Noun.One}}, on {{$.Scope}}</span></h2>
-  <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-trigger="change delay:600ms" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
-    {{template "server_field" $}}
-    {{template "label_field" $}}
-    <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}">
-    <span class="sub">1 – {{.ConcurrencyMax}}, applied once it stops moving</span>
-  </form>
   <form class="conc" hx-post="/workers/{{$name}}/concurrency" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
     {{template "label_field" $}}
+    <input type="range" name="n" min="1" max="{{.ConcurrencyMax}}" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}">
     <input type="number" name="n" min="1" value="{{.ConcurrencyStart}}" aria-label="Concurrency per {{$.Noun.One}}, exact">
     <button type="submit">Set</button>
+    <span class="sub">Slider 1 – {{.ConcurrencyMax}}, any number in the box; nothing changes until Set</span>
   </form>
   <h2>Actions <span class="sub">on {{$.Scope}}</span></h2>
   <form class="actions" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" $}}
     {{template "label_field" $}}
-    <button type="button" hx-post="/workers/{{$name}}/actions/pause">Pause</button>
-    <button type="button" hx-post="/workers/{{$name}}/actions/resume">Resume</button>
-    {{if not $.ScopeBalanced}}<button type="button" class="warn" hx-post="/workers/{{$name}}/actions/restart" hx-confirm="Restart {{.Name}} on {{$.Scope}} ({{$.Server}})?">Restart</button>
-    {{end}}<button type="button" class="danger" hx-post="/workers/{{$name}}/actions/stop" hx-confirm="Stop {{.Name}} on {{$.Scope}} ({{$.Server}})?">Stop</button>
+    <button type="button" class="act-pause" hx-post="/workers/{{$name}}/actions/pause">Pause</button>
+    <button type="button" class="act-resume" hx-post="/workers/{{$name}}/actions/resume">Resume</button>
+    {{if not $.ScopeBalanced}}<button type="button" class="warn" hx-post="/workers/{{$name}}/actions/restart">Restart…</button>
+    {{end}}<button type="button" class="danger act-stop" hx-post="/workers/{{$name}}/actions/stop">Stop…</button>
   </form>
 </section>{{end}}{{end}}
 <div id="results" aria-live="polite"></div>

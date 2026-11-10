@@ -520,6 +520,7 @@ type QueueName struct {
 	Name    string
 	Kind    string // FIFO, Priority; "" when the ID says neither
 	NS      string // the redisq namespace, "" for none
+	Inst    string // memory: the instance the queue lives in, from its ID
 	n       string // memory: the queue's number in its process
 }
 
@@ -567,7 +568,7 @@ func parseQueueID(id string) QueueName {
 		if inst == "" {
 			return q
 		}
-		q.Backend, q.n = "memory", rest[i+1:]
+		q.Backend, q.n, q.Inst = "memory", rest[i+1:], inst
 		q.Name = "in-memory #" + q.n
 	}
 	return q

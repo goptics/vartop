@@ -5,6 +5,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -88,7 +89,7 @@ type Source struct {
 // handler serves the pages of every configured server from the store.
 // Pages only read it; only the POST routes in actions.go, queues.go (queue
 // pause and resume), job.go (job cancel) and workflows.go (workflow cancel)
-// call varmq, and the queue, job and workflow pages, which read it live.
+// call varmq, and the worker, queue, job and workflow pages, which read it live.
 type handler struct {
 	src   Source
 	tmpl  map[string]*template.Template
@@ -136,7 +137,7 @@ func (h *handler) routes(hosts []string) http.Handler {
 	mux.HandleFunc("GET /queues/{id}/jobs/{jobId}", h.job)
 	mux.HandleFunc("GET /workflows", h.workflows)
 	mux.HandleFunc("GET /workflows/{id}", h.workflow)
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", staticFiles(static)))
 	mux.HandleFunc("POST /workers/{name}/actions/{action}", h.action)
 	mux.HandleFunc("POST /workers/{name}/concurrency", h.concurrency)
 	mux.HandleFunc("POST /bulk/{action}", h.bulk)
@@ -144,7 +145,7 @@ func (h *handler) routes(hosts []string) http.Handler {
 	mux.HandleFunc("POST /queues/{id}/jobs/{jobId}/actions/{action}", h.jobAction)
 	mux.HandleFunc("POST /workflows/{id}/actions/{action}", h.workflowAction)
 
-	return denyFraming(allowHosts(hosts, http.NewCrossOriginProtection().Handler(requireHTMX(recoverPanics(h.logf, mux)))))
+	return denyFraming(allowHosts(hosts, http.NewCrossOriginProtection().Handler(requireHTMX(gzipped(skipUnchanged(recoverPanics(h.logf, mux)))))))
 }
 
 // close closes the server files h reads.
@@ -243,8 +244,12 @@ func goneLabelMsg(label string, n fleet.Noun) string {
 func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p, snaps, ok := h.page(r)
 	p.Title = pageTitle("vartop", p.Server)
+	if p.Sort = sortParam(r.FormValue("sort")); p.Sort != "" {
+		p.SelfURL = p.SortURL(p.Sort) // the poll keeps the order
+	}
 	if ok && !podGone(&p, snaps) {
 		d := fleet.BuildDashboard(snaps, p.Pod, 0, p.Noun)
+		d.Sort(p.Sort)
 		p.Dashboard = &d
 		podDown(&p, snaps) // its banner stands in for "No workers reported yet."
 	}
@@ -256,6 +261,10 @@ func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 	p.Title = pageTitle(p.Noun.Cap()+" grid", p.Server)
 	if ok {
 		g := fleet.BuildGrid(latestOf(snaps))
+		// ponytail: builds the whole dashboard for its row order; a rows-only builder if the grid gets slow
+		d := fleet.BuildDashboard(snaps, "", 0, p.Noun)
+		d.Sort(fleet.SortAttention)
+		g.Order(d.Rows) // trouble first, as the dashboard
 		p.Grid = &g
 	}
 	p.Pods = nil // the grid shows every unit: no unit select
@@ -278,6 +287,17 @@ func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 		} else if d, found := fleet.BuildDetail(snaps, p.Pod, name, 0, p.Noun); found {
 			slices.SortFunc(d.QueueIDs, p.cmpQName) // by name, as the line shows them
 			p.Detail = &d
+			if len(d.Sources) > 0 || len(d.QueueIDs) > 0 {
+				// The sources' pending and paused, read as the queue list
+				// reads them; a failed read shows none, says nothing.
+				// ponytail: one queue read per instance per poll, as /queues; cache per snapshot if it weighs
+				// Bounded to 2s: one hung instance must not hold the page (and every poll) for the client timeout.
+				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+				defer cancel()
+				if v, read := h.readQueues(r.WithContext(ctx), new(p), snaps); read {
+					p.srcq = &v
+				}
+			}
 			h.dayCharts(&p, h.feeds.get(p.Server, p.Interval(), time.Now()), name, latestOf(snaps).At)
 		} else {
 			where := "any " + p.Noun.One

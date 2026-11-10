@@ -437,8 +437,8 @@ func TestDashboardRenders(t *testing.T) {
 	if strings.Contains(body, "<script>x") {
 		t.Error("worker name was not escaped")
 	}
-	if n := strings.Count(body, "<script"); n != 1 {
-		t.Errorf("<script occurrences = %d, want exactly the htmx include", n)
+	if n := strings.Count(body, "<script"); n != 2 {
+		t.Errorf("<script occurrences = %d, want exactly the htmx and app.js includes", n)
 	}
 	for _, bad := range []string{"onclick=", "onchange=", "oninput="} {
 		if strings.Contains(body, bad) {
@@ -708,11 +708,9 @@ func TestDetailRenders(t *testing.T) {
 		`hx-post="/workers/a%2Fb%20c/actions/resume"`,
 		`hx-post="/workers/a%2Fb%20c/actions/restart"`,
 		`hx-post="/workers/a%2Fb%20c/actions/stop"`,
-		`hx-confirm="Stop a/b c on all pods (dev)?"`,
-		`hx-confirm="Restart a/b c on all pods (dev)?"`,
 		`hx-post="/workers/a%2Fb%20c/concurrency"`,
 		`type="range"`, `max="64"`, `min="1"`, `name="n"`, `type="number"`,
-		`hx-trigger="change delay:600ms"`, // keys fire change per step: one write per pause
+		`<button type="submit">Set</button>`, // only Set applies a concurrency
 		`hx-sync="#page:replace"`,
 		`id="results"`,
 		`name="pod" value=""`,
@@ -722,10 +720,10 @@ func TestDetailRenders(t *testing.T) {
 		}
 	}
 
-	// Scope names the selected pod, in the confirm text and the pod field.
+	// Scope names the selected pod, in the heading and the pod field.
 	p.Pod = "a"
 	body = run(t, "detail", "layout", p)
-	for _, want := range []string{`hx-confirm="Stop a/b c on a (dev)?"`, `name="pod" value="a"`, `href="/?pod=a&amp;server=dev"`} {
+	for _, want := range []string{`on a</span>`, `name="pod" value="a"`, `href="/?pod=a&amp;server=dev"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("pod-scoped body lacks %q", want)
 		}
@@ -834,8 +832,8 @@ func TestCopyFollowsNoun(t *testing.T) {
 				`<p class="sub">`+one+" × worker</p>",
 			)
 			body := run(t, "dashboard", "layout", p)
-			if got := strings.Count(body, "Pending (max/"+one+")") - strings.Count(body, `data-label="Pending (max/`+one+`)"`); got != 2 {
-				t.Errorf("Pending (max/%s) appears %d times, want in the card and the column header", one, got)
+			if got := strings.Count(body, "Pending (max/"+one+")") - strings.Count(body, `data-label="Pending (max/`+one+`)"`); got != 1 || !strings.Contains(body, "each worker's max per "+one+", summed") {
+				t.Errorf("Pending (max/%s) appears %d times, want in the column header; the card says it sums", one, got)
 			}
 
 			p = detailPage()
@@ -845,7 +843,6 @@ func TestCopyFollowsNoun(t *testing.T) {
 				"per "+one+", on all "+many+"<",
 				`aria-label="Concurrency per `+one+`"`,
 				`aria-label="Concurrency per `+one+`, exact"`,
-				`hx-confirm="Stop a/b c on all `+many+` (dev)?"`,
 			)
 
 			p = gridPage()
@@ -858,7 +855,7 @@ func TestCopyFollowsNoun(t *testing.T) {
 				Action: "pause", Server: "dev", Noun: n,
 				Pods: []fleet.PodColumn{{Key: "#a", Label: "a"}},
 				Rows: []ConfirmRow{{Name: "orders", Absent: []bool{true}}},
-			}), "pause each worker on each "+one+" below:", `<span class="na">not on this `+one+`</span>`)
+			}), "Pause each worker on each "+one+" below:", `<span class="na">not on this `+one+`</span>`)
 
 			check(t, "no results", run(t, "results", "results", ResultsView{Noun: n}),
 				`<p class="empty">No `+many+" were targeted.</p>")
@@ -1441,8 +1438,8 @@ func TestWorkflowRendersHostileFields(t *testing.T) {
 		if !strings.Contains(body, "&lt;script&gt;") || strings.Contains(body, "<img") || strings.Contains(body, "<script>alert") {
 			t.Errorf("%s: a field rendered as markup", name)
 		}
-		if n, want := strings.Count(body, "<script"), map[string]int{"page": 2, "confirm": 0, "list": 1}[name]; n != want {
-			t.Errorf("%s: %d <script, want %d (htmx, workflow.js)", name, n, want)
+		if n, want := strings.Count(body, "<script"), map[string]int{"page": 3, "confirm": 0, "list": 2}[name]; n != want {
+			t.Errorf("%s: %d <script, want %d (htmx, app.js, workflow.js)", name, n, want)
 		}
 	}
 
@@ -1468,5 +1465,141 @@ func TestWorkflowViewDuplicateName(t *testing.T) {
 	v := workflowView(fleet.WorkflowGroup{WorkflowRecord: rec}, "dev", nil, time.Now())
 	if len(v.Graph.Edges) != 1 || v.Graph.Edges[0].From != 0 || v.Graph.Edges[0].To != 2 {
 		t.Errorf("edges = %+v, want 0 -> 2", v.Graph.Edges)
+	}
+}
+
+// The worker table: Failed /min per worker (red only above zero, a dash
+// with no rate), a sort link on each sortable header with aria-sort on the
+// active one, the order switch in the caption, and ?sort= in both pickers.
+func TestDashboardSortControls(t *testing.T) {
+	p := dashboardPage()
+	p.Dashboard.Rows[0].FailedPerMin, p.Dashboard.Rows[0].FailedKnown = 2.5, true
+	body := run(t, "dashboard", "layout", p)
+	for _, want := range []string{
+		`<a id="order-attention" href="/?server=dev" aria-current="true">Trouble first</a>`,
+		`failing, then paused or stopped with pending jobs`,
+		`<th scope="col"><a id="sort-name" href="/?server=dev&amp;sort=name">Worker</a></th>`,
+		`<a id="sort-pending" href="/?server=dev&amp;sort=pending">Pending (max/pod)</a>`,
+		`<a id="sort-failed" href="/?server=dev&amp;sort=failed">Failed /min</a>`,
+		`<td class="num fails hot" data-label="Failed /min">2.5</td>`,
+		`<td class="num fails" data-label="Failed /min">—</td>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("default order lacks %s", want)
+		}
+	}
+	for _, not := range []string{`aria-sort`, `name="sort"`} {
+		if strings.Contains(body, not) {
+			t.Errorf("default order has %s", not)
+		}
+	}
+
+	p.Sort, p.Pod = "pending", "a"
+	body = run(t, "dashboard", "layout", p)
+	for _, want := range []string{
+		`<th scope="col" class="num" aria-sort="descending"><a id="sort-pending" href="/?pod=a&amp;server=dev&amp;sort=pending">`,
+		`<a id="order-attention" href="/?pod=a&amp;server=dev">Trouble first</a>`,
+		`<a id="order-pending" href="/?pod=a&amp;server=dev&amp;sort=pending" aria-current="true">Pending</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("sort=pending lacks %s", want)
+		}
+	}
+	if n := strings.Count(body, `<input type="hidden" name="sort" value="pending">`); n != 2 {
+		t.Errorf("%d pickers carry sort, want the server and the unit one", n)
+	}
+	if strings.Count(body, "aria-sort") != 1 || strings.Contains(body, "failing, then paused") {
+		t.Errorf("sort=pending: want one aria-sort and no trouble legend")
+	}
+	p.Sort = "name"
+	if body = run(t, "dashboard", "layout", p); !strings.Contains(body, `<th scope="col" aria-sort="ascending"><a id="sort-name"`) {
+		t.Error("sort=name: Worker header is not aria-sort ascending")
+	}
+	p.Stale = "old"
+	if body = run(t, "dashboard", "layout", p); strings.Contains(body, "fails hot") || strings.Contains(body, ">2.5<") {
+		t.Error("a stale page shows a failed rate")
+	}
+}
+
+// TestWorkerControlsAskAndFit: no native confirm and no apply on slider
+// change; Pause and Resume are hidden by the status dot in #live (CSS
+// :has), so they stay right across polls with no swap of the controls.
+func TestWorkerControlsAskAndFit(t *testing.T) {
+	body := run(t, "detail", "layout", detailPage())
+	for _, bad := range []string{"hx-confirm", "delay:600ms", "stops moving"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("worker page has %q", bad)
+		}
+	}
+	for _, want := range []string{`class="act-pause"`, `class="act-resume"`, `class="danger act-stop"`, `Restart…</button>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("worker page lacks %q", want)
+		}
+	}
+	css, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		".detail-layout:has(.detail-head .status.active) .act-resume",
+		".detail-layout:has(.detail-head .status.paused) .act-pause",
+		".detail-layout:has(.detail-head .status.stopped) :is(.act-pause, .act-resume, .act-stop) { display: none; }",
+	} {
+		if !strings.Contains(string(css), want) {
+			t.Errorf("app.css lacks %q", want)
+		}
+	}
+}
+
+// TestCoarseTargets: on touch every control and row link is 44px tall and
+// the row checkbox has a 44px label around it; mouse density is untouched
+// (the rule lives only under pointer: coarse).
+func TestCoarseTargets(t *testing.T) {
+	css, err := assets.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, block, ok := strings.Cut(string(css), "@media (pointer: coarse) {")
+	block, _, _ = strings.Cut(block, "\n}")
+	if !ok {
+		t.Fatal("app.css has no pointer: coarse block")
+	}
+	for _, want := range []string{"button, select, input[type=number], .rail nav a, .seg a", "td.name a", "a.wchip { min-height: 44px; }", ".sel .hit {", "min-width: 44px; min-height: 44px;"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("coarse block lacks %q:\n%s", want, block)
+		}
+	}
+	if body := run(t, "dashboard", "layout", dashboardPage()); !strings.Contains(body, `<td class="sel"><label class="hit"><input type="checkbox"`) {
+		t.Error("row checkbox has no hit label")
+	}
+}
+
+// TestStateWords: one word per worker state on every non-workflow page:
+// varmq's status in lower case, the status tile counting by the same
+// words, and the word always shown beside the dot (grid cells too).
+func TestStateWords(t *testing.T) {
+	chips := statusChips(map[string]int{"Paused": 1, "Running": 3, "Idle": 2, "Stopping": 1, "Weird": 1, "Stopped": 0})
+	var got []string
+	for _, c := range chips {
+		got = append(got, strconv.Itoa(c.N)+" "+c.Word+" "+c.Class)
+	}
+	if want := []string{"2 idle active", "3 running active", "1 stopping transitional", "1 paused paused", "1 weird unknown"}; !slices.Equal(got, want) {
+		t.Errorf("status chips = %q, want %q", got, want)
+	}
+
+	p := dashboardPage()
+	p.Dashboard.KPIs.StatusCounts = map[string]int{"Running": 3, "Paused": 1}
+	body := run(t, "dashboard", "layout", p)
+	for _, want := range []string{`<li class="status active">3 running</li>`, `<li class="status paused">1 paused</li>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard lacks %q", want)
+		}
+	}
+	if body := run(t, "grid", "layout", gridPage()); !strings.Contains(body, `<span class="status active">running</span>`) {
+		t.Error("grid cell lacks the state word")
+	}
+	css, _ := assets.ReadFile("static/app.css")
+	if strings.Contains(string(css), ".cell .status { font-size: 0") {
+		t.Error("grid cells hide the active word: status by colour alone")
 	}
 }

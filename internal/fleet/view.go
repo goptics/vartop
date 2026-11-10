@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"cmp"
 	"encoding/hex"
 	"fmt"
 	"maps"
@@ -65,7 +66,7 @@ type HealthView struct {
 type KPIView struct {
 	CompletedPerSec, FailedPerMin float64
 	PendingMax                    int            // Σ over workers of max-per-pod pending
-	StatusCounts                  map[string]int // status class → pod×worker instances
+	StatusCounts                  map[string]int // varmq status → pod×worker instances
 	Completed, Failed, Pending    []Point        // last 10 min; Failed is per minute
 }
 
@@ -79,12 +80,79 @@ type RowView struct {
 	PendingTip               string // one "label: n" line per pod
 	AbsentOn                 int    // healthy pods that lack this worker
 	Spark                    []Point
+	// FailedPerMin: mean failed rate over the last minute, per minute. Mean,
+	// not the newest point: one quiet poll must not drop a failing worker out
+	// of the trouble rows. FailedKnown false = no rate in that minute.
+	FailedPerMin float64
+	FailedKnown  bool
 }
 
 // DashboardView is screen A.
 type DashboardView struct {
 	KPIs KPIView
-	Rows []RowView // sorted by Name
+	Rows []RowView // by Name until Sort
+}
+
+// Row orders of the dashboard, the values of ?sort=.
+const (
+	SortAttention = "attention"
+	SortName      = "name"
+	SortPending   = "pending"
+	SortFailed    = "failed"
+)
+
+// SortKey is by when it names a row order, else SortAttention.
+func SortKey(by string) string {
+	switch by {
+	case SortName, SortPending, SortFailed:
+		return by
+	}
+	return SortAttention
+}
+
+// attention is the trouble bucket of a row: 0 failing now, 1 paused or
+// stopped with a backlog, 2 the rest.
+func (r RowView) attention() int {
+	switch {
+	case r.FailedPerMin > 0:
+		return 0
+	case (r.Class == "paused" || r.Class == "stopped") && r.PendingMax > 0:
+		return 1
+	}
+	return 2
+}
+
+// Sort orders the rows by SortKey(by). attention: buckets (see attention),
+// then failed rate, then pending, both largest first. Name breaks every tie,
+// so the order is total and a poll does not shuffle equal rows.
+func (v *DashboardView) Sort(by string) {
+	by = SortKey(by)
+	slices.SortStableFunc(v.Rows, func(a, b RowView) int {
+		failed, pending := cmp.Compare(b.FailedPerMin, a.FailedPerMin), cmp.Compare(b.PendingMax, a.PendingMax)
+		var c int
+		switch by {
+		case SortPending:
+			c = pending
+		case SortFailed:
+			c = failed
+		case SortAttention:
+			c = cmp.Or(cmp.Compare(a.attention(), b.attention()), failed, pending)
+		}
+		return cmp.Or(c, cmp.Compare(a.Name, b.Name))
+	})
+}
+
+// Order puts the grid rows in the order of rows (the dashboard's), so both
+// screens rank the same worker first. A worker not in rows keeps its place
+// after them.
+func (g *GridView) Order(rows []RowView) {
+	at := make(map[string]int, len(rows))
+	for i, r := range rows {
+		at[r.Name] = i + 1
+	}
+	slices.SortStableFunc(g.Rows, func(a, b GridRow) int {
+		return cmp.Compare(cmp.Or(at[a.Name], len(rows)+1), cmp.Or(at[b.Name], len(rows)+1))
+	})
 }
 
 // PodColumn is one pod column of the grid, also the pod list of the detail
@@ -227,22 +295,27 @@ func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) Dash
 	pods := PodsOf(snaps[len(snaps)-1], pod)
 	window := newest(snaps, TrendWindow)
 
+	minute := newest(snaps, time.Minute)
+
 	for _, name := range workerNames(pods) {
 		m := mergeWorker(pods, name)
+		failed, known := meanRate(WorkerRates(minute, pod, name, failedRate, n))
 		v.Rows = append(v.Rows, RowView{
-			Name:        name,
-			ID:          DOMID(name),
-			Status:      m.status,
-			Class:       m.class,
-			StatusTip:   strings.Join(m.statusTips, tipSep),
-			Concurrency: concurrencyLabel(m.concurrency, n),
-			Busy:        m.busy,
-			Idle:        m.idle,
-			PendingMax:  m.pendingMax,
-			Unknown:     m.reporting == 0,
-			PendingTip:  strings.Join(m.pendingTips, tipSep),
-			AbsentOn:    m.absent,
-			Spark:       WorkerRates(window, pod, name, completedRate, n),
+			FailedPerMin: failed * 60,
+			FailedKnown:  known,
+			Name:         name,
+			ID:           DOMID(name),
+			Status:       m.status,
+			Class:        m.class,
+			StatusTip:    strings.Join(m.statusTips, tipSep),
+			Concurrency:  concurrencyLabel(m.concurrency, n),
+			Busy:         m.busy,
+			Idle:         m.idle,
+			PendingMax:   m.pendingMax,
+			Unknown:      m.reporting == 0,
+			PendingTip:   strings.Join(m.pendingTips, tipSep),
+			AbsentOn:     m.absent,
+			Spark:        WorkerRates(window, pod, name, completedRate, n),
 		})
 	}
 
@@ -251,7 +324,7 @@ func BuildDashboard(snaps []*Snapshot, pod string, _ time.Duration, n Noun) Dash
 			continue
 		}
 		for _, sm := range p.Workers {
-			v.KPIs.StatusCounts[StatusClass(sm.Status)]++
+			v.KPIs.StatusCounts[sm.Status]++ // by status, the words the rows show
 		}
 	}
 	k := &v.KPIs
@@ -496,6 +569,21 @@ func peakPending(pods []PodSnapshot) (total, healthy int) {
 	return total, healthy
 }
 
+// meanRate is the mean of the points that hold data, false with none.
+func meanRate(pts []Point) (float64, bool) {
+	var sum float64
+	var n int
+	for _, p := range pts {
+		if !p.Gap {
+			sum, n = sum+p.V, n+1
+		}
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return sum / float64(n), true
+}
+
 func completedRate(s *Sample) float64 { return s.CompletedRate }
 func failedRate(s *Sample) float64    { return s.FailedRate }
 
@@ -573,8 +661,10 @@ func fleetRates(snaps []*Snapshot, pod string, pick func(*Sample) float64, scale
 			}
 			expected++
 			var got bool
-			for _, sm := range p.Workers {
-				if sm.RateOK {
+			// By name: a float sum in map order differs in its last digit
+			// between renders, which defeats the poll's unchanged check.
+			for _, name := range slices.Sorted(maps.Keys(p.Workers)) {
+				if sm := p.Workers[name]; sm.RateOK {
 					sum += pick(sm)
 					got = true
 				}

@@ -176,7 +176,7 @@ func TestActionPartialFailureIs200(t *testing.T) {
 	srv, _ := newTestServer(t, aSrv, bSrv)
 	setActionStatus(fa, "orders", http.StatusInternalServerError)
 
-	resp, body := post(t, srv, "/workers/orders/actions/stop", multi(), true)
+	resp, body := post(t, srv, "/workers/orders/actions/stop", multi("confirm", "1"), true)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 even on partial failure", resp.StatusCode)
 	}
@@ -247,7 +247,7 @@ func TestMutationsFinishWhenBrowserAborts(t *testing.T) {
 		form url.Values
 		done func(*fleettest.Varmq) bool
 	}{
-		{"/workers/orders/actions/stop", multi(), worker(func(w fleettest.Worker) bool { return w.Status == "Stopped" })},
+		{"/workers/orders/actions/stop", multi("confirm", "1"), worker(func(w fleettest.Worker) bool { return w.Status == "Stopped" })},
 		{"/workers/orders/concurrency", multi("n", "9"), worker(func(w fleettest.Worker) bool { return w.Concurrency == 9 })},
 		{"/bulk/pause", multi("names", "orders", "confirm", "1"), worker(func(w fleettest.Worker) bool { return w.Status == "Paused" })},
 		{tenantPath + "/actions/pause", multi("confirm", "1"), func(f *fleettest.Varmq) bool {
@@ -576,7 +576,7 @@ func TestBulkConfirmThenExecute(t *testing.T) {
 	}
 	labels := fleettest.StaticLabels(aSrv.URL, bSrv.URL)
 	for _, want := range []string{
-		"Confirm pause on multi",
+		"Pause 2 workers on all instances of multi?",
 		`<th scope="row" class="name">emails</th>`,
 		`<th scope="row" class="name">orders</th>`,
 		`<th title="a via ` + aSrv.URL + `">` + labels[aSrv.URL] + `</th>`,
@@ -658,7 +658,7 @@ func TestActionResponseReflectsNewState(t *testing.T) {
 	req.Header.Set("HX-Current-URL", srv.URL+"/workers/orders?server=multi")
 	_, body := send(t, srv, req)
 	live := liveOOB(body)
-	if !strings.Contains(live, "<h1>orders</h1>") || !strings.Contains(live, paused) || !strings.Contains(live, ">Paused</span>") {
+	if !strings.Contains(live, "<h1>orders</h1>") || !strings.Contains(live, paused) || !strings.Contains(live, ">paused</span>") {
 		t.Errorf("response's #live should show orders paused:\n%s", body)
 	}
 	if strings.Index(body, `<ul class="results">`) > strings.Index(body, `id="live"`) {
@@ -1301,7 +1301,7 @@ func TestActionPokesAndShowsResult(t *testing.T) {
 	if n := f.pokes("multi") - before; n != 1 {
 		t.Errorf("the action poked %d times, want once", n)
 	}
-	if live := liveOOB(body); !strings.Contains(live, ">Paused</span>") {
+	if live := liveOOB(body); !strings.Contains(live, ">paused</span>") {
 		t.Errorf("response's #live should show orders paused, from the poked snapshot:\n%s", live)
 	}
 	if latest := f.latest("multi"); !latest.At.After(first.At) {
@@ -1486,12 +1486,12 @@ func TestWorkflowCancel(t *testing.T) {
 		!strings.Contains(body, `<input type="hidden" name="server" value="multi">`) {
 		t.Errorf("confirm panel does not post the cancel back:\n%s", body)
 	}
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Confirm cancel of workflow") || strings.Contains(body, "without undo") ||
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Cancel workflow <span") || strings.Contains(body, "without undo") ||
 		!strings.Contains(body, `<input type="hidden" name="at" value="`+at+`">`) || !strings.Contains(body, "No completed task has an undo job yet") {
 		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
 	}
 	resp, body = post(t, srv, path, multi("at", at, "undo", "false"), true)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Confirm cancel without undo") || !strings.Contains(body, `<input type="hidden" name="undo" value="false">`) {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Cancel workflow without undo</button>") || !strings.Contains(body, `<input type="hidden" name="undo" value="false">`) {
 		t.Errorf("confirm panel without undo = %d:\n%s", resp.StatusCode, body)
 	}
 	if n := len(wfPatches(varmqs[0])) + len(wfPatches(varmqs[1])); n != 0 {
@@ -1604,7 +1604,7 @@ func TestJobCancel(t *testing.T) {
 	path := tenantPath + "/jobs/a%2Fb%7Bc%7D/actions/cancel"
 
 	resp, body := post(t, srv, path, multi(), true)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `Confirm cancel of job <span class="mono">a/b{c}</span> of queue <span class="qn" title="`+tenantID+`">`) ||
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `Cancel job <span class="mono">a/b{c}</span> of queue <span class="qn" title="`+tenantID+`">`) ||
 		!strings.Contains(body, `<form hx-post="`+path+`" hx-target="#results"`) || !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) ||
 		!strings.Contains(body, `<input type="hidden" name="server" value="multi">`) || !strings.Contains(body, "it stops only if its handler watches") {
 		t.Errorf("confirm panel = %d:\n%s", resp.StatusCode, body)
@@ -1669,4 +1669,70 @@ func TestActionRefreshNamesMemorySources(t *testing.T) {
 	if _, live, ok := strings.Cut(body, `<div id="live" hx-swap-oob="outerHTML">`); resp.StatusCode != http.StatusOK || !ok || !strings.Contains(live, `<span class="qnm">orders #1</span>`) {
 		t.Errorf("refresh = %d, the in-memory source not named by its worker:\n%s", resp.StatusCode, body)
 	}
+}
+
+// TestAskFirstPanels: restart and stop answer the confirm panel and send
+// nothing until confirm=1; every panel (worker, bulk, queue, job, workflow)
+// has the same foot: Keep first and focused, then verb + object in its tone.
+func TestAskFirstPanels(t *testing.T) {
+	fa, fb, aSrv, bSrv := twoFakes(t)
+	setQueues(fa, pausableTenant())
+	srv, _ := newTestServer(t, aSrv, bSrv)
+
+	keep := `<button type="button" class="keep" data-keep autofocus>Keep</button>`
+	for _, c := range []struct {
+		path      string
+		form      url.Values
+		head, btn string
+	}{
+		{"/workers/orders/actions/stop", multi(), "Stop orders on all instances of multi?", `<button type="submit" class="danger">Stop orders</button>`},
+		{"/workers/orders/actions/restart", multi(), "Restart orders on all instances of multi?", `<button type="submit" class="warn">Restart orders</button>`},
+		{"/bulk/pause", multi("names", "orders", "names", "emails"), "Pause 2 workers on all instances of multi?", `<button type="submit" class="warn">Pause 2 workers</button>`},
+		{"/bulk/resume", multi("names", "orders"), "Resume orders on all instances of multi?", `<button type="submit" class="primary">Resume orders</button>`},
+		{tenantPath + "/actions/pause", multi(), "Pause queue <span", `<button type="submit" class="warn">Pause queue</button>`},
+	} {
+		resp, body := post(t, srv, c.path, c.form, true)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %s = %d, want 200 (the panel)", c.path, resp.StatusCode)
+		}
+		ki, bi := strings.Index(body, keep), strings.Index(body, c.btn)
+		if !strings.Contains(body, c.head) || ki < 0 || bi < ki {
+			t.Errorf("POST %s: panel lacks %q, or Keep before %q:\n%s", c.path, c.head, c.btn, body)
+		}
+		if !strings.Contains(body, `<input type="hidden" name="confirm" value="1">`) {
+			t.Errorf("POST %s: confirm form lacks confirm=1:\n%s", c.path, body)
+		}
+	}
+	noPatches(t, fa, fb)
+
+	// The worker panel posts to the worker's own route; confirmed, it acts.
+	_, body := post(t, srv, "/workers/orders/actions/stop", multi("instance", "instance-1"), true)
+	if !strings.Contains(body, `hx-post="/workers/orders/actions/stop"`) || !strings.Contains(body, "Stop orders on instance-1 of multi?") {
+		t.Errorf("one-instance stop panel:\n%s", body)
+	}
+	noPatches(t, fa, fb)
+	post(t, srv, "/workers/orders/actions/restart", multi("confirm", "1"), true)
+	wantPatches(t, fa, "PATCH /workers/orders/actions/restart")
+
+	// Job and workflow panels share the foot.
+	for name, body := range map[string]string{
+		"job":      run(t, "confirm", "job_confirm", JobConfirmView{Server: "dev", ID: "j", Noun: instanceNoun}),
+		"workflow": run(t, "confirm", "workflow_confirm", WorkflowConfirmView{Server: "dev", ID: "w", At: 1, Noun: instanceNoun, NoUndo: true}),
+	} {
+		btn := map[string]string{"job": "Cancel job", "workflow": "Cancel workflow without undo"}[name]
+		if !strings.Contains(body, keep) || !strings.Contains(body, `<button type="submit" class="danger">`+btn+`</button>`) || strings.Contains(body, "primary") {
+			t.Errorf("%s panel lacks Keep or a danger %q:\n%s", name, btn, body)
+		}
+	}
+}
+
+// TestConcurrencyLastNCounts: the form sends the slider, then the box; the
+// box (last) counts, so a number past the slider's max is set as typed.
+func TestConcurrencyLastNCounts(t *testing.T) {
+	fa, aSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 8}})
+	srv, _ := newTestServer(t, aSrv)
+	if resp, _ := post(t, srv, "/workers/orders/concurrency", multi("n", "16", "n", "100"), true); resp.StatusCode != http.StatusOK {
+		t.Fatalf("n=16&n=100 = %d, want 200", resp.StatusCode)
+	}
+	wantPatches(t, fa, "PATCH /workers/orders/config/concurrency/100")
 }

@@ -12,37 +12,46 @@
     {{template "spark" (sparkline $k.Failed trendWindow $.Interval 160 32)}}
   </div>
   <div class="card pending">
-    <h2>Pending (max/{{$.Noun.One}})</h2>
+    <h2>Pending</h2>
     <p class="big">{{if or $.Stale (noData $k.Pending)}}—{{else}}{{$k.PendingMax}}{{end}}</p>
+    <p class="sub">each worker's max per {{$.Noun.One}}, summed</p>
     {{template "spark" (sparkline $k.Pending trendWindow $.Interval 160 32)}}
   </div>
   <div class="card">
     <h2>Workers by status</h2>
     <p class="sub">{{$.Noun.One}} × worker</p>
-    <ul class="chips">{{if $.Stale}}<li>—</li>{{else}}{{range statusClasses}}{{$n := index $k.StatusCounts .}}{{if $n}}<li class="status {{.}}">{{$n}} {{.}}</li>{{end}}{{end}}{{if not $k.StatusCounts}}<li>—</li>{{end}}{{end}}</ul>
+    <ul class="chips">{{if $.Stale}}<li>—</li>{{else}}{{range statusChips $k.StatusCounts}}<li class="status {{.Class}}">{{.N}} {{.Word}}</li>{{else}}<li>—</li>{{end}}{{end}}</ul>
   </div>
 </section>
 {{if .Rows}}<div class="table-wrap">
 <table class="workers">
+  <caption>Order <span class="seg" role="group" aria-label="Row order">
+    <a id="order-attention" href="{{$.SortURL "attention"}}"{{if not $.Sort}} aria-current="true"{{end}}>Trouble first</a>
+    <a id="order-name" href="{{$.SortURL "name"}}"{{if eq $.Sort "name"}} aria-current="true"{{end}}>Name</a>
+    <a id="order-pending" href="{{$.SortURL "pending"}}"{{if eq $.Sort "pending"}} aria-current="true"{{end}}>Pending</a>
+    <a id="order-failed" href="{{$.SortURL "failed"}}"{{if eq $.Sort "failed"}} aria-current="true"{{end}}>Failed</a>
+  </span>{{if not $.Sort}} <span class="why">failing, then paused or stopped with pending jobs, then the rest</span>{{end}}</caption>
   <thead><tr>
-    <th class="sel"><span class="sr">Select</span></th>
-    <th>Worker</th>
-    <th>Status</th>
-    <th>Concurrency (per {{$.Noun.One}})</th>
-    <th class="num">Busy</th>
-    <th class="num">Idle</th>
-    <th class="num">Pending (max/{{$.Noun.One}})</th>
-    <th>Completed /s (10 min)</th>
+    <th scope="col" class="sel"><span class="sr">Select</span></th>
+    <th scope="col"{{if eq $.Sort "name"}} aria-sort="ascending"{{end}}><a id="sort-name" href="{{$.SortURL "name"}}">Worker</a></th>
+    <th scope="col">Status</th>
+    <th scope="col">Concurrency (per {{$.Noun.One}})</th>
+    <th scope="col" class="num">Busy</th>
+    <th scope="col" class="num">Idle</th>
+    <th scope="col" class="num"{{if eq $.Sort "pending"}} aria-sort="descending"{{end}}><a id="sort-pending" href="{{$.SortURL "pending"}}">Pending (max/{{$.Noun.One}})</a></th>
+    <th scope="col" class="num"{{if eq $.Sort "failed"}} aria-sort="descending"{{end}} title="Mean over the last minute"><a id="sort-failed" href="{{$.SortURL "failed"}}">Failed /min</a></th>
+    <th scope="col">Completed /s (10 min)</th>
   </tr></thead>
   <tbody>{{range .Rows}}
   <tr id="{{.ID}}">
-    <td class="sel"><input type="checkbox" id="sel-{{.ID}}" form="bulk" name="names" value="{{.Name}}" aria-label="Select {{.Name}}" hx-preserve></td>
+    <td class="sel"><label class="hit"><input type="checkbox" id="sel-{{.ID}}" form="bulk" name="names" value="{{.Name}}" aria-label="Select {{.Name}}" hx-preserve></label></td>
     <td class="name"><a id="link-{{.ID}}" href="{{workerURL .Name $.Server $.Noun.Param $.Pod}}">{{.Name}}</a></td>
-    <td>{{if $.Stale}}—{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{.Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}{{end}}</td>
+    <td>{{if $.Stale}}—{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{word .Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{if .AbsentOn}} <span class="badge">absent on {{.AbsentOn}} {{$.Noun.Many}}</span>{{end}}{{end}}</td>
     <td data-label="Concurrency (per {{$.Noun.One}})">{{if $.Stale}}—{{else}}{{.Concurrency}}{{end}}</td>
     <td class="num" data-label="Busy">{{if or .Unknown $.Stale}}—{{else}}{{.Busy}}{{end}}</td>
     <td class="num" data-label="Idle">{{if or .Unknown $.Stale}}—{{else}}{{.Idle}}{{end}}</td>
     <td class="num" data-label="Pending (max/{{$.Noun.One}})"{{with .PendingTip}}{{if not $.Stale}} title="{{.}}"{{end}}{{end}}>{{if or .Unknown $.Stale}}—{{else}}{{.PendingMax}}{{end}}</td>
+    <td class="num fails{{if and .FailedKnown (not $.Stale) (gt .FailedPerMin 0.0)}} hot{{end}}" data-label="Failed /min">{{if or $.Stale (not .FailedKnown)}}—{{else}}{{printf "%.1f" .FailedPerMin}}{{end}}</td>
     <td class="trend" data-label="Completed /s (10 min)">{{template "spark" (sparkline .Spark trendWindow $.Interval 120 24)}}</td>
   </tr>{{end}}
   </tbody>

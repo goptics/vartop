@@ -40,6 +40,10 @@ type Page struct {
 	Health                      fleet.HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
+	// Sort is the dashboard's row order when it is not the default
+	// (attention): a fleet.Sort* value, as ?sort= carries it.
+	Sort string
+
 	// ScopeBalanced: what the page's actions reach holds a unit behind a
 	// load balancer, so there is no Restart. OneBalanced: it is one such
 	// unit, so there are no controls at all, only a note saying why.
@@ -95,6 +99,7 @@ type Page struct {
 
 	owners   queueOwners             // of the newest snapshot: names in-memory queues
 	qworkers map[string][]WorkerChip // the queue list's workers, by Queue ID
+	srcq     *fleet.QueuesView       // the worker page's queues, read live; nil: not read
 }
 
 // WorkersOn are the workers consuming queue id, for the queue list.
@@ -107,6 +112,28 @@ func (p Page) QName(id string) QueueName { return p.owners.name(id) }
 func (p Page) cmpQName(a, b string) int {
 	qa, qb := p.QName(a), p.QName(b)
 	return cmp.Or(strings.Compare(qa.Name, qb.Name), strings.Compare(qa.NS, qb.NS), strings.Compare(a, b))
+}
+
+// sortParam is the ?sort= value v as Page.Sort holds it: "" for the
+// default order and for a value that names none.
+func sortParam(v string) string {
+	if by := fleet.SortKey(v); by != fleet.SortAttention {
+		return by
+	}
+	return ""
+}
+
+// SortURL is the dashboard of the page's server and unit in row order by;
+// the default order has no ?sort=.
+func (p Page) SortURL(by string) string {
+	u := pageURL("/", p.Server, p.Noun.Param, p.Pod)
+	if by = sortParam(by); by == "" {
+		return u
+	}
+	if strings.Contains(u, "?") {
+		return u + "&sort=" + by
+	}
+	return u + "?sort=" + by
 }
 
 // Interval is the server's poll interval; 0 with no server.
@@ -128,14 +155,80 @@ type ResultsView struct {
 	Noun    fleet.Noun
 }
 
-// ConfirmView is the bulk-action confirmation panel: Rows (workers) × Pods
-// on Server, scoped to the unit labelled Pod ("" for every unit). A down
-// unit's column carries its Err.
+// ConfirmView is the confirmation panel of a worker action: Rows (workers)
+// × Pods on Server, scoped to the unit labelled Pod ("" for every unit). A
+// down unit's column carries its Err. Post is the route the confirmed form
+// posts to, "" for the bulk route of Action.
 type ConfirmView struct {
 	Action, Server, Pod string
+	Post                string
 	Noun                fleet.Noun
 	Pods                []fleet.PodColumn
 	Rows                []ConfirmRow
+}
+
+// PostURL is the route the confirmed form posts to.
+func (v ConfirmView) PostURL() string { return cmp.Or(v.Post, "/bulk/"+url.PathEscape(v.Action)) }
+
+// Scope is the units the action reaches, in words.
+func (v ConfirmView) Scope() string { return cmp.Or(v.Pod, "all "+v.Noun.Many) }
+
+// Acts is the panel's buttons: verb + object ("Stop orders", "Pause 3
+// workers").
+func (v ConfirmView) Acts() ConfirmActs {
+	what := strconv.Itoa(len(v.Rows)) + " workers"
+	if len(v.Rows) == 1 {
+		what = v.Rows[0].Name
+	}
+	return confirmActs(v.Action, what)
+}
+
+// StatusChip is one status of the dashboard's status tile: its word (as
+// rows show it), dot class and pod×worker count.
+type StatusChip struct {
+	Word, Class string
+	N           int
+}
+
+// statusClassOrder orders the status tile: well, in between, held, down.
+var statusClassOrder = []string{"active", "transitional", "paused", "stopped", "unknown"}
+
+// statusChips are counts (varmq status → n) as the status tile lists
+// them: by class (statusClassOrder), then word.
+func statusChips(counts map[string]int) []StatusChip {
+	var chips []StatusChip
+	for st, n := range counts {
+		if n > 0 {
+			chips = append(chips, StatusChip{Word: strings.ToLower(st), Class: fleet.StatusClass(st), N: n})
+		}
+	}
+	slices.SortFunc(chips, func(a, b StatusChip) int {
+		return cmp.Or(cmp.Compare(slices.Index(statusClassOrder, a.Class), slices.Index(statusClassOrder, b.Class)), strings.Compare(a.Word, b.Word))
+	})
+	return chips
+}
+
+// ConfirmActs is the foot of every confirm panel: Keep (first, focused,
+// closes the panel, sends nothing), then the action's button: Label, in
+// Tone ("danger", "warn" or "primary").
+type ConfirmActs struct{ Label, Tone string }
+
+// confirmActs is the foot of a panel for action (pause, resume, restart,
+// stop, cancel) on what. Tone by severity: stop and cancel danger, restart
+// and pause warn, the rest primary.
+func confirmActs(action, what string) ConfirmActs {
+	tone := "primary"
+	switch action {
+	case "stop", "cancel":
+		tone = "danger"
+	case "restart", "pause":
+		tone = "warn"
+	}
+	label := action
+	if action != "" {
+		label = strings.ToUpper(action[:1]) + action[1:]
+	}
+	return ConfirmActs{Label: strings.TrimSpace(label + " " + what), Tone: tone}
 }
 
 // ConfirmRow is one worker of the confirmation panel. Absent is aligned with
@@ -169,9 +262,11 @@ var funcs = template.FuncMap{
 	"historyWindow": func() time.Duration { return fleet.HistoryWindow },
 	"spanParam":     spanParam,
 	"rangeSwitch":   rangeSwitch,
-	"statusClasses": func() []string { return []string{"active", "transitional", "paused", "stopped", "unknown"} },
+	"statusChips":   statusChips,
+	"word":          strings.ToLower,
 	"oneBalanced":   func() string { return fleet.OneBalancedMsg },
 	"fullMs":        func(ms int64) string { full, _ := msTime(ms); return full },
+	"confirmActs":   confirmActs,
 }
 
 // parseTemplates parses one template set per page, keyed "dashboard", "grid",

@@ -1,6 +1,11 @@
+{{/* confirm_acts: a confirm panel's foot (ConfirmActs): Keep first and focused, sends nothing (app.js); then the action */}}
+{{define "confirm_acts"}}<div class="acts">
+    <button type="button" class="keep" data-keep autofocus>Keep</button>
+    <button type="submit" class="{{.Tone}}">{{.Label}}</button>
+  </div>{{end}}
 {{define "confirm"}}<section class="confirm" aria-labelledby="confirm-head">
-  <h2 id="confirm-head">Confirm {{.Action}} on {{.Server}}</h2>
-  <p>{{.Action}} each worker on each {{.Noun.One}} below:</p>
+  <h2 id="confirm-head">{{.Acts.Label}} on {{.Scope}} of {{.Server}}?</h2>
+  <p>{{(confirmActs .Action "").Label}} each worker on each {{.Noun.One}} below:</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>Worker</th>{{range .Pods}}<th title="{{.Tip}}">{{.Label}}{{with .Err}}<small class="err">{{.}}</small>{{end}}</th>{{end}}</tr></thead>
@@ -9,16 +14,16 @@
     </tbody>
   </table>
   </div>
-  <form hx-post="/bulk/{{pathEscape .Action}}" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
+  <form hx-post="{{.PostURL}}" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" .}}
     {{template "label_field" .}}
     <input type="hidden" name="confirm" value="1">
     {{range .Rows}}<input type="hidden" name="names" value="{{.Name}}">
-    {{end}}<button type="submit" class="primary">Confirm {{.Action}}</button>
+    {{end}}{{template "confirm_acts" .Acts}}
   </form>
 </section>{{end}}
 {{define "queue_confirm"}}<section class="confirm" aria-labelledby="confirm-head">
-  <h2 id="confirm-head">Confirm {{.Action}} of queue {{template "qname" .Queue}} on {{.Server}}</h2>
+  <h2 id="confirm-head">{{(confirmActs .Action "queue").Label}} {{template "qname" .Queue}} on {{.Server}}?</h2>
   <p>{{if eq .Action "pause"}}Every process that reads this queue's storage stops taking its jobs, also ones that serve no API, until it is resumed. Adds still land; running jobs finish.{{else}}Every process that reads this queue's storage takes its jobs again.{{end}}</p>
   <div class="table-wrap">
   <table>
@@ -31,11 +36,11 @@
   <form hx-post="/queues/{{pathEscape .Queue.ID}}/actions/{{pathEscape .Action}}" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" .}}
     <input type="hidden" name="confirm" value="1">
-    <button type="submit" class="primary">Confirm {{.Action}}</button>
+    {{template "confirm_acts" (confirmActs .Action "queue")}}
   </form>
 </section>{{end}}
 {{define "workflow_confirm"}}<section class="confirm" aria-labelledby="confirm-head">
-  <h2 id="confirm-head">Confirm cancel{{if .NoUndo}} without undo{{end}} of workflow <span class="mono">{{.ID}}</span> on {{.Server}}</h2>
+  <h2 id="confirm-head">Cancel workflow <span class="mono">{{.ID}}</span>{{if .NoUndo}} without undo{{end}} on {{.Server}}?</h2>
   <p>Waiting tasks are cancelled now; queued ones when a worker reaches them. {{if or .NoUndo (not .Undo)}}No undo job runs{{if .Undoable}}: the {{.Undoable}} completed task{{if ne .Undoable 1}}s{{end}} with one stay done{{end}}.{{else if .Undoable}}Then the undo jobs of the {{.Undoable}} completed task{{if ne .Undoable 1}}s{{end}} with one run.{{else}}No completed task has an undo job yet.{{end}} The cancel is stored with the workflow: it reaches every process that works on it.</p>
   <p>Sent to the first of these {{.Noun.Many}} that takes it: {{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span> {{end}}</p>
   <form hx-post="/workflows/{{pathEscape .ID}}/actions/cancel" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
@@ -43,16 +48,16 @@
     <input type="hidden" name="at" value="{{.At}}">
     {{if .NoUndo}}<input type="hidden" name="undo" value="false">
     {{end}}<input type="hidden" name="confirm" value="1">
-    <button type="submit" class="primary">Confirm cancel{{if .NoUndo}} without undo{{end}}</button>
+    {{template "confirm_acts" (confirmActs "cancel" (print "workflow" (or (and .NoUndo " without undo") "")))}}
   </form>
 </section>{{end}}
 {{define "job_confirm"}}<section class="confirm" aria-labelledby="confirm-head">
-  <h2 id="confirm-head">Confirm cancel of job <span class="mono">{{.ID}}</span> of queue {{template "qname" .Queue}} on {{.Server}}</h2>
+  <h2 id="confirm-head">Cancel job <span class="mono">{{.ID}}</span> of queue {{template "qname" .Queue}} on {{.Server}}?</h2>
   <p>A waiting job never runs. A running job has its context cancelled: it stops only if its handler watches <code>Job.Context()</code>, else it finishes as usual. The page shows how it ended once you reload it.</p>
   <p>Sent to the first of these {{.Noun.Many}} that has it: {{range $i, $l := .On}}{{if $i}}<span class="sr">, </span>{{end}}<span class="chip">{{$l}}</span> {{end}}</p>
   <form hx-post="{{.Ctl.Post}}" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" .}}
     <input type="hidden" name="confirm" value="1">
-    <button type="submit" class="primary">Confirm cancel</button>
+    {{template "confirm_acts" (confirmActs "cancel" "job")}}
   </form>
 </section>{{end}}

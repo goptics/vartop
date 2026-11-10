@@ -97,10 +97,9 @@
   });
 })();
 
-// The concurrency slider applies once it stops moving (600ms after the last
-// change: each arrow key is a change of its own). While it is dragged, the
-// number beside it shows the value it would set; a number typed moves the
-// slider. The two never disagree.
+// Concurrency: slider and box are one value, applied only by Set. While
+// the slider moves, the box shows its value; a number typed moves the
+// slider. The two never disagree, past the slider's max aside.
 document.addEventListener("input", (e) => {
   const el = e.target;
   if (!el.matches || !el.matches('.controls input[name="n"]')) return;
