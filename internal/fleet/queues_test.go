@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -661,10 +662,11 @@ func TestFetchAndCancelJobPastFailure(t *testing.T) {
 	}
 }
 
-// Counts over units: a shared store is counted once (the read with more
-// workflows when two differ), in-memory entries are summed, and one entry
-// without counts, one unit without the route or one that fails leaves no
-// counts at all.
+// Counts over units: a shared store is counted once (its first read when
+// two differ), in-memory entries are summed, unknown states ignored; one
+// entry without counts, a negative count, an overflowing sum, too many
+// entries, one unit without the route or one that fails leaves no counts
+// at all.
 func TestCountWorkflows(t *testing.T) {
 	n := func(running, completed, failed int64) map[contract.WorkflowState]int64 {
 		return map[contract.WorkflowState]int64{contract.WorkflowRunning: running, contract.WorkflowCompleted: completed, contract.WorkflowFailed: failed}
@@ -674,11 +676,32 @@ func TestCountWorkflows(t *testing.T) {
 		{{Counts: n(2, 0, 1)}, {Store: "s1", Shared: true, Counts: n(3, 11, 1)}, {Store: "s2", Shared: true, Counts: n(0, 5, 0)}},
 		{}, // an instance with no store
 	})
-	if want := n(1+2+3, 2+11+5, 1+1); !ok || !maps.Equal(got, want) {
+	if want := n(1+2+4, 2+9+5, 1+1); !ok || !maps.Equal(got, want) {
 		t.Errorf("merged = %v, ok %v; want %v", got, ok, want)
 	}
 	if got, ok := mergeWorkflowCounts([][]api.WorkflowCounts{{{Counts: n(1, 2, 0)}}, {{Store: "s1", Shared: true}}}); ok || got != nil {
 		t.Errorf("an entry without counts: %v, ok %v", got, ok)
+	}
+	odd := n(1, 0, 0)
+	odd["paused"] = 7 // a state varmq does not list
+	if got, ok := mergeWorkflowCounts([][]api.WorkflowCounts{{{Counts: odd}}}); !ok || !maps.Equal(got, n(1, 0, 0)) {
+		t.Errorf("an unknown state: %v, ok %v", got, ok)
+	}
+	for name, reads := range map[string][][]api.WorkflowCounts{
+		"negative":         {{{Counts: n(1, -1, 0)}}},
+		"negative unknown": {{{Counts: map[contract.WorkflowState]int64{"paused": -1}}}},
+		"overflow":         {{{Counts: n(math.MaxInt64, 0, 0)}}, {{Counts: n(1, 0, 0)}}},
+		"overflow all":     {{{Counts: n(math.MaxInt64, 1, 0)}}},
+		"too many":         {make([]api.WorkflowCounts, maxCountEntries+1)},
+	} {
+		for i := range reads[0] {
+			if reads[0][i].Counts == nil {
+				reads[0][i].Counts = n(0, 0, 0)
+			}
+		}
+		if got, ok := mergeWorkflowCounts(reads); ok || got != nil {
+			t.Errorf("%s: %v, ok %v; want no counts", name, got, ok)
+		}
 	}
 
 	wfs := fleettest.SampleWorkflows(1762228800000)

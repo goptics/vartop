@@ -198,41 +198,50 @@ func CountWorkflows(ctx context.Context, clients []*api.Client) (counts map[cont
 	return mergeWorkflowCounts(reads)
 }
 
+// maxCountEntries caps one instance's /workflow-counts entries; more: a
+// broken or hostile answer, no counts.
+const maxCountEntries = 256
+
 // mergeWorkflowCounts is the workflows per state over the units' entries:
-// a shared store counted once (two reads of one store that differ: the one
-// with more workflows, the later read of a store that only grows), the
-// rest summed. All or nothing: one entry without counts and no number is
-// right, so ok is false.
+// a shared store counted once (its first read, in client order; reads of
+// one store may differ, a later one is not truer), the rest summed. States
+// varmq does not list are ignored. All or nothing: an entry without
+// counts, a negative count, a sum past int64 or too many entries, and no
+// number is right, so ok is false.
 func mergeWorkflowCounts(reads [][]api.WorkflowCounts) (map[contract.WorkflowState]int64, bool) {
-	total := func(e api.WorkflowCounts) (n int64) {
-		for _, c := range e.Counts {
-			n += c
-		}
-		return n
-	}
-	shared := map[string]api.WorkflowCounts{}
+	seen := map[string]bool{}
 	sum := map[contract.WorkflowState]int64{}
-	add := func(e api.WorkflowCounts) {
-		for s, c := range e.Counts {
-			sum[s] += c
-		}
-	}
+	var all int64 // every state's sum: the "All" tab
 	for _, entries := range reads {
+		if len(entries) > maxCountEntries {
+			return nil, false
+		}
 		for _, e := range entries {
-			switch {
-			case e.Counts == nil:
+			if e.Counts == nil {
 				return nil, false
-			case !e.Shared || e.Store == "":
-				add(e)
-			default:
-				if old, seen := shared[e.Store]; !seen || total(e) > total(old) {
-					shared[e.Store] = e
+			}
+			for _, c := range e.Counts {
+				if c < 0 {
+					return nil, false
 				}
 			}
+			if e.Shared && e.Store != "" {
+				if seen[e.Store] {
+					continue
+				}
+				seen[e.Store] = true
+			}
+			for s, c := range e.Counts {
+				if !slices.Contains(api.WorkflowStates, s) {
+					continue
+				}
+				if sum[s]+c < 0 || all+c < 0 {
+					return nil, false
+				}
+				sum[s] += c
+				all += c
+			}
 		}
-	}
-	for _, e := range shared {
-		add(e)
 	}
 	return sum, true
 }
