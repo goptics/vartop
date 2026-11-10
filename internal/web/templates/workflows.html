@@ -1,5 +1,8 @@
+{{/* wf_tab: one state tab (WorkflowTab): a link, its count under the label when the fleet counts */}}
+{{define "wf_tab"}}<a href="{{.URL}}" class="s-{{.Class}}{{if .Zero}} zero{{end}}"{{if .Current}} aria-current="page"{{end}} aria-label="{{.Name}}"><span class="label">{{.Label}}</span>{{with .Count}}<span class="count">{{.}}</span>{{end}}</a>{{end}}
+
 {{define "live_body"}}{{with .WorkflowList}}
-<nav class="states wfstates" aria-label="Workflow state">{{range .Tabs}}<a href="{{.URL}}" class="s-{{.Class}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.Label}}</span></a>{{end}}</nav>
+<nav class="states wfstates" aria-label="Workflow state">{{range .Tabs}}{{template "wf_tab" .}}{{end}}<div class="grp" role="group" aria-label="Rollback"><span class="grp-label" aria-hidden="true">Rollback:</span>{{range .Rollback}}{{template "wf_tab" .}}{{end}}</div></nav>
 {{if .Rows}}<div class="table-wrap">
 <table class="wfs">
   <caption class="sr">Workflows, newest first; one row per workflow, however many {{$.Noun.Many}} report it</caption>
@@ -14,7 +17,7 @@
   <tbody>{{range .Rows}}
   <tr>
     <th scope="row" class="name"><a href="{{.URL}}">{{.ID}}</a></th>
-    <td data-label="State">{{template "wf_state" .State}}</td>
+    <td data-label="State">{{template "wf_state" .State}}{{with .Note}}<small class="reason">{{.}}</small>{{end}}</td>
     <td data-label="Tasks ended">{{template "progress" .Progress}}</td>
     <td data-label="Created">{{if .Created}}<time datetime="{{.CreatedISO}}" title="{{.CreFull}}">{{.Created}}</time>{{else}}—{{end}}</td>
     <td class="num" data-label="Duration">{{.Duration}}{{if .Running}} <span class="sub">so far</span>{{end}}</td>
@@ -29,7 +32,7 @@
 {{range .Failed}}<p class="err">{{.}}</p>{{end}}
 {{end}}{{end}}
 
-{{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
+{{define "live"}}<div id="live" class="wf-live">{{template "live_body" .}}</div>{{end}}
 
 {{define "content"}}<header class="pagehead"><h1>Workflows</h1><p class="sub">Task graphs over queues, newest first; each once, however many {{.Noun.Many}} report it</p></header>
 {{template "live" .}}{{end}}

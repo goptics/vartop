@@ -567,13 +567,29 @@ a.wchip:hover { border-color: var(--accent); color: var(--accent); }
 .s-compensating { --c: var(--warn); }
 .s-cancelled { --c: var(--bad); }
 .wst.s-compensating::before, .wst.s-cancelled::before, .wst.s-waiting::before, .wst.s-unknown::before { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
-/* state tabs: all, then every state; no counts (varmq counts none) */
-.wfstates { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); overflow-x: auto; }
-.wfstates a { padding: 9px 14px; }
-.wfstates .label { white-space: nowrap; }
+/* state tabs: all and each state, its count under it when the fleet
+   counts (else no tab has one); the rollback states a group of their own.
+   They wrap: each item's top and left hairline hides under the frame at
+   a row's start (-1px), so a wrapped row needs no breakpoint */
+.wfstates { display: flex; flex-wrap: wrap; }
+.wfstates > * { margin: -1px 0 0 -1px; border: 0 solid var(--line); border-width: 1px 0 0 1px; }
+.wfstates > a { flex: 1 1 auto; padding: 9px 14px; }
+.wfstates .grp { display: flex; flex: 0 1 auto; border-left-color: var(--line-strong); }
+.wfstates .grp-label { align-self: center; padding: 0 2px 0 14px; color: var(--subtle); font-size: var(--fs-1); white-space: nowrap; }
+.wfstates .grp a { padding: 9px 12px; border-left: 0; }
+.wfstates .label { white-space: nowrap; text-transform: none; }
 .wfstates .label::before { background: var(--c, var(--subtle)); }
 .wfstates .s-all .label::before { display: none; }
 .wfstates .s-compensating .label::before, .wfstates .s-cancelled .label::before { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
+.wfstates .zero .count { color: var(--subtle); font-weight: 400; }
+@media (pointer: coarse) {
+  .wfstates a { min-height: 44px; justify-content: center; }
+}
+/* three rows on a phone: too tall to stick; the rollback group a row of its own */
+@media (max-width: 640px) {
+  .wfstates { position: static; overflow: hidden; }
+  .wfstates .grp { flex-basis: 100%; }
+}
 /* progress: completed ok, failed bad, cancelled bad outline, in flight warn, the rest track */
 .prog { display: inline-flex; align-items: center; gap: 8px; }
 .prog .bar { display: flex; width: 72px; height: 6px; overflow: hidden; border-radius: 3px; background: var(--line); }
@@ -587,6 +603,8 @@ a.wchip:hover { border-color: var(--accent); color: var(--accent); }
 .wfs .name a { font-family: var(--mono); font-size: var(--fs-2); }
 .wfs .on { white-space: normal; color: var(--subtle); }
 .wfs .on .chip { margin: 2px 4px 2px 0; }
+.wfs .reason { display: block; color: var(--subtle); font-size: var(--fs-1); }
+.wfs .s-compensation-failed + .reason { color: var(--bad); }
 @media (max-width: 640px) {
   .wfs thead { position: absolute; left: -9999px; }
   .wfs tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
@@ -610,55 +628,91 @@ h2.section .sub { font-weight: 400; }
 .tasks td[data-label="Depends on"] { white-space: normal; min-width: 10em; }
 .tasks .name .chip { margin-left: 6px; font-family: var(--sans); }
 .tasks .reason { display: block; max-width: 28em; color: var(--subtle); font-size: var(--fs-1); white-space: normal; overflow-wrap: anywhere; }
-.tasks tr:target > * { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.tasks tr:target > *, .tasks tr.hl > * { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.tasks tr[hidden] { display: none; }
+.tasks .num .chip, .tasks .num .sub { font-size: var(--fs-1); }
+#task-shown:empty { display: none; }
+/* rollback: how the undo jobs stand, over the graph; a failed one in the
+   danger box of .errors (hairline and tint, no stripe), its words say it */
+.rollback { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-3); background: var(--panel); }
+.rollback.bad { border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); background: color-mix(in srgb, var(--bad) 7%, var(--panel)); }
+.rollback h2 { margin: 0 0 4px; font-size: var(--fs-4); font-weight: 600; }
+.rollback.bad h2 { color: var(--bad); }
+.rollback p { margin: 0; }
+.rollback h3 { margin: 12px 0 4px; color: var(--subtle); font-size: var(--fs-2); font-weight: 600; }
+.rollback ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.rollback li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.rollback .mono { font-size: var(--fs-2); }
+.rollback .what { display: inline-flex; align-items: baseline; gap: 6px; }
+.rollback code.err { flex-basis: 100%; margin: 0; font-family: var(--mono); font-size: var(--fs-1); white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .tasks thead { position: absolute; left: -9999px; }
   .tasks tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
   .tasks tbody tr:last-child { border-bottom: 0; }
   .tasks th, .tasks td { padding: 0; border: 0; background: none; white-space: normal; text-align: left; }
-  .tasks .name, .tasks td:nth-child(4) { grid-column: 1 / -1; min-width: 0; }
+  .tasks .name, .tasks td[data-label="Queue"], .tasks td[data-label="Undo"] { grid-column: 1 / -1; min-width: 0; }
   .tasks td.num { text-align: left; }
   .tasks td[data-label]::before { content: attr(data-label); display: block; color: var(--subtle); font-size: var(--fs-1); }
 }
 
-/* the graph: a ground well; with workflow.js it pans and zooms in place
-   (.pz), else it scrolls */
+/* the graph: a ground well as tall as the graph needs (--gh, within
+   bounds): the same with workflow.js and without, so nothing moves when
+   the script takes over or a poll swaps #live. With the script it pans and
+   zooms in place (.pz), else it scrolls. A workflow page's #live
+   (.wf-live) is no scroll anchor: htmx has the new #live and the old one
+   in the page for a moment, and a browser that anchors on the focused
+   element in the old one scrolls the page by the height of the new */
+.wf-live { overflow-anchor: none; }
 .dagbox { position: relative; margin: 0 0 16px; }
-.dag-port { position: relative; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-3); }
-.dag-port.pz { height: clamp(300px, 58vh, 560px); overflow: hidden; cursor: grab; touch-action: none; }
+.dag-port { position: relative; height: clamp(300px, min(62vh, var(--gh, 560px)), 560px); overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-3); }
+/* touch: a finger down the well scrolls the page, across it pans; the Pan
+   button (.free) gives the well every drag */
+.dag-port.pz { overflow: hidden; cursor: grab; touch-action: pan-y; }
+.dag-port.pz.free { touch-action: none; }
 .dag-port.pz.dragging { cursor: grabbing; }
 .dag-port.pz .dag { position: absolute; inset: 0; width: 100%; height: 100%; }
 .dag-port:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.dag { display: block; font-family: var(--sans); }
-.dag .edge { fill: none; stroke: color-mix(in srgb, var(--subtle) 70%, transparent); stroke-width: 1.5; }
+/* --mark: the stroke of a box, 3:1 on the well in both themes */
+.dag { display: block; font-family: var(--sans); --mark: color-mix(in srgb, var(--subtle) 70%, var(--bg)); }
+.dag .edge { fill: none; stroke: var(--subtle); stroke-width: 1.5; }
 .dag .edge.always { stroke-dasharray: 5 4; }
+.dag .edge.dead { stroke-dasharray: 1 5; stroke-linecap: round; }
 .dag .flow { fill: none; stroke: var(--warn); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 2 10; animation: dag-flow .9s linear infinite; pointer-events: none; }
 @keyframes dag-flow { to { stroke-dashoffset: -12; } }
 .dag .node { --c: var(--subtle); cursor: pointer; outline: none; }
-.dag .node .box { fill: var(--panel); stroke: var(--line-strong); stroke-width: 1; transition: stroke .12s, opacity .12s; }
+.dag .node .box { fill: var(--panel); stroke: var(--mark); stroke-width: 1; transition: stroke .12s, opacity .12s; }
 .dag .node .dot { fill: var(--c); }
+/* failed: a cross; cancelled: a struck ring: told apart without colour */
+.dag .node .mark { fill: none; stroke: var(--c); stroke-width: 2; stroke-linecap: round; }
 .dag .node .name { fill: var(--fg); font-size: 13px; font-weight: 600; }
 .dag .node .meta { fill: var(--subtle); font-size: 12px; font-weight: 500; }
+.dag .slow, .dag-legend .key-slow { fill: none; stroke: var(--subtle); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .dag .t-completed { --c: var(--ok); }
 .dag .t-failed { --c: var(--bad); }
-.dag .t-failed .box { fill: color-mix(in srgb, var(--bad) 7%, var(--panel)); stroke: color-mix(in srgb, var(--bad) 55%, var(--line)); }
+.dag .t-failed .box { fill: color-mix(in srgb, var(--bad) 7%, var(--panel)); stroke: var(--bad); }
 .dag .t-pending, .dag .t-processing { --c: var(--warn); }
-.dag .live .box { stroke: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.dag .live .box { stroke: var(--warn); }
 .dag .t-cancelled { --c: var(--bad); }
 .dag .t-cancelled .dot, .dag .t-waiting .dot, .dag .t-unknown .dot { fill: none; stroke: var(--c); stroke-width: 1.5; }
 .dag .t-cancelled .name, .dag .t-waiting .name { fill: var(--subtle); }
 .dag .t-waiting .box { fill: var(--bg); stroke-dasharray: 4 3; }
 .dag .halo { fill: none; stroke: var(--warn); stroke-width: 2; opacity: 0; pointer-events: none; transform-box: fill-box; transform-origin: center; animation: dag-pulse 1.8s ease-out infinite; }
 @keyframes dag-pulse { 0% { opacity: .6; transform: scale(1); } 100% { opacity: 0; transform: scale(1.08, 1.25); } }
-.dag .undo rect { fill: var(--raised); stroke: var(--line-strong); }
+.dag .undo rect { fill: var(--raised); stroke: var(--mark); }
 .dag .undo text { fill: var(--fg); font-size: 12px; font-weight: 500; }
-.dag .undo .ico-p { fill: none; stroke: var(--subtle); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.dag .undo .ico-p { fill: none; stroke: var(--fg); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* an undo job that failed: the task is not rolled back, the whole node says so */
+.dag .undo-failed .box { stroke: var(--bad); }
+.dag .undo.t-failed rect { stroke: var(--bad); }
+.dag .undo.t-failed text { fill: var(--bad); font-weight: 600; }
+.dag .undo.t-failed .ico-p { stroke: var(--bad); }
 .dag .node:hover .box, .dag .node:focus-visible .box { stroke: var(--accent); }
-.dag .node:focus-visible .box { stroke-width: 2; }
-.dag .node.sel .box { stroke: var(--accent); stroke-width: 2; fill: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
-/* a task hovered or focused: its upstream and downstream stay, the rest fade */
-.dag.trace .node:not(.hl) { opacity: .32; }
-.dag.trace .edge:not(.hl), .dag.trace .flow:not(.hl) { opacity: .15; }
+.dag .node:focus-visible .box { stroke-width: 3; }
+.dag .node.sel .box, .dag .node:target .box { stroke: var(--accent); stroke-width: 2; fill: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+/* a task hovered or focused: its upstream and downstream stay, the rest
+   fade; a state chip pressed (.filter): the tasks of other states fade */
+.dag.trace .node:not(.hl), .dag.filter .node:not(.match) { opacity: .32; }
+.dag.trace .edge:not(.hl), .dag.trace .flow:not(.hl), .dag.filter .edge:not(.hl), .dag.filter .flow:not(.hl) { opacity: .15; }
 .dag .edge.hl { stroke: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .dag .flow, .dag .halo { animation: none; }
@@ -667,12 +721,32 @@ h2.section .sub { font-weight: 400; }
 }
 .dag-tools { position: absolute; z-index: 2; top: 10px; left: 10px; display: flex; gap: 4px; }
 .dag-tools button { display: inline-flex; padding: 6px; background: var(--panel); }
+.dag-tools button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.dag-tools .pan { display: none; }
+@media (any-pointer: coarse) {
+  .dag-tools .pan { display: inline-flex; }
+}
+@media (pointer: coarse) {
+  .dag-tools button { padding: 14px; }
+}
 .dag-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin: 8px 0 0; padding: 0; list-style: none; color: var(--subtle); font-size: var(--fs-1); }
 .dag-legend li { display: inline-flex; align-items: center; gap: 6px; }
-.dag-legend .wst { color: var(--subtle); }
+/* a state of the legend: its tasks counted; with workflow.js a toggle
+   that shows the tasks of the pressed states only (without: disabled, a
+   plain key) */
+.dag-legend .wst { padding: 2px 8px; border-color: var(--line-strong); border-radius: 999px; background: none; color: var(--subtle); font-size: var(--fs-1); font-weight: 400; }
+.dag-legend .wst .n { color: var(--fg); font-weight: 600; }
+.dag-legend .wst[data-n="0"] .n { color: var(--subtle); font-weight: 400; }
+.dag-legend .wst:disabled { border-color: transparent; opacity: 1; cursor: default; }
+.dag-legend .wst:enabled:hover { border-color: var(--subtle); background: var(--raised); }
+.dag-legend .wst[aria-pressed="true"] { border-color: var(--accent); background: var(--raised); color: var(--fg); }
 .dag-legend .key-edge { fill: none; stroke: var(--subtle); stroke-width: 1.5; }
 .dag-legend .key-edge.always { stroke-dasharray: 5 4; }
-.dag-legend .hint { margin-left: auto; }
+.dag-legend .key-edge.dead { stroke-dasharray: 1 5; stroke-linecap: round; }
+.dag-help { margin: 6px 0 0; color: var(--subtle); font-size: var(--fs-1); }
+@media (pointer: coarse) {
+  .dag-legend .wst:enabled { min-height: 44px; padding-inline: 12px; }
+}
 /* the task panel: a column of its own right of the well, which narrows
    for it (nothing hides under it); under the well on a phone */
 .dagbox.panel-open .dag-port { margin-right: 352px; }

@@ -11,20 +11,37 @@
 {{/* undo_icon: 12px stroke arrow turning back */}}
 {{define "undo_icon"}}<path class="ico-p" d="M4 6.5h5.5a3 3 0 0 1 0 6H6M6.5 4 4 6.5 6.5 9"/>{{end}}
 
-{{/* graph: the task graph (GraphView) as inline SVG: a link per task, to its table row */}}
+{{/* graph: the task graph (GraphView) as inline SVG: a link per task, to its table row; the nodes in topological order */}}
 {{define "graph"}}<svg class="dag" viewBox="0 0 {{.Width}} {{.Height}}" width="{{.Width}}" height="{{.Height}}" data-w="{{.Width}}" data-h="{{.Height}}" role="group" aria-label="Task graph">
 <defs><marker id="dag-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1 9 5 0 9z" fill="context-stroke"/></marker></defs>
 <g class="view">
-<g class="edges">{{range .Edges}}<path class="edge{{if .Always}} always{{end}}" d="{{.Path}}" data-from="{{.From}}" data-to="{{.To}}" marker-end="url(#dag-arrow)"/>{{if .Live}}<path class="flow" d="{{.Path}}" data-from="{{.From}}" data-to="{{.To}}"/>{{end}}{{end}}</g>
-<g class="nodes">{{range .Nodes}}<a class="node t-{{.Task.State.Class}}{{if .Task.Live}} live{{end}}" href="#task-{{.Task.I}}" data-i="{{.Task.I}}" aria-label="{{.Task.Label}}" transform="translate({{.X}} {{.Y}})">{{with .Task}}<title>{{.Name}}{{with .Queue.ID}} · {{.}}{{end}}</title>
+<g class="edges">{{range .Edges}}<path class="edge{{if .Always}} always{{end}}{{if .Dead}} dead{{end}}" d="{{.Path}}" data-from="{{.From}}" data-to="{{.To}}" marker-end="url(#dag-arrow)"/>{{if .Live}}<path class="flow" d="{{.Path}}" data-from="{{.From}}" data-to="{{.To}}"/>{{end}}{{end}}</g>
+<g class="nodes">{{range .Nodes}}<a class="node t-{{.Task.State.Class}}{{if .Task.Live}} live{{end}}{{with .Task.Undo}}{{if eq .State.Class "failed"}} undo-failed{{end}}{{end}}" id="node-{{.Task.I}}" href="#task-{{.Task.I}}" data-i="{{.Task.I}}"{{with .Task.Chip}} data-chip="{{.}}"{{end}}{{with .Task.JobURL}} data-job="{{.}}"{{end}} aria-label="{{.Task.Label}}" transform="translate({{.X}} {{.Y}})">{{with .Task}}<title>{{.Name}}{{with .Queue.ID}} · {{.}}{{end}}</title>
 {{if .Live}}<rect class="halo" x="-1" y="-1" width="{{$.HaloW}}" height="58" rx="9"/>{{end}}<rect class="box" width="{{$.NodeW}}" height="{{$.NodeH}}" rx="8"/>
-<circle class="dot" cx="17" cy="20" r="4.5"/>
+{{if eq .State.Class "failed"}}<path class="mark" d="M13 16l8 8m0-8-8 8"/>{{else}}<circle class="dot" cx="17" cy="20" r="4.5"/>{{if eq .State.Class "cancelled"}}<path class="mark" d="M12.5 24.5l9-9"/>{{end}}{{end}}
 <text class="name" x="30" y="24">{{.Short}}</text>
-<text class="meta" x="30" y="42">{{.State.Label}}{{with .QueueShort}} · {{.}}{{end}}</text>
-{{with .Undo}}<g class="undo t-{{.State.Class}}" transform="translate({{$.UndoX}} 47)"><rect width="72" height="18" rx="9"/><svg x="6" y="1" width="16" height="16" viewBox="0 0 16 16">{{template "undo_icon"}}</svg><text x="23" y="13">undo</text><circle class="dot" cx="62" cy="9" r="3"/></g>{{end}}{{end}}
+<text class="meta" x="30" y="42">{{.State.Label}}{{if .Run}} · {{.Run}}{{else}}{{with .QueueShort}} · {{.}}{{end}}{{end}}</text>
+{{if .Slowest}}<g class="slow" transform="translate({{$.SlowX}} 32)"><circle cx="6" cy="6" r="5"/><path d="M6 3.2V6l2 1.4"/></g>{{end}}
+{{with .Undo}}{{if eq .State.Class "failed"}}<g class="undo t-failed" transform="translate({{$.UndoFX}} 47)"><rect width="96" height="18" rx="9"/><svg x="6" y="1" width="16" height="16" viewBox="0 0 16 16">{{template "undo_icon"}}</svg><text x="23" y="13">undo failed</text></g>{{else}}<g class="undo t-{{.State.Class}}" transform="translate({{$.UndoX}} 47)"><rect width="72" height="18" rx="9"/><svg x="6" y="1" width="16" height="16" viewBox="0 0 16 16">{{template "undo_icon"}}</svg><text x="23" y="13">undo</text><circle class="dot" cx="62" cy="9" r="3"/></g>{{end}}{{end}}{{end}}
 </a>{{end}}</g>
 </g>
 </svg>{{end}}
+
+{{/* task_times: how long a task (TaskView) waited and ran, in a kv list; nothing without times */}}
+{{define "task_times"}}{{with .Wait}}<dt>Waited</dt><dd>{{.}}</dd>{{end}}{{if .Run}}<dt>{{if .RunSoFar}}Running for{{else}}Ran{{end}}</dt><dd>{{.Run}}{{if .Slowest}} <span class="chip">slowest on the path</span>{{end}}</dd>{{end}}{{end}}
+
+{{/* rollback: how the undo jobs stand (RollbackView): loud when the rollback failed, progress while it runs */}}
+{{define "rollback"}}<section id="rollback" class="rollback{{if .Failed}} bad{{end}}" aria-labelledby="rollback-h">
+  <h2 id="rollback-h">{{if .Failed}}Rollback failed{{else}}Rolling back{{end}}</h2>
+  {{if .Failed}}<p><strong>{{len .Left}} of {{.Total}} {{if eq .Total 1}}step was{{else}}steps were{{end}} not rolled back.</strong> The changes {{if eq (len .Left) 1}}its task{{else}}their tasks{{end}} made are still in place.</p>
+  {{else}}<p><strong>{{.Done}} of {{.Total}} undone.</strong> The undo jobs run from the last completed task back.</p>{{end}}
+  {{with .Left}}<h3>{{if $.Failed}}Not rolled back{{else}}Still to undo{{end}}</h3>
+  <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a>{{with .Undo}}<span class="what">undo {{template "wf_state" .State}}</span>{{if .JobURL}}<a href="{{.JobURL}}">Undo job <span class="mono">{{.JobID}}</span></a>{{end}}{{with .Reason}}<code class="err">{{.}}</code>{{end}}{{end}}</li>{{end}}</ul>{{end}}
+  {{with .Undone}}<h3>Rolled back</h3>
+  <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a>{{with .Undo}}{{with .Run}}<span class="sub">undone in {{.}}</span>{{end}}{{end}}</li>{{end}}</ul>{{end}}
+  {{with .Cause}}<h3>Why it rolled back</h3>
+  <ul>{{range .}}<li><a class="mono" href="#task-{{.I}}">{{.Name}}</a><span class="what">{{template "wf_state" .State}}</span>{{with .Reason}}<code class="err">{{.}}</code>{{end}}</li>{{end}}</ul>{{end}}
+</section>{{end}}
 
 {{/* task_detail: a task's facts (TaskView), in the side panel and for each undo job */}}
 {{define "task_facts"}}<dl class="kv">
@@ -32,6 +49,7 @@
   <dt>Queue</dt><dd>{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</dd>
   <dt>Job ID</dt><dd>{{if .JobURL}}<a class="mono" href="{{.JobURL}}">{{.JobID}}</a>{{else if .JobID}}<span class="mono">{{.JobID}}</span>{{else}}—{{end}}</dd>
   <dt>Result</dt><dd>{{or .Result "—"}}</dd>
+  {{template "task_times" .}}
   {{with .Reason}}<dt>Reason</dt><dd><code class="err">{{.}}</code></dd>{{end}}
 </dl>{{end}}
 {{define "task_detail"}}<h2 class="mono">{{.Name}}</h2>
@@ -42,7 +60,7 @@
 </dl>
 {{with .Undo}}<h3>Undo job</h3>{{template "task_facts" .}}{{end}}{{end}}
 
-{{define "live"}}<div id="live" hx-disinherit="*"{{if gt .IntervalSec 0}} hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="this" hx-swap="outerHTML" hx-sync="#page:drop"{{end}}>{{with .Workflow}}
+{{define "live"}}<div id="live" hx-disinherit="*"{{if gt .IntervalSec 0}} hx-get="{{.SelfURL}}" hx-trigger="every {{.IntervalSec}}s" hx-select="#live" hx-select-oob="#banner,#status" hx-target="this" hx-swap="outerHTML" hx-sync="#page:drop"{{end}} class="wf-live">{{with .Workflow}}
 {{if not .Pick}}<header class="qhead wfhead">
   <div class="wftitle"><h1 class="qid">{{.ID}}</h1>{{template "wf_state" .State}}</div>
   <p class="sub">Reported by {{range .On}}<span class="chip">{{.}}</span> {{end}}</p>
@@ -55,6 +73,7 @@
   {{template "wfctl" .Ctl}}
 </header>
 <div id="results" aria-live="polite" hx-preserve="true"></div>
+{{with .Rollback}}{{template "rollback" .}}{{end}}
 {{if .Ambiguous}}<p class="note" role="note">More than one storage on {{range $i, $l := .Ambiguous}}{{if $i}}, {{end}}{{$l}}{{end}} holds a workflow with this ID (409): varmq reads and cancels it there by ID only, so this page shows the copy the other {{$.Noun.Many}} report.</p>{{end}}
 {{if .Others}}<p class="note" role="note">Other workflows share this ID (in-memory, on other {{$.Noun.Many}}): {{range $i, $o := .Others}}{{if $i}}, {{end}}<a href="{{$o.URL}}">created {{$o.Created}}</a> ({{$o.State}}){{end}}</p>{{end}}
 {{range .Failed}}<p class="err">{{.}}</p>{{end}}
@@ -63,25 +82,24 @@
     <button type="button" data-zoom="in" aria-label="Zoom in" title="Zoom in (+)"><svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M8 3.5v9M3.5 8h9"/></svg></button>
     <button type="button" data-zoom="out" aria-label="Zoom out" title="Zoom out (-)"><svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.5 8h9"/></svg></button>
     <button type="button" data-zoom="fit" aria-label="Fit to view" title="Fit to view (0)"><svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg></button>
+    <button type="button" class="pan" data-pan aria-pressed="false" aria-label="Pan with one finger" title="Pan with one finger"><svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M8 2v12M2 8h12M6 4l2-2 2 2M6 12l2 2 2-2M4 6 2 8l2 2M12 6l2 2-2 2"/></svg></button>
   </div>
-  <div class="dag-port" tabindex="0" role="group" aria-label="Task graph of {{.ID}}: tab to a task, Enter for its details; drag or arrow keys to pan, Ctrl or Command + scroll, or + and -, to zoom, 0 to fit" aria-describedby="dag-legend">{{template "graph" .Graph}}</div>
+  <div class="dag-port" style="--gh:{{.Graph.WellH}}px" tabindex="0" role="group" aria-label="Task graph of {{.ID}}" aria-describedby="dag-help">{{template "graph" .Graph}}</div>
   <aside class="wf-panel" hidden aria-label="Task details" tabindex="-1">
     <button type="button" class="close" aria-label="Close task details"><svg class="ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
     <div class="body"></div>
   </aside>
-  <ul class="dag-legend" id="dag-legend">
-    <li><span class="wst s-waiting">waiting</span></li>
-    <li><span class="wst s-pending">pending (queued or running)</span></li>
-    <li><span class="wst s-completed">completed</span></li>
-    <li><span class="wst s-failed">failed</span></li>
-    <li><span class="wst s-cancelled">cancelled</span></li>
+  <ul class="dag-legend" id="dag-legend" aria-label="Task states: with the script, a state shows its tasks only">
+    {{range .Graph.Chips}}<li><button type="button" class="wst s-{{.Key}}" data-chip="{{.Key}}" data-n="{{.Count}}" aria-pressed="false" disabled>{{.Label}} <span class="n">{{.Count}}</span><span class="sr"> {{if eq .Count 1}}task{{else}}tasks{{end}}</span></button></li>{{end}}
     <li><svg width="28" height="8" aria-hidden="true" focusable="false"><path class="key-edge" d="M1 4h26"/></svg>after its dependencies</li>
     <li><svg width="28" height="8" aria-hidden="true" focusable="false"><path class="key-edge always" d="M1 4h26"/></svg>runs always</li>
-    <li class="hint">Drag to pan · Ctrl/Cmd + scroll to zoom</li>
+    <li><svg width="28" height="8" aria-hidden="true" focusable="false"><path class="key-edge dead" d="M1 4h26"/></svg>stopped: its task failed or was cancelled</li>
+    {{if .Graph.Slowest}}<li><svg class="key-slow" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="5"/><path d="M6 3.2V6l2 1.4"/></svg>slowest task on the path to the end</li>{{end}}
   </ul>
+  <p class="dag-help" id="dag-help" hidden>Drag or arrow keys: pan. Ctrl/Cmd + scroll, or + and -: zoom. 0: fit. On a task, Enter opens its job, Space its details.</p>
 </section>{{else if .Tasks}}<p class="note" role="note">{{len .Tasks}} tasks: too many edges to draw a graph; the table lists them.</p>{{end}}
 <div hidden>{{range .Tasks}}<div id="task-detail-{{.I}}">{{template "task_detail" .}}</div>{{end}}</div>
-<h2 class="section">Tasks <span class="sub">in the order the producer added them</span></h2>
+<h2 class="section">Tasks <span class="sub">in the order the producer added them</span><span class="sub" id="task-shown"></span></h2>
 <div class="table-wrap">
 <table class="tasks">
   <caption class="sr">Tasks of workflow {{.ID}}</caption>
@@ -91,18 +109,22 @@
     <th scope="col">Depends on</th>
     <th scope="col">Queue</th>
     <th scope="col">Job ID</th>
+    {{if .Timed}}<th scope="col" class="num">Waited</th>
+    <th scope="col" class="num">Ran</th>{{end}}
     <th scope="col" class="num">Result</th>
     <th scope="col">Undo</th>
   </tr></thead>
   <tbody>{{range .Tasks}}
-  <tr id="task-{{.I}}">
-    <th scope="row" class="name"><span class="mono">{{.Name}}</span>{{if .Always}} <span class="chip">always</span>{{end}}</th>
+  <tr id="task-{{.I}}"{{with .Chip}} data-chip="{{.}}"{{end}}>
+    <th scope="row" class="name">{{if $.Workflow.Graph.Nodes}}<a class="mono" href="#node-{{.I}}">{{.Name}}</a>{{else}}<span class="mono">{{.Name}}</span>{{end}}{{if .Always}} <span class="chip">always</span>{{end}}</th>
     <td data-label="State">{{template "wf_state" .State}}{{with .Reason}}<small class="reason">{{.}}</small>{{end}}</td>
     <td data-label="Depends on">{{range $i, $d := .Deps}}{{if $i}}, {{end}}<span class="mono">{{$d}}</span>{{else}}—{{end}}</td>
     <td data-label="Queue">{{if .QueueURL}}<a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a>{{else}}—{{end}}</td>
     <td data-label="Job ID">{{if .JobURL}}<a class="mono" href="{{.JobURL}}">{{.JobID}}</a>{{else if .JobID}}<span class="mono">{{.JobID}}</span>{{else}}—{{end}}</td>
+    {{if $.Workflow.Timed}}<td class="num" data-label="Waited">{{or .Wait "—"}}</td>
+    <td class="num" data-label="Ran">{{if .Run}}{{.Run}}{{if .RunSoFar}} <span class="sub">so far</span>{{end}}{{if .Slowest}} <span class="chip">slowest</span>{{end}}{{else}}—{{end}}</td>{{end}}
     <td class="num" data-label="Result">{{or .Result "—"}}</td>
-    <td data-label="Undo">{{with .Undo}}{{template "wf_state" .State}}{{else}}—{{end}}</td>
+    <td data-label="Undo">{{with .Undo}}{{template "wf_state" .State}}{{with .Run}} <span class="sub">{{.}}</span>{{end}}{{if .JobURL}} <a href="{{.JobURL}}">undo job</a>{{end}}{{with .Reason}}<small class="reason">{{.}}</small>{{end}}{{else}}—{{end}}</td>
   </tr>{{end}}
   </tbody>
 </table>

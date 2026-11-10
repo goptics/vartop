@@ -1,18 +1,24 @@
 // The workflow page's script. The task graph (server-rendered SVG) pans and
 // zooms in place: drag, Ctrl + scroll or pinch, the +, - and fit buttons,
-// or keys on the focused graph (+ - 0, arrows). A task hovered or focused
-// shows its upstream and downstream; a task clicked, or Enter on it, opens
-// its details beside the graph (Escape closes). Without this script the
-// graph scrolls and each task links to its table row.
+// or keys on the focused graph or a task (+ - 0, arrows). On touch a finger
+// down the graph scrolls the page; the Pan button gives the graph every
+// drag. A task hovered or focused shows its upstream and downstream, and
+// its table row (and the row its task). A task clicked, or Space on it,
+// opens its details beside the graph (Escape closes); Enter opens its job.
+// A state chip of the legend shows the tasks of that state only, in the
+// graph and the table. Without this script the graph scrolls and each task
+// links to its table row.
 //
 // While the workflow runs #live polls and is swapped whole: the view, the
-// open task and whatever had focus in it are kept across each swap.
+// open task, the chips pressed and whatever had focus in it are kept
+// across each swap. The page's scroll is CSS's to keep (app.css, #live).
 (() => {
   const MIN = 0.2, MAX = 2.5;
   let view = null; // {k, x, y}: the pan and zoom of the graph shown
   let shown = ""; // the page the view is of
   let open = null; // the index of the task whose panel is open
-  let height = ""; // the graph well's height, kept across swaps
+  let free = false; // touch: the graph takes every drag (the Pan button)
+  const chips = new Set(); // the state chips pressed
   let drag = null; // the pointer drag under way
   const pointers = new Map(); // pointers down on the graph: pinch
 
@@ -30,16 +36,53 @@
     p.g.setAttribute("transform", `translate(${view.x.toFixed(1)} ${view.y.toFixed(1)}) scale(${view.k.toFixed(4)})`);
   }
 
-  // fit shows the whole graph, at most at its own size, centred. readable
-  // (the first view): never under READ, so a wide graph on a phone opens at
-  // its roots, the rest a drag away.
-  const READ = 0.6;
-  function fit(p, readable) {
+  // fit shows the whole graph, at most at its own size, centred.
+  // READ: the least zoom that reads (a 13px name at 11px).
+  const READ = 0.85;
+  function fit(p) {
     const w = +p.svg.dataset.w, h = +p.svg.dataset.h;
     const cw = p.port.clientWidth, ch = p.port.clientHeight;
-    const whole = Math.min(1, cw / w, ch / h);
-    const k = clamp(readable ? Math.max(READ, whole) : whole);
-    view = { k, x: w * k > cw ? 0 : (cw - w * k) / 2, y: (ch - h * k) / 2 };
+    const k = clamp(Math.min(1, cw / w, ch / h));
+    view = { k, x: (cw - w * k) / 2, y: (ch - h * k) / 2 };
+    apply(p);
+  }
+
+  // rect is task node n's box in the graph's own units.
+  function rect(n) {
+    const [x, y] = n.getAttribute("transform").match(/[-\d.]+/g).map(Number);
+    const box = n.querySelector(".box");
+    return { x, y, w: +box.getAttribute("width"), h: +box.getAttribute("height") };
+  }
+
+  // first is the view a graph opens with: whole when that reads, else at
+  // READ on the first task not ended (the nodes are in topological
+  // order), or the first that failed, a third in from the left; the rest
+  // is a drag away.
+  function first(p) {
+    fit(p);
+    if (view.k >= READ) return;
+    const w = +p.svg.dataset.w, h = +p.svg.dataset.h;
+    const cw = p.port.clientWidth, ch = p.port.clientHeight, k = READ;
+    const n = p.svg.querySelector(".node.live, .node.t-waiting") || p.svg.querySelector(".node.undo-failed, .node.t-failed");
+    const r = n ? rect(n) : { x: 0, y: 0, w: 0, h: 0 };
+    // within the graph's edges; a side that fits is centred
+    const along = (c, size, at) => (size * k <= c ? (c - size * k) / 2 : Math.min(0, Math.max(c - size * k, at)));
+    // the tool buttons cover the well's top: the graph's top starts under them
+    const t = p.box.querySelector(".dag-tools").offsetHeight + 10;
+    view = { k, x: along(cw, w, n ? cw / 3 - (r.x + r.w / 2) * k : 0), y: t + along(ch - t, h, n ? (ch - t) / 2 - (r.y + r.h / 2) * k : 0) };
+    apply(p);
+  }
+
+  // show pans the least that brings task node n whole into the well.
+  function show(p, n) {
+    const r = rect(n), pad = 12;
+    const cw = p.port.clientWidth, ch = p.port.clientHeight;
+    const x0 = r.x * view.k + view.x, y0 = r.y * view.k + view.y;
+    const x1 = x0 + r.w * view.k, y1 = y0 + (r.h + 10) * view.k; // its undo badge with it
+    if (x0 < pad) view.x += pad - x0;
+    else if (x1 > cw - pad) view.x -= x1 - (cw - pad);
+    if (y0 < pad) view.y += pad - y0;
+    else if (y1 > ch - pad) view.y -= y1 - (ch - pad);
     apply(p);
   }
 
@@ -52,9 +95,9 @@
     apply(p);
   }
 
-  // init takes over a graph just rendered: the first time a well as tall
-  // as the graph needs (within bounds) and the whole graph in view; after a
-  // swap, the view, panel and focus it had.
+  // init takes over a graph just rendered: the first time its first
+  // view; after a swap, the view, chips, panel and focus it had. The
+  // well's height is CSS's (--gh): nothing moves when the script starts.
   function init() {
     const p = parts();
     // htmx fires afterSwap for the oob parts of a poll too: a graph taken
@@ -64,19 +107,52 @@
     p.port.classList.add("pz");
     p.svg.removeAttribute("viewBox"); // user units are px; .view pans and zooms
     p.box.querySelector(".dag-tools").hidden = false;
+    p.box.querySelector(".dag-help").hidden = false;
+    for (const c of p.box.querySelectorAll("[data-chip]")) c.disabled = c.dataset.n === "0";
     const page = location.pathname + location.search;
     if (!view || shown !== page) {
       shown = page;
-      const k = Math.max(READ, Math.min(1, p.port.clientWidth / +p.svg.dataset.w));
-      const tall = Math.max(300, Math.min(560, window.innerHeight * 0.62, +p.svg.dataset.h * k + 24));
-      p.port.style.height = tall + "px";
-      fit(p, true);
+      open = null;
+      chips.clear();
+      first(p);
     } else {
-      p.port.style.height = height;
       apply(p);
     }
-    height = p.port.style.height;
+    pan(p);
+    filter(p);
     if (open !== null) select(open, false);
+  }
+
+  // pan sets the Pan button and the well as free says.
+  function pan(p) {
+    p.port.classList.toggle("free", free);
+    p.box.querySelector("[data-pan]").setAttribute("aria-pressed", free);
+  }
+
+  // filter shows the tasks of the pressed state chips only: the others
+  // fade in the graph and leave the table. jump: a chip was pressed, so
+  // the view moves to the tasks it shows.
+  function filter(p, jump) {
+    const on = chips.size > 0;
+    for (const c of p.box.querySelectorAll("[data-chip]")) c.setAttribute("aria-pressed", chips.has(c.dataset.chip));
+    p.svg.classList.toggle("filter", on);
+    const hit = [];
+    for (const n of p.svg.querySelectorAll(".node")) {
+      const m = on && chips.has(n.dataset.chip);
+      n.classList.toggle("match", m);
+      if (m) hit.push(n.dataset.i);
+    }
+    const rows = [...document.querySelectorAll(".tasks tbody tr")];
+    for (const r of rows) r.hidden = on && !chips.has(r.dataset.chip);
+    const note = document.getElementById("task-shown");
+    if (note) note.textContent = on ? `${hit.length} of ${rows.length} shown` : "";
+    if (jump && hit.length && !frame(p, hit)) {
+      view.k = Math.max(view.k, READ);
+      const r = rect(node(hit[0]));
+      view.x = p.port.clientWidth / 3 - (r.x + r.w / 2) * view.k;
+      view.y = p.port.clientHeight / 2 - (r.y + r.h / 2) * view.k;
+      apply(p);
+    }
   }
 
   const node = (i) => document.querySelector(`.dag .node[data-i="${i}"]`);
@@ -107,14 +183,17 @@
   }
 
   // trace marks task i, every task upstream and downstream of it, and the
-  // edges between them; the rest of the graph fades. null clears it.
+  // edges between them; the rest of the graph fades. Its table row is
+  // marked with it. null clears it.
   function trace(i) {
     const p = parts();
     if (!p) return;
     const svg = p.svg;
-    svg.querySelectorAll(".hl").forEach((el) => el.classList.remove("hl"));
+    document.querySelectorAll("#live .hl").forEach((el) => el.classList.remove("hl"));
     svg.classList.toggle("trace", i !== null);
     if (i === null) return;
+    const row = document.getElementById("task-" + i);
+    if (row) row.classList.add("hl");
     const l = lineage(svg, i);
     for (const n of svg.querySelectorAll(".node")) {
       if (l.tasks.has(n.dataset.i)) n.classList.add("hl");
@@ -145,34 +224,42 @@
     if (focus) p.panel.focus({ preventScroll: true });
   }
 
-  // reveal brings task i into view in the well as it is now, the first
-  // that reads (zoom at least READ): the whole graph; the task with all it
-  // waits on and all that waits on it; the task and all that waits on it;
-  // else the task centred, its neighbours either side.
-  function reveal(p, i) {
+  // frame shows the tasks ids (indexes) whole in the well when that
+  // reads (zoom at least READ); false when it does not.
+  function frame(p, ids) {
     const cw = p.port.clientWidth, ch = p.port.clientHeight, pad = 16;
-    const w = +p.svg.dataset.w, h = +p.svg.dataset.h;
-    if (Math.min(1, cw / w, ch / h) >= READ) return fit(p);
-    const l = lineage(p.svg, i);
-    for (const ids of [l.tasks, l.down, new Set([String(i)])]) {
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const id of ids) {
-        const n = node(id);
-        const box = n && n.querySelector(".box");
-        if (!box) continue;
-        const [x, y] = n.getAttribute("transform").match(/[-\d.]+/g).map(Number);
-        x0 = Math.min(x0, x);
-        y0 = Math.min(y0, y);
-        x1 = Math.max(x1, x + +box.getAttribute("width"));
-        y1 = Math.max(y1, y + +box.getAttribute("height"));
-      }
-      if (x1 < x0) return;
-      let k = Math.min(1, (cw - 2 * pad) / (x1 - x0), (ch - 2 * pad) / (y1 - y0));
-      if (ids.size === 1) k = Math.max(READ, Math.min(view.k, 1)); // the task alone: as close as it is
-      else if (k < READ) continue;
-      view = { k, x: (cw - (x0 + x1) * k) / 2, y: (ch - (y0 + y1) * k) / 2 };
-      return apply(p);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const id of ids) {
+      const n = node(id);
+      if (!n) continue;
+      const r = rect(n);
+      x0 = Math.min(x0, r.x);
+      y0 = Math.min(y0, r.y);
+      x1 = Math.max(x1, r.x + r.w);
+      y1 = Math.max(y1, r.y + r.h + 10);
     }
+    if (x1 < x0) return false;
+    const k = Math.min(1, (cw - 2 * pad) / (x1 - x0), (ch - 2 * pad) / (y1 - y0));
+    if (k < READ) return false;
+    view = { k, x: (cw - (x0 + x1) * k) / 2, y: (ch - (y0 + y1) * k) / 2 };
+    apply(p);
+    return true;
+  }
+
+  // reveal brings task i into view in the well as it is now, the first
+  // that reads: the whole graph; the task with all it waits on and all
+  // that waits on it; the task and all that waits on it; else the task
+  // centred, as close as it is, its neighbours either side.
+  function reveal(p, i) {
+    const w = +p.svg.dataset.w, h = +p.svg.dataset.h;
+    if (Math.min(1, p.port.clientWidth / w, p.port.clientHeight / h) >= READ) return fit(p);
+    const l = lineage(p.svg, i);
+    if (frame(p, l.tasks) || frame(p, l.down)) return;
+    const n = node(i);
+    if (!n) return;
+    const r = rect(n), k = Math.max(READ, Math.min(view.k, 1));
+    view = { k, x: p.port.clientWidth / 2 - (r.x + r.w / 2) * k, y: p.port.clientHeight / 2 - (r.y + r.h / 2) * k };
+    apply(p);
   }
 
   function close() {
@@ -264,11 +351,34 @@
       select(n.dataset.i, false, true);
       return;
     }
+    const p = parts();
+    if (!p) return;
+    // a row's task name: its node, in view, and its details
+    const r = t.closest('.tasks a[href^="#node-"]');
+    if (r) {
+      const i = r.getAttribute("href").slice(6);
+      e.preventDefault();
+      select(i, false, true);
+      p.box.scrollIntoView({ block: "nearest" });
+      const to = node(i);
+      if (to) to.focus({ preventScroll: true });
+      return;
+    }
     const z = t.closest(".dag-tools [data-zoom]");
     if (z) {
-      const p = parts();
       if (z.dataset.zoom === "fit") fit(p);
       else zoomBy(p, z.dataset.zoom === "in" ? 1.25 : 0.8);
+      return;
+    }
+    if (t.closest(".dag-tools [data-pan]")) {
+      free = !free;
+      pan(p);
+      return;
+    }
+    const c = t.closest(".dag-legend [data-chip]");
+    if (c) {
+      if (!chips.delete(c.dataset.chip)) chips.add(c.dataset.chip);
+      filter(p, true);
       return;
     }
     if (t.closest(".wf-panel .close")) close();
@@ -282,13 +392,20 @@
       close();
       return;
     }
-    const n = t.closest(".dag-port.pz .node");
+    if (!t.closest(".dag-port.pz") || e.ctrlKey || e.metaKey || e.altKey) return;
+    const n = t.closest(".node");
+    // Enter: the task's job, as a link goes somewhere (its details when
+    // it has no job page); Space: its details
+    if (n && e.key === "Enter" && n.dataset.job) {
+      e.preventDefault();
+      location.assign(n.dataset.job);
+      return;
+    }
     if (n && (e.key === "Enter" || e.key === " ")) {
       e.preventDefault();
       select(n.dataset.i, true, true);
       return;
     }
-    if (!t.matches(".dag-port.pz") || e.ctrlKey || e.metaKey || e.altKey) return;
     const p = parts();
     const step = 48;
     const keys = {
@@ -307,39 +424,59 @@
     apply(p);
   });
 
-  // hover or focus a task: trace it
+  // hover or focus a task, in the graph or its table row: trace it
+  const taskOf = (el) => {
+    if (!el || !el.closest) return null;
+    const n = el.closest(".dag .node");
+    if (n) return n.dataset.i;
+    const r = el.closest(".tasks tbody tr[id]");
+    return r ? r.id.slice(5) : null; // task-N
+  };
+  let hover = null; // the task under the pointer: a swap keeps its trace
+  const traced = () => hover ?? taskOf(document.activeElement);
   document.addEventListener("pointerover", (e) => {
-    const n = e.target.closest && e.target.closest(".dag .node");
-    if (n && !drag) trace(n.dataset.i);
+    const i = taskOf(e.target);
+    if (i !== null) hover = i;
+    if (i !== null && !drag) trace(i);
   });
   document.addEventListener("pointerout", (e) => {
-    const n = e.target.closest && e.target.closest(".dag .node");
-    if (!n || (e.relatedTarget && n.contains(e.relatedTarget))) return;
-    const f = document.activeElement && document.activeElement.closest && document.activeElement.closest(".dag .node");
-    trace(f ? f.dataset.i : null);
+    const i = taskOf(e.target);
+    if (i === null || taskOf(e.relatedTarget) === i) return;
+    hover = null;
+    trace(traced());
   });
   document.addEventListener("focusin", (e) => {
-    const n = e.target.closest && e.target.closest(".dag .node");
-    if (n) trace(n.dataset.i);
+    const i = taskOf(e.target);
+    if (i === null) return;
+    trace(i);
+    // a task tabbed to outside the view: bring it in
+    const p = parts();
+    if (p && view && e.target.matches(".dag .node:focus-visible")) show(p, e.target);
   });
   document.addEventListener("focusout", (e) => {
-    const n = e.target.closest && e.target.closest(".dag .node");
-    if (n && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest(".dag .node"))) trace(null);
+    if (taskOf(e.target) !== null && taskOf(e.relatedTarget) === null) trace(hover);
   });
 
   // keyOf names what had focus in #live, which a swap replaces, so the
-  // same of the new #live can take focus back: a task, the zoom buttons,
-  // the panel, its close and its links, the cancel buttons, the graph well.
+  // same of the new #live can take focus back: [selector, index among its
+  // matches]. A task, the graph's buttons, the panel, its close and its
+  // links, the cancel buttons, the graph well; else a link or button by
+  // its place under the nearest element with an id (a table row, the
+  // rollback summary, the legend).
   function keyOf(el) {
     if (!el || !el.closest || !el.closest("#live")) return null;
-    if (el.matches(".dag .node")) return `.dag .node[data-i="${el.dataset.i}"]`;
-    if (el.matches("[data-zoom]")) return `[data-zoom="${el.dataset.zoom}"]`;
-    if (el.matches(".wf-panel .close")) return ".wf-panel .close";
-    if (el.matches(".wf-panel a[href]")) return `.wf-panel .body a[href="${CSS.escape(el.getAttribute("href"))}"]`;
-    if (el.closest(".wf-panel")) return ".wf-panel";
-    if (el.matches("#wfctl button")) return el.name ? "#wfctl button[name]" : "#wfctl button:not([name])";
-    if (el.matches(".dag-port")) return ".dag-port";
-    return null;
+    if (el.matches(".dag .node")) return [`.dag .node[data-i="${el.dataset.i}"]`, 0];
+    if (el.matches("[data-zoom]")) return [`[data-zoom="${el.dataset.zoom}"]`, 0];
+    if (el.matches("[data-pan]")) return ["[data-pan]", 0];
+    if (el.matches(".wf-panel .close")) return [".wf-panel .close", 0];
+    if (el.matches(".wf-panel a[href]")) return [`.wf-panel .body a[href="${CSS.escape(el.getAttribute("href"))}"]`, 0];
+    if (el.closest(".wf-panel")) return [".wf-panel", 0];
+    if (el.matches("#wfctl button")) return [el.name ? "#wfctl button[name]" : "#wfctl button:not([name])", 0];
+    if (el.matches(".dag-port")) return [".dag-port", 0];
+    const host = el.parentElement.closest("[id]");
+    if (!host || host.id === "live" || !el.matches("a[href], button")) return null;
+    const sel = `#${CSS.escape(host.id)} :is(a[href], button)`;
+    return [sel, [...document.querySelectorAll("#live " + sel)].indexOf(el)];
   }
   let control = null;
 
@@ -351,12 +488,22 @@
   document.addEventListener("htmx:afterSwap", () => {
     init();
     if (control) {
-      const c = document.querySelector("#live " + control);
+      const c = document.querySelectorAll("#live " + control[0])[control[1]];
       if (c && !c.closest("[hidden]")) c.focus({ preventScroll: true });
       control = null;
     }
-    const f = document.activeElement && document.activeElement.closest && document.activeElement.closest(".dag .node");
-    if (f) trace(f.dataset.i);
+    trace(traced());
+  });
+  // htmx settles a swapped element that has an id (a node, a row): its
+  // class turns back to the server's after the swap, so the marks set
+  // here (selected, filtered, traced) go on again
+  document.addEventListener("htmx:afterSettle", (e) => {
+    const p = parts();
+    if (e.target.id !== "live" || !p || !p.svg.dataset.taken) return;
+    filter(p);
+    const n = open !== null && node(open);
+    if (n) n.classList.add("sel");
+    trace(traced());
   });
 
   init(); // deferred: the DOM is parsed

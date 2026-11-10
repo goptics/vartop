@@ -1,12 +1,14 @@
 package web
 
 import (
+	"cmp"
 	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goptics/varmq/contract"
@@ -24,7 +26,8 @@ const defaultWorkflowLimit = 25
 // State ("" for all), merged (see fleet.MergeWorkflows).
 type WorkflowsView struct {
 	State       contract.WorkflowState
-	Tabs        []WorkflowTab
+	Tabs        []WorkflowTab // all, then the states that are no rollback
+	Rollback    []WorkflowTab // the rollback states, a group of its own
 	Rows        []WorkflowRow
 	Offset      int
 	Prev, Next  string
@@ -42,12 +45,66 @@ func (v *WorkflowsView) Last() int  { return v.Offset + len(v.Rows) }
 // StateLabel is State in words.
 func (v *WorkflowsView) StateLabel() string { return stateView(string(v.State)).Label }
 
-// WorkflowTab is the link to one state of the list ("" for all).
+// WorkflowTab is the link to one state of the list ("" for all). Count is
+// its workflows, "" when the fleet's counts are not known (then no tab has
+// one); Name its accessible name, the count with it.
 type WorkflowTab struct {
 	Label   string
 	Class   string
 	URL     string
 	Current bool
+	Count   string
+	Zero    bool
+	Name    string
+	state   contract.WorkflowState
+}
+
+// workflowTabs are the list's tabs in order; the rollback states are a
+// group (label "Rollback:"), so their labels do not repeat the word.
+var workflowTabs = []struct {
+	state       contract.WorkflowState
+	label, name string
+	rollback    bool
+}{
+	{"", "All", "All", false},
+	{contract.WorkflowRunning, "Running", "Running", false},
+	{contract.WorkflowCompleted, "Completed", "Completed", false},
+	{contract.WorkflowFailed, "Failed", "Failed", false},
+	{contract.WorkflowCancelled, "Cancelled", "Cancelled", false},
+	{contract.WorkflowCompensating, "In progress", "Rollback in progress", true},
+	{contract.WorkflowCompensated, "Done", "Rollback done", true},
+	{contract.WorkflowCompensationFailed, "Failed", "Rollback failed", true},
+}
+
+// setCounts writes the per-state counts on the tabs: "All" their sum.
+func (v *WorkflowsView) setCounts(counts map[contract.WorkflowState]int64) {
+	var all int64
+	for _, n := range counts {
+		all += n
+	}
+	for _, tabs := range [][]WorkflowTab{v.Tabs, v.Rollback} {
+		for i := range tabs {
+			t := &tabs[i]
+			n := counts[t.state]
+			if t.state == "" {
+				n = all
+			}
+			t.Count, t.Zero = thousands(n), n == 0
+			t.Name += ", " + t.Count + " workflow"
+			if n != 1 {
+				t.Name += "s"
+			}
+		}
+	}
+}
+
+// thousands is n with a comma between each three digits: 1,284.
+func thousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // WorkflowRow is one workflow of the list.
@@ -59,12 +116,15 @@ type WorkflowRow struct {
 	Duration                     string
 	Running                      bool // Duration is so far
 	On                           []string
+	// Note is how a rollback stands, under the state: "1 of 2 undone",
+	// "1 of 2 undo jobs failed"; "" for a workflow that does not roll back.
+	Note string
 }
 
 // StateView is a workflow or task state as the pages show it: Label the
-// words (compensation_failed reads "compensation failed"), Class its CSS
-// class: a known state's own, "unknown" for one a later varmq adds, shown
-// as it is.
+// words (the compensation states read as a rollback: see stateWords),
+// Class its CSS class: a known state's own, "unknown" for one a later
+// varmq adds, shown as it is.
 type StateView struct{ Label, Class string }
 
 var knownStates = []string{
@@ -72,8 +132,14 @@ var knownStates = []string{
 	"waiting", "pending", "processing",
 }
 
+// stateWords: the one word set of the compensation states on every
+// workflow page.
+var stateWords = map[string]string{
+	"compensating": "rolling back", "compensated": "rolled back", "compensation_failed": "rollback failed",
+}
+
 func stateView(s string) StateView {
-	v := StateView{Label: strings.ReplaceAll(s, "_", " "), Class: "unknown"}
+	v := StateView{Label: cmp.Or(stateWords[s], strings.ReplaceAll(s, "_", " ")), Class: "unknown"}
 	if slices.Contains(knownStates, s) {
 		v.Class = strings.ReplaceAll(s, "_", "-")
 	}
@@ -151,6 +217,86 @@ func runSpan(w contract.WorkflowRecord, now time.Time) (string, bool) {
 	return span(now.Sub(time.UnixMilli(w.CreatedAt))), !fleet.WorkflowEnded(w)
 }
 
+// rollbackOf counts w's undo jobs, and those that completed.
+func rollbackOf(w contract.WorkflowRecord) (total, done int) {
+	for _, t := range w.Tasks {
+		if t.Undo != nil {
+			total++
+			if t.Undo.State == contract.JobCompleted {
+				done++
+			}
+		}
+	}
+	return total, done
+}
+
+// rollbackNote is how w's rollback stands in a few words, "" when it does
+// not roll back or its rollback ended well.
+func rollbackNote(w contract.WorkflowRecord) string {
+	total, done := rollbackOf(w)
+	switch {
+	case total == 0:
+	case w.State == contract.WorkflowCompensating:
+		return fmt.Sprintf("%d of %d undone", done, total)
+	case w.State == contract.WorkflowCompensationFailed:
+		return fmt.Sprintf("%d of %d not rolled back", total-done, total)
+	}
+	return ""
+}
+
+// taskTimes is how long t waited in its queue and ran, as the pages show
+// them; "" for a time the record does not carry. A task in flight of a
+// running workflow ran so far, at now.
+func taskTimes(t contract.TaskRecord, running bool, now time.Time) (wait, run string, soFar bool) {
+	ms := func(d int64) string {
+		if d < 50 { // "0.0s" reads as no time
+			return "<0.1s"
+		}
+		return span(time.Duration(d) * time.Millisecond)
+	}
+	if t.EnqueuedAt > 0 && t.StartedAt >= t.EnqueuedAt {
+		wait = ms(t.StartedAt - t.EnqueuedAt)
+	}
+	switch {
+	case t.StartedAt == 0:
+	case t.FinishedAt >= t.StartedAt:
+		run = ms(t.FinishedAt - t.StartedAt)
+	case t.FinishedAt == 0 && running && taskLive(t.State) && now.UnixMilli() >= t.StartedAt:
+		run, soFar = ms(now.UnixMilli()-t.StartedAt), true
+	}
+	return wait, run, soFar
+}
+
+// slowestOnPath is the task that ran longest on the path that set the
+// workflow's end: from the last task to finish, back through each one's
+// last dependency to finish. -1: no times, or a path of one task.
+func slowestOnPath(tasks []contract.TaskRecord, deps [][]int) int {
+	timed := func(i int) bool { return tasks[i].StartedAt > 0 && tasks[i].FinishedAt >= tasks[i].StartedAt }
+	last := func(of []int) int {
+		at := -1
+		for _, i := range of {
+			if timed(i) && (at < 0 || tasks[i].FinishedAt > tasks[at].FinishedAt) {
+				at = i
+			}
+		}
+		return at
+	}
+	all := make([]int, len(tasks))
+	for i := range all {
+		all[i] = i
+	}
+	slow, steps := -1, 0
+	for i := last(all); i >= 0 && steps <= len(tasks); i, steps = last(deps[i]), steps+1 {
+		if slow < 0 || tasks[i].FinishedAt-tasks[i].StartedAt > tasks[slow].FinishedAt-tasks[slow].StartedAt {
+			slow = i
+		}
+	}
+	if steps < 2 {
+		return -1
+	}
+	return slow
+}
+
 // workflowsURL is the list page of server in state, from offset.
 func workflowsURL(server string, state contract.WorkflowState, offset int) string {
 	q := url.Values{}
@@ -210,19 +356,29 @@ func (h *handler) workflows(w http.ResponseWriter, r *http.Request) {
 	if v.Offset > 0 {
 		p.IntervalSec = 0
 	}
-	for _, s := range append([]contract.WorkflowState{""}, api.WorkflowStates...) {
-		tab := WorkflowTab{Label: "all", Class: "all", URL: workflowsURL(p.Server, s, 0), Current: s == v.State}
-		if s != "" {
-			sv := stateView(string(s))
-			tab.Label, tab.Class = sv.Label, sv.Class
+	for _, t := range workflowTabs {
+		tab := WorkflowTab{Label: t.label, Name: t.name, Class: "all", URL: workflowsURL(p.Server, t.state, 0), Current: t.state == v.State, state: t.state}
+		if t.state != "" {
+			tab.Class = stateView(string(t.state)).Class
 		}
-		v.Tabs = append(v.Tabs, tab)
+		if t.rollback {
+			v.Rollback = append(v.Rollback, tab)
+		} else {
+			v.Tabs = append(v.Tabs, tab)
+		}
 	}
 	p.WorkflowList = v
 	if ok {
 		if clients, label, live := h.liveClients(&p, snaps, "workflows"); live {
 			v.Read = true
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				if counts, ok := fleet.CountWorkflows(r.Context(), clients); ok {
+					v.setCounts(counts)
+				}
+			})
 			units := fleet.FetchWorkflows(r.Context(), clients, label, v.State, v.Offset+defaultWorkflowLimit+1)
+			wg.Wait()
 			m := fleet.MergeWorkflows(units, v.Offset, defaultWorkflowLimit)
 			v.Unsupported, v.Failed = m.Unsupported, m.Failed
 			v.NoRoutes = m.Units > 0 && len(m.Unsupported) == m.Units
@@ -239,6 +395,7 @@ func (h *handler) workflows(w http.ResponseWriter, r *http.Request) {
 					row.CreFull, row.CreatedISO = msTime(g.CreatedAt)
 				}
 				row.Duration, row.Running = runSpan(g.WorkflowRecord, now)
+				row.Note = rollbackNote(g.WorkflowRecord)
 				v.Rows = append(v.Rows, row)
 			}
 			if v.Offset > 0 {
@@ -267,6 +424,8 @@ type WorkflowView struct {
 	Tasks      []TaskView
 	Graph      GraphView
 	Ctl        WorkflowCtl
+	Rollback   *RollbackView // nil unless it rolls back or its rollback failed
+	Timed      bool          // a task carries a time: the table has the Waited and Ran columns
 	// Pick: no workflow is shown, only Others to pick from: several
 	// workflows have the ID and the URL names none of them, or (Gone) the
 	// one it names (by at) is no longer reported.
@@ -277,6 +436,17 @@ type WorkflowView struct {
 	Others    []WorkflowChoice
 	Ambiguous []string
 	Failed    []string
+}
+
+// RollbackView is how a workflow's undo jobs stand, for the summary of one
+// that rolls back (compensating) or whose rollback failed. Left and Undone
+// are in the order undo runs: the last task first.
+type RollbackView struct {
+	Failed      bool       // compensation_failed: Left is not rolled back for good
+	Total, Done int        // undo jobs, and those that completed
+	Left        []TaskView // tasks whose undo job did not complete
+	Undone      []TaskView // tasks rolled back
+	Cause       []TaskView // the failed tasks: why it rolls back
 }
 
 // WorkflowChoice links to one of several workflows of an ID.
@@ -301,6 +471,13 @@ type TaskView struct {
 	Always        bool
 	Undo          *TaskView
 	Label         string // the node's accessible name
+	// Wait and Run: how long it waited in its queue and ran, "" when the
+	// record carries no times; RunSoFar: it runs still. Slowest: it ran
+	// longest on the path that set the workflow's end.
+	Wait, Run string
+	RunSoFar  bool
+	Slowest   bool
+	Chip      string // the state chip that counts it: its state, processing as pending; "" for none
 }
 
 // WorkflowCtl is the cancel buttons of a workflow's page (#wfctl), and,
@@ -403,12 +580,38 @@ func workflowView(g fleet.WorkflowGroup, server string, owners queueOwners, now 
 	}
 	deps := make([][]int, len(w.Tasks))
 	for i, t := range w.Tasks {
-		v.Tasks = append(v.Tasks, taskView(i, t, server, owners, !v.Ctl.Final))
+		v.Tasks = append(v.Tasks, taskView(i, t, server, owners, !v.Ctl.Final, now))
 		for _, d := range t.Deps {
 			if j, ok := index[d]; ok {
 				deps[i] = append(deps[i], j)
 			}
 		}
+	}
+	// the path that set the end: known once the workflow ended
+	if i := slowestOnPath(w.Tasks, deps); i >= 0 && v.Ctl.Final {
+		v.Tasks[i].Slowest = true
+		v.Tasks[i].Label += ", slowest on the path to the end"
+	}
+	v.Timed = slices.ContainsFunc(v.Tasks, func(t TaskView) bool {
+		return t.Wait != "" || t.Run != "" || t.Undo != nil && (t.Undo.Wait != "" || t.Undo.Run != "")
+	})
+	if w.State == contract.WorkflowCompensating || w.State == contract.WorkflowCompensationFailed {
+		rb := &RollbackView{Failed: w.State == contract.WorkflowCompensationFailed}
+		rb.Total, rb.Done = rollbackOf(w)
+		for _, t := range slices.Backward(v.Tasks) {
+			switch {
+			case t.Undo != nil && t.Undo.State.Class == "completed":
+				rb.Undone = append(rb.Undone, t)
+			case t.Undo != nil:
+				rb.Left = append(rb.Left, t)
+			}
+		}
+		for _, t := range v.Tasks {
+			if t.State.Class == "failed" {
+				rb.Cause = append(rb.Cause, t)
+			}
+		}
+		v.Rollback = rb
 	}
 	if l, ok := layoutDAG(len(w.Tasks), deps); ok {
 		v.Graph = graphView(l, v.Tasks)
@@ -423,10 +626,16 @@ const maxNodeName = 20
 // maxNodeQueue is the most of a queue name a node's meta line shows.
 const maxNodeQueue = 12
 
-func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, running bool) TaskView {
+func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, running bool, now time.Time) TaskView {
 	v := TaskView{I: i, Name: t.Name, Short: cut(t.Name, maxNodeName), State: stateView(string(t.State)),
 		Live: running && taskLive(t.State), Queue: owners.name(t.QueueID),
 		JobID: t.JobID, Reason: t.Reason, Deps: t.Deps, Always: t.Always}
+	v.Wait, v.Run, v.RunSoFar = taskTimes(t, running, now)
+	if c := v.State.Class; slices.Contains(chipStates, c) {
+		v.Chip = c
+	} else if c == "processing" {
+		v.Chip = "pending"
+	}
 	if t.QueueID != "" {
 		v.QueueShort = cut(v.Queue.Name, maxNodeQueue)
 		v.QueueURL = jobsURL(t.QueueID, server, "", 0, defaultJobLimit)
@@ -436,7 +645,7 @@ func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, r
 		v.Result = byteSize(t.ResultSize)
 	}
 	if t.Undo != nil {
-		u := taskView(i, *t.Undo, server, owners, running)
+		u := taskView(i, *t.Undo, server, owners, running, now)
 		u.Name = t.Name + " (undo)"
 		v.Undo = &u
 	}
@@ -446,6 +655,12 @@ func taskView(i int, t contract.TaskRecord, server string, owners queueOwners, r
 	}
 	if t.Always {
 		v.Label += ", runs always"
+	}
+	if v.Run != "" {
+		v.Label += ", ran " + v.Run
+		if v.RunSoFar {
+			v.Label += " so far"
+		}
 	}
 	if v.Undo != nil {
 		v.Label += ", undo " + v.Undo.State.Label
@@ -472,13 +687,29 @@ func byteSize(n int) string {
 	return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MiB"
 }
 
+// chipStates are the task states the graph's chips count and filter, in
+// order; a processing task counts as pending (queued or running).
+var chipStates = []string{"waiting", "pending", "completed", "failed", "cancelled"}
+
+// StateChip is one state of the graph's legend: its tasks, and the key the
+// nodes and rows of that state carry (TaskView.Chip).
+type StateChip struct {
+	Key, Label string
+	Count      int
+}
+
 // GraphView is what the "graph" template draws.
 type GraphView struct {
 	Width, Height string
+	WellH         string // the well's height that shows it whole: CSS reserves it, script or not
 	NodeW, NodeH  string
-	HaloW, UndoX  string // the pulse ring's width; the undo badge's left, in a box
-	Nodes         []GraphNode
+	HaloW         string      // the pulse ring's width
+	UndoX, UndoFX string      // the undo badge's left in a box; the wider "undo failed" one's
+	SlowX         string      // the slowest mark's left
+	Nodes         []GraphNode // in topological order: the tab order
 	Edges         []GraphEdge
+	Chips         []StateChip
+	Slowest       bool // a node carries the slowest mark: the legend explains it
 }
 
 // GraphNode is one task's box at X, Y (its top left).
@@ -488,21 +719,43 @@ type GraphNode struct {
 }
 
 // GraphEdge is one dependency, From's task to To's. Always: into a task
-// that runs always (dashed). Live: into a task in flight (animated).
+// that runs always (dashed). Live: into a task in flight (animated). Dead:
+// out of a task that failed or was cancelled, into one that does not run
+// always: nothing passes it (dotted).
 type GraphEdge struct {
-	From, To     int
-	Path         string
-	Always, Live bool
+	From, To           int
+	Path               string
+	Always, Live, Dead bool
 }
 
 func graphView(l dagLayout, tasks []TaskView) GraphView {
-	g := GraphView{Width: num(l.width), Height: num(l.height), NodeW: num(dagNodeW), NodeH: num(dagNodeH), HaloW: num(dagNodeW + 2), UndoX: num(dagNodeW - 84)}
+	g := GraphView{Width: num(l.width), Height: num(l.height), WellH: num(l.height + 24), NodeW: num(dagNodeW), NodeH: num(dagNodeH),
+		HaloW: num(dagNodeW + 2), UndoX: num(dagNodeW - 84), UndoFX: num(dagNodeW - 108), SlowX: num(dagNodeW - 22)}
+	count := map[string]int{}
+	order := make([]int, len(tasks))
 	for i, t := range tasks {
-		g.Nodes = append(g.Nodes, GraphNode{X: num(dagX(l.layer[i])), Y: num(l.y[i] - dagNodeH/2), Task: t})
+		order[i] = i
+		count[t.Chip]++
+		g.Slowest = g.Slowest || t.Slowest
+	}
+	// by layer, then down the layer: the order a reader follows, so the tab order
+	slices.SortStableFunc(order, func(a, b int) int {
+		return cmp.Or(cmp.Compare(l.layer[a], l.layer[b]), cmp.Compare(l.y[a], l.y[b]))
+	})
+	for _, i := range order {
+		g.Nodes = append(g.Nodes, GraphNode{X: num(dagX(l.layer[i])), Y: num(l.y[i] - dagNodeH/2), Task: tasks[i]})
 	}
 	for _, c := range l.chains {
 		from, to := c[0], c[len(c)-1]
-		g.Edges = append(g.Edges, GraphEdge{From: from, To: to, Path: l.path(c), Always: tasks[to].Always, Live: tasks[to].Live})
+		stopped := tasks[from].State.Class == "failed" || tasks[from].State.Class == "cancelled"
+		g.Edges = append(g.Edges, GraphEdge{From: from, To: to, Path: l.path(c), Always: tasks[to].Always, Live: tasks[to].Live, Dead: stopped && !tasks[to].Always})
+	}
+	for _, k := range chipStates {
+		label := k
+		if k == "pending" {
+			label = "pending (queued or running)"
+		}
+		g.Chips = append(g.Chips, StateChip{Key: k, Label: label, Count: count[k]})
 	}
 	return g
 }
