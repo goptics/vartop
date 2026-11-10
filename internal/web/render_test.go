@@ -1470,3 +1470,56 @@ func TestWorkflowViewDuplicateName(t *testing.T) {
 		t.Errorf("edges = %+v, want 0 -> 2", v.Graph.Edges)
 	}
 }
+
+// The worker table: Failed /min per worker (red only above zero, a dash
+// with no rate), a sort link on each sortable header with aria-sort on the
+// active one, the order switch in the caption, and ?sort= in both pickers.
+func TestDashboardSortControls(t *testing.T) {
+	p := dashboardPage()
+	p.Dashboard.Rows[0].FailedPerMin, p.Dashboard.Rows[0].FailedKnown = 2.5, true
+	body := run(t, "dashboard", "layout", p)
+	for _, want := range []string{
+		`<a id="order-attention" href="/?server=dev" aria-current="true">Trouble first</a>`,
+		`failing, then paused or stopped with pending jobs`,
+		`<th scope="col"><a id="sort-name" href="/?server=dev&amp;sort=name">Worker</a></th>`,
+		`<a id="sort-pending" href="/?server=dev&amp;sort=pending">Pending (max/pod)</a>`,
+		`<a id="sort-failed" href="/?server=dev&amp;sort=failed">Failed /min</a>`,
+		`<td class="num fails hot" data-label="Failed /min">2.5</td>`,
+		`<td class="num fails" data-label="Failed /min">—</td>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("default order lacks %s", want)
+		}
+	}
+	for _, not := range []string{`aria-sort`, `name="sort"`} {
+		if strings.Contains(body, not) {
+			t.Errorf("default order has %s", not)
+		}
+	}
+
+	p.Sort, p.Pod = "pending", "a"
+	body = run(t, "dashboard", "layout", p)
+	for _, want := range []string{
+		`<th scope="col" class="num" aria-sort="descending"><a id="sort-pending" href="/?pod=a&amp;server=dev&amp;sort=pending">`,
+		`<a id="order-attention" href="/?pod=a&amp;server=dev">Trouble first</a>`,
+		`<a id="order-pending" href="/?pod=a&amp;server=dev&amp;sort=pending" aria-current="true">Pending</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("sort=pending lacks %s", want)
+		}
+	}
+	if n := strings.Count(body, `<input type="hidden" name="sort" value="pending">`); n != 2 {
+		t.Errorf("%d pickers carry sort, want the server and the unit one", n)
+	}
+	if strings.Count(body, "aria-sort") != 1 || strings.Contains(body, "failing, then paused") {
+		t.Errorf("sort=pending: want one aria-sort and no trouble legend")
+	}
+	p.Sort = "name"
+	if body = run(t, "dashboard", "layout", p); !strings.Contains(body, `<th scope="col" aria-sort="ascending"><a id="sort-name"`) {
+		t.Error("sort=name: Worker header is not aria-sort ascending")
+	}
+	p.Stale = "old"
+	if body = run(t, "dashboard", "layout", p); strings.Contains(body, "fails hot") || strings.Contains(body, ">2.5<") {
+		t.Error("a stale page shows a failed rate")
+	}
+}

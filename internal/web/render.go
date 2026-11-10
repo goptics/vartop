@@ -40,6 +40,10 @@ type Page struct {
 	Health                      fleet.HealthView
 	Updated                     string // clock time of the newest snapshot, "" before the first
 
+	// Sort is the dashboard's row order when it is not the default
+	// (attention): a fleet.Sort* value, as ?sort= carries it.
+	Sort string
+
 	// ScopeBalanced: what the page's actions reach holds a unit behind a
 	// load balancer, so there is no Restart. OneBalanced: it is one such
 	// unit, so there are no controls at all, only a note saying why.
@@ -107,6 +111,28 @@ func (p Page) QName(id string) QueueName { return p.owners.name(id) }
 func (p Page) cmpQName(a, b string) int {
 	qa, qb := p.QName(a), p.QName(b)
 	return cmp.Or(strings.Compare(qa.Name, qb.Name), strings.Compare(qa.NS, qb.NS), strings.Compare(a, b))
+}
+
+// sortParam is the ?sort= value v as Page.Sort holds it: "" for the
+// default order and for a value that names none.
+func sortParam(v string) string {
+	if by := fleet.SortKey(v); by != fleet.SortAttention {
+		return by
+	}
+	return ""
+}
+
+// SortURL is the dashboard of the page's server and unit in row order by;
+// the default order has no ?sort=.
+func (p Page) SortURL(by string) string {
+	u := pageURL("/", p.Server, p.Noun.Param, p.Pod)
+	if by = sortParam(by); by == "" {
+		return u
+	}
+	if strings.Contains(u, "?") {
+		return u + "&sort=" + by
+	}
+	return u + "?sort=" + by
 }
 
 // Interval is the server's poll interval; 0 with no server.

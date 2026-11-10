@@ -243,8 +243,12 @@ func goneLabelMsg(label string, n fleet.Noun) string {
 func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	p, snaps, ok := h.page(r)
 	p.Title = pageTitle("vartop", p.Server)
+	if p.Sort = sortParam(r.FormValue("sort")); p.Sort != "" {
+		p.SelfURL = p.SortURL(p.Sort) // the poll keeps the order
+	}
 	if ok && !podGone(&p, snaps) {
 		d := fleet.BuildDashboard(snaps, p.Pod, 0, p.Noun)
+		d.Sort(p.Sort)
 		p.Dashboard = &d
 		podDown(&p, snaps) // its banner stands in for "No workers reported yet."
 	}
@@ -256,6 +260,10 @@ func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 	p.Title = pageTitle(p.Noun.Cap()+" grid", p.Server)
 	if ok {
 		g := fleet.BuildGrid(latestOf(snaps))
+		// ponytail: builds the whole dashboard for its row order; a rows-only builder if the grid gets slow
+		d := fleet.BuildDashboard(snaps, "", 0, p.Noun)
+		d.Sort(fleet.SortAttention)
+		g.Order(d.Rows) // trouble first, as the dashboard
 		p.Grid = &g
 	}
 	p.Pods = nil // the grid shows every unit: no unit select

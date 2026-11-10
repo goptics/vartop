@@ -1319,3 +1319,56 @@ func TestFillMarksBalancedScope(t *testing.T) {
 		}
 	}
 }
+
+// The dashboard ranks trouble: a failing worker first, then a paused one
+// with a backlog, then the rest. ?sort= orders by one column; the poll, an
+// action's refresh and the grid keep the order.
+func TestDashboardRanksTrouble(t *testing.T) {
+	fa, aSrv := fleettest.NewVarmq(t, "a", map[string]*fleettest.Worker{
+		"alpha":  {Status: "Running", Concurrency: 2},
+		"mailer": {Status: "Paused", Concurrency: 2, Pending: 50},
+		"zeta":   {Status: "Running", Concurrency: 2, Pending: 5},
+	})
+	srv, f := newTestServer(t, aSrv)
+	order := func(body string) string {
+		names := []string{"alpha", "mailer", "zeta"}
+		slices.SortFunc(names, func(a, b string) int {
+			return strings.Index(body, `id="link-`+fleet.DOMID(a)+`"`) - strings.Index(body, `id="link-`+fleet.DOMID(b)+`"`)
+		})
+		return strings.Join(names, " ")
+	}
+	check := func(path, want string, has ...string) {
+		t.Helper()
+		_, body := fetch(t, srv, path, false)
+		if got := order(body); got != want {
+			t.Errorf("%s: rows %s, want %s", path, got, want)
+		}
+		for _, h := range has {
+			if !strings.Contains(body, h) {
+				t.Errorf("%s lacks %s", path, h)
+			}
+		}
+	}
+	check("/", "mailer zeta alpha", `hx-get="/?server=multi"`)
+
+	fa.Mu.Lock()
+	fa.Workers["zeta"].Failed += 9
+	fa.Mu.Unlock()
+	f.waitFor("multi", "zeta's failed rate", func(s *fleet.Snapshot) bool {
+		sm := s.Pods[0].Workers["zeta"]
+		return sm != nil && sm.RateOK && sm.FailedRate > 0
+	})
+	check("/", "zeta mailer alpha", `<td class="num fails hot"`)
+	check("/?sort=bogus", "zeta mailer alpha", `hx-get="/?server=multi"`)
+	check("/?sort=name", "alpha mailer zeta", `hx-get="/?server=multi&amp;sort=name"`, `aria-sort="ascending"`)
+	check("/?sort=pending", "mailer zeta alpha", `hx-get="/?server=multi&amp;sort=pending"`)
+	check("/?sort=failed", "zeta alpha mailer")
+	check("/grid", "zeta mailer alpha")
+
+	req := postRequest(t, srv, "/workers/alpha/actions/pause", multi())
+	req.Header.Set("HX-Current-URL", srv.URL+"/?server=multi&sort=name")
+	_, body := send(t, srv, req)
+	if live := liveOOB(body); order(live) != "alpha mailer zeta" || !strings.Contains(live, `aria-sort="ascending"`) {
+		t.Errorf("an action's refresh lost ?sort=name: rows %s", order(live))
+	}
+}

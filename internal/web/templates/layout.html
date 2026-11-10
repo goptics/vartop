@@ -1,5 +1,6 @@
 {{define "server_field"}}<input type="hidden" name="server" value="{{.Server}}">{{end}}
 {{define "label_field"}}<input type="hidden" name="{{.Noun.Param}}" value="{{.Pod}}">{{end}}
+{{define "sort_field"}}{{with .Sort}}<input type="hidden" name="sort" value="{{.}}">{{end}}{{end}}
 {{define "range_fields"}}{{with .Ranges.Completed}}<input type="hidden" name="completed" value="{{spanParam .}}">{{end}}{{with .Ranges.Failed}}<input type="hidden" name="failed" value="{{spanParam .}}">{{end}}{{end}}
 {{define "range_switch"}}<span class="seg" role="group" aria-label="Span">{{range .}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}} id="{{.ID}}" hx-get="{{.URL}}" hx-target="body" hx-push-url="true" hx-sync="#page:replace">{{.Text}}</a>{{end}}</span>{{end}}
 {{define "spark"}}<svg class="spark" viewBox="{{.ViewBox}}" width="{{.Width}}" height="{{.Height}}" role="img" aria-label="trend">{{range .Lines}}<polyline points="{{.}}"/>{{end}}{{range .Dots}}<circle class="{{.Class}}" cx="{{.X}}" cy="{{.Y}}" r="2"/>{{end}}{{range .Hits}}<rect class="hit" x="{{.X}}" y="{{$.Top}}" width="{{.W}}" height="{{$.HitH}}"><title>{{.Title}}</title></rect>{{end}}</svg>{{end}}
@@ -50,11 +51,13 @@
   </nav>
   <div class="scope">
   {{if .Servers}}<form class="pick" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
+    {{template "sort_field" .}}
     <label>Server <select name="server" id="pick-server">{{if .Unconfigured}}<option value="{{.Server}}" selected disabled>{{.Server}}</option>{{end}}{{range .Servers}}<option value="{{.}}"{{if eq . $.Server}} selected{{end}}>{{.}}</option>{{end}}</select></label>
   </form>{{end}}
   {{if .Pods}}<form class="pick" hx-get="{{pathOf .SelfURL}}" hx-trigger="change" hx-target="body" hx-push-url="true" hx-sync="#page:replace">
     {{template "server_field" .}}
     {{template "range_fields" .}}
+    {{template "sort_field" .}}
     <label>{{.Noun.Cap}} <select name="{{.Noun.Param}}" id="pick-unit"><option value=""{{if not .Pod}} selected{{end}}>All {{.Noun.Many}} (merged)</option>{{range .Pods}}<option value="{{.Label}}"{{if eq .Label $.Pod}} selected{{end}} title="{{.Tip}}">{{.Label}}</option>{{end}}{{with .Gone}}<option value="{{.}}" selected disabled>{{.}}</option>{{end}}</select></label>
   </form>{{end}}
   </div>

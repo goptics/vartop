@@ -377,12 +377,14 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 		set = "detail"
 	}
 	var ranges ChartRanges
+	var sort string
 	if from := r.Header.Get("HX-Current-URL"); from != "" {
 		u, err := url.Parse(from)
 		if err != nil {
 			return "", Page{}, false
 		}
 		ranges = rangesOf(u.Query(), spans) // the charts keep showing the span they did
+		sort = sortParam(u.Query().Get("sort")) // and the rows their order
 		set, worker = "", ""
 		path := u.EscapedPath()
 		if path == "/" || path == "" {
@@ -403,6 +405,8 @@ func livePage(r *http.Request, key string, n fleet.Noun, interval time.Duration,
 	switch set {
 	case "dashboard":
 		d := fleet.BuildDashboard(snaps, p.Pod, 0, p.Noun)
+		p.Sort = sort
+		d.Sort(sort)
 		p.Dashboard = &d
 	case "detail":
 		d, ok := fleet.BuildDetail(snaps, p.Pod, worker, 0, p.Noun)

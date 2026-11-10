@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -1113,5 +1114,66 @@ func TestBuildDetailMergesSources(t *testing.T) {
 		okPod("p1", map[string]*Sample{"w": src(smp("Running", 1, 0, 1, 0), "priority", b)}))
 	if d, _ := BuildDetail([]*Snapshot{shared}, "", "w", 0, instanceNoun); len(d.Sources) != 2 || first[:2][1] != (api.WorkerSource{}) {
 		t.Errorf("merge wrote into the pod's sources: %+v, pod %+v", d.Sources, first[:2])
+	}
+}
+
+// A row's failed rate is the mean of the last minute, per minute: one quiet
+// poll does not clear it, and a worker with no rate yet has none to show.
+func TestRowFailedPerMinIsMeanOfLastMinute(t *testing.T) {
+	at := func(tick int, failed float64) *Snapshot {
+		return snap(atTick(tick), okPod("p0", map[string]*Sample{
+			"flaky": rated(smp("Running", 1, 0, 1, 0), 1, failed),
+			"new":   smp("Running", 1, 0, 1, 0),
+		}))
+	}
+	// atTick steps 5 s: tick 0 is 100 s old, outside the minute
+	v := BuildDashboard([]*Snapshot{at(0, 9), at(18, 0.5), at(19, 0.5), at(20, 0)}, "", 0, instanceNoun)
+	if r := rowByName(t, v.Rows, "flaky"); !r.FailedKnown || math.Abs(r.FailedPerMin-20) > 1e-9 {
+		t.Errorf("flaky = %v (known %v), want 20/min: mean of 0.5, 0.5, 0 /s", r.FailedPerMin, r.FailedKnown)
+	}
+	if r := rowByName(t, v.Rows, "new"); r.FailedKnown || r.FailedPerMin != 0 {
+		t.Errorf("new = %v (known %v), want unknown", r.FailedPerMin, r.FailedKnown)
+	}
+}
+
+// Sort: attention buckets by default (failing, then paused or stopped with a
+// backlog, then the rest), each by its measure, name last; ?sort= values
+// order by one column; an unknown value falls back to attention.
+func TestDashboardSortOrders(t *testing.T) {
+	row := func(name, class string, failed float64, pending int) RowView {
+		return RowView{Name: name, Class: class, FailedPerMin: failed, PendingMax: pending}
+	}
+	rows := []RowView{
+		row("a-idle", "active", 0, 0),
+		row("b-backlog", "active", 0, 900),
+		row("c-paused", "paused", 0, 40),
+		row("d-fails", "active", 2, 0),
+		row("e-fails-more", "active", 8, 5),
+		row("f-stopped", "stopped", 0, 70),
+		row("g-paused-empty", "paused", 0, 0),
+		row("h-fails", "paused", 2, 0),
+	}
+	for by, want := range map[string][]string{
+		"":            {"e-fails-more", "d-fails", "h-fails", "f-stopped", "c-paused", "b-backlog", "a-idle", "g-paused-empty"},
+		SortAttention: {"e-fails-more", "d-fails", "h-fails", "f-stopped", "c-paused", "b-backlog", "a-idle", "g-paused-empty"},
+		"bogus":       {"e-fails-more", "d-fails", "h-fails", "f-stopped", "c-paused", "b-backlog", "a-idle", "g-paused-empty"},
+		SortName:      {"a-idle", "b-backlog", "c-paused", "d-fails", "e-fails-more", "f-stopped", "g-paused-empty", "h-fails"},
+		SortPending:   {"b-backlog", "f-stopped", "c-paused", "e-fails-more", "a-idle", "d-fails", "g-paused-empty", "h-fails"},
+		SortFailed:    {"e-fails-more", "d-fails", "h-fails", "a-idle", "b-backlog", "c-paused", "f-stopped", "g-paused-empty"},
+	} {
+		v := DashboardView{Rows: slices.Clone(rows)}
+		slices.Reverse(v.Rows) // the input order must not matter
+		v.Sort(by)
+		if got := rowNames(v.Rows); !slices.Equal(got, want) {
+			t.Errorf("sort %q = %v, want %v", by, got, want)
+		}
+	}
+
+	g := GridView{Rows: []GridRow{{Name: "a-idle"}, {Name: "ghost"}, {Name: "c-paused"}, {Name: "e-fails-more"}}}
+	v := DashboardView{Rows: slices.Clone(rows)}
+	v.Sort(SortAttention)
+	g.Order(v.Rows)
+	if got := []string{g.Rows[0].Name, g.Rows[1].Name, g.Rows[2].Name, g.Rows[3].Name}; !slices.Equal(got, []string{"e-fails-more", "c-paused", "a-idle", "ghost"}) {
+		t.Errorf("grid order = %v, want the dashboard's, strangers last", got)
 	}
 }
