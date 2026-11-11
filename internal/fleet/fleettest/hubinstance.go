@@ -3,6 +3,7 @@ package fleettest
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,8 @@ type HubInstanceOptions struct {
 	Handler http.Handler
 	// NoBeat: never beat (the hub should drop it).
 	NoBeat bool
+	// Client sends every request (TLS trust, HTTP/2); a plain one when nil.
+	Client *http.Client
 }
 
 // HubInstance is a fake VarMQ instance connected to a hub: it holds the
@@ -66,7 +69,7 @@ func DialHub(t *testing.T, base, token, id string, opts HubInstanceOptions) (*Hu
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &HubInstance{
 		ID: id, base: base, token: token, opts: opts, cancel: cancel,
-		client:   &http.Client{},
+		client:   cmp.Or(opts.Client, &http.Client{}),
 		done:     make(chan struct{}),
 		requests: make(chan HubFrame, 64),
 	}

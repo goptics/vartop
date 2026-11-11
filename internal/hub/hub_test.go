@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -353,9 +354,10 @@ func TestReplyOversize413(t *testing.T) {
 		n    int64 // declared length; -1 chunked
 	}{{"declared", MaxReply + 1}, {"chunked", -1}} {
 		f, res := held(t, context.Background(), r.Transport(tokA), a)
-		code, err := a.ReplyAs(a.ID, f.ID, 200, nil, &zeros{MaxReply + 1}, c.n)
-		if err == nil && code != http.StatusRequestEntityTooLarge {
-			t.Errorf("%s: %d, want 413", c.name, code)
+		// 100-continue: a declared size is refused before the body is sent.
+		code, err := a.ReplyAs(a.ID, f.ID, 200, http.Header{"Expect": {"100-continue"}}, &zeros{MaxReply + 1}, c.n)
+		if err != nil || code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s: %d, %v; want 413", c.name, code, err)
 		}
 		if err := wait(t, res); err == nil || !strings.Contains(err.Error(), "exceeds") {
 			t.Errorf("%s: RoundTrip = %v, want a too-large error", c.name, err)
@@ -637,5 +639,61 @@ func TestEndpointSplit(t *testing.T) {
 		if !ok || got != id || path != "/workers/x%2Fy?state=pending" {
 			t.Errorf("split(Endpoint(%q)) = %q, %q, %v", id, got, path, ok)
 		}
+	}
+}
+
+// TestServeTLS: Serve with a certificate speaks TLS and HTTP/2 to an
+// instance, carries a round trip, and on shutdown drops the stream and
+// returns.
+func TestServeTLS(t *testing.T) {
+	tmp := httptest.NewUnstartedServer(http.NotFoundHandler())
+	tmp.EnableHTTP2 = true
+	tmp.StartTLS()
+	cert, client := tmp.TLS.Certificates[0], tmp.Client() // trusts cert, attempts HTTP/2
+	tmp.Close()
+
+	r := newRouter(slowBeat, 0, nil)
+	r.Sync(hubConfig(map[string]string{"a": tokA}))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- Serve(ctx, ln, r, &cert, 5*time.Second, nil) }()
+	base := "https://" + ln.Addr().String()
+
+	req, _ := http.NewRequest(http.MethodGet, streamURL(base, "probe", "1"), nil)
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ProtoMajor != 2 || resp.StatusCode != http.StatusOK {
+		t.Errorf("stream over TLS = %s %d, want HTTP/2 200", resp.Proto, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	_, v := fleettest.NewVarmq(t, "x", map[string]*fleettest.Worker{"w": {Status: "Running"}})
+	inst, code := fleettest.DialHub(t, base, tokA, "tls", fleettest.HubInstanceOptions{Handler: v.Config.Handler, Client: client})
+	if code != http.StatusOK {
+		t.Fatalf("dial over TLS: %d", code)
+	}
+	if list, err := api.NewClientVia(Endpoint("tls"), "", r.Transport(tokA)).ListWorkersCtx(context.Background()); err != nil || len(list) != 1 {
+		t.Errorf("round trip over TLS: %v, %v", list, err)
+	}
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve = %v, want nil after shutdown", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Serve still running 6s after its context ended")
+	}
+	select {
+	case <-inst.Done():
+	case <-time.After(5 * time.Second):
+		t.Error("stream still open after shutdown")
 	}
 }

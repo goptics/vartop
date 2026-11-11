@@ -869,6 +869,28 @@ func TestWebServesHub(t *testing.T) {
 	if strings.Contains(out.String(), "clear text") {
 		t.Errorf("warned of clear text on a loopback hub:\n%s", out.String())
 	}
+
+	// No instance yet: an empty, error-free snapshot, and pages that say so.
+	fleettest.WaitUntil(t, 5*time.Second, "a snapshot with no instance", func() bool {
+		s := latestOf(dataDir, "h")
+		return s != nil && len(s.Pods) == 0 && s.Err == ""
+	})
+	dash := regexp.MustCompile(`vartop web: (http://\S+)`).FindStringSubmatch(out.String())
+	if dash == nil {
+		t.Fatalf("no dashboard address in:\n%s", out.String())
+	}
+	for path, want := range map[string]string{"/": "0/0 instances", "/grid": "No instances to show.", "/queues": "0/0 instances", "/workflows": "0/0 instances"} {
+		resp, err := http.Get(dash[1] + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), want) {
+			t.Errorf("GET %s with no instance = %d, want 200 with %q", path, resp.StatusCode, want)
+		}
+	}
+
 	_, v := fleettest.NewVarmq(t, "pod-1", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 2}})
 	inst, code := fleettest.DialHub(t, base, tok, "pod-1", fleettest.HubInstanceOptions{Handler: v.Config.Handler})
 	if code != http.StatusOK {
