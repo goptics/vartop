@@ -73,14 +73,17 @@ func ConfigChangedMsg(server string) string {
 	return "The configuration of " + server + " changed; actions wait for its first snapshot under it. Try again in a few seconds."
 }
 
-// SourceOf identifies what finds srv's units: its endpoints or
-// DNS settings — not its token, interval or name, which leave the units as
-// they are. It is a short hash, so that no setting is stored as it is.
+// SourceOf identifies what finds srv's units: its endpoints, DNS
+// settings or hub — not its token, interval or name, which leave the units
+// as they are. It is a short hash, so that no setting is stored as it is.
+// Hub is omitted when false: a pull server's hash is the one it had before
+// hub servers.
 func SourceOf(srv *config.Server) string {
 	b, _ := json.Marshal(struct {
 		Endpoints []string
 		DNS       *config.DNSRef
-	}{srv.Endpoints, srv.DNS})
+		Hub       bool `json:",omitempty"`
+	}{srv.Endpoints, srv.DNS, srv.Hub})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
 }
@@ -352,11 +355,12 @@ func outcome(key string, units map[string]PodSnapshot, n Noun, err error) Action
 }
 
 // ClientsFor makes the clients an action on latest's units is sent
-// through, with token: one per direct unit, at its key, and one per
+// through, with token, over rt (nil: the default transports; a hub
+// server's: its hub): one per direct unit, at its key, and one per
 // balancer endpoint — a key of latest.Behind, or the endpoint a balanced
 // unit was reached through, dead ones included. They are sorted by
 // endpoint, each once. With nil (no snapshot yet) there are none.
-func ClientsFor(latest *Snapshot, token string) []*api.Client {
+func ClientsFor(latest *Snapshot, token string, rt http.RoundTripper) []*api.Client {
 	if latest == nil {
 		return nil
 	}
@@ -371,7 +375,7 @@ func ClientsFor(latest *Snapshot, token string) []*api.Client {
 	slices.Sort(endpoints)
 	clients := make([]*api.Client, 0, len(endpoints))
 	for _, ep := range slices.Compact(endpoints) {
-		clients = append(clients, api.NewClient(ep, token))
+		clients = append(clients, api.NewClientVia(ep, token, rt))
 	}
 	return clients
 }

@@ -2,18 +2,23 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	neturl "net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +26,7 @@ import (
 
 	"github.com/goptics/vartop/internal/collect"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/hub"
 	"github.com/goptics/vartop/internal/store"
 	"github.com/goptics/vartop/internal/web"
 )
@@ -29,7 +35,106 @@ var (
 	webHost   string
 	webPort   int
 	webNoOpen bool
+	webHub    hubFlags
 )
+
+// hubFlags are vartop web's hub listener flags: listen "" is no hub.
+type hubFlags struct {
+	listen, cert, key string
+}
+
+// check refuses a TLS flag without its pair or without --hub-listen.
+func (f hubFlags) check() error {
+	switch {
+	case (f.cert == "") != (f.key == ""):
+		return errors.New("--hub-tls-cert and --hub-tls-key go together")
+	case f.cert != "" && f.listen == "":
+		return errors.New("--hub-tls-cert and --hub-tls-key need --hub-listen")
+	}
+	return nil
+}
+
+// listenHub opens the hub listener of f (nil, nil with no --hub-listen),
+// loads its certificate, and prints where VarMQ instances connect. Unlike
+// the dashboard it may bind any address: every request needs a token.
+func listenHub(f hubFlags, out io.Writer) (net.Listener, *tls.Certificate, error) {
+	if f.listen == "" {
+		return nil, nil, nil
+	}
+	var cert *tls.Certificate
+	if f.cert != "" {
+		var err error
+		if cert, err = hub.LoadCert(f.cert, f.key); err != nil {
+			return nil, nil, err
+		}
+	}
+	ln, err := net.Listen("tcp", f.listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hub: %w", err)
+	}
+	scheme := "http"
+	if cert != nil {
+		scheme = "https"
+	}
+	fmt.Fprintf(out, "vartop hub: %s://%s (VarMQ instances connect here)\n", scheme, ln.Addr())
+	if ap, err := netip.ParseAddrPort(ln.Addr().String()); cert == nil && (err != nil || !ap.Addr().IsLoopback()) {
+		fmt.Fprintln(out, "  no TLS: the hub token travels in clear text; use --hub-tls-cert and --hub-tls-key, TLS at a proxy, or a trusted network")
+	}
+	return ln, cert, nil
+}
+
+// noteHubs says which hub servers the config has, and that their
+// instances cannot connect when the hub is off (router nil).
+func noteHubs(out io.Writer, router *hub.Router) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	var hubs []string
+	for _, name := range slices.Sorted(maps.Keys(cfg.Servers)) {
+		if cfg.Servers[name].Hub {
+			hubs = append(hubs, name)
+		}
+	}
+	switch {
+	case router == nil:
+		for _, name := range hubs {
+			fmt.Fprintf(out, "server %q is a hub server, but vartop web runs without --hub-listen: its instances cannot connect\n", name)
+		}
+	case len(hubs) == 0:
+		fmt.Fprintln(out, "  no hub server is configured yet: add one with vartop server add")
+	default:
+		fmt.Fprintf(out, "  hub servers: %s\n", strings.Join(hubs, ", "))
+	}
+}
+
+// followHubs has router serve the hub servers of the config, read again
+// every collect.ConfigEvery until ctx ends: servers added, removed or
+// given a new token are followed as the collector follows them.
+func followHubs(ctx context.Context, router *hub.Router, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			syncHubs(router)
+		}
+	}
+}
+
+// syncHubs syncs router with the config. A config that cannot be read
+// keeps the last good one; no config file is no hub server.
+func syncHubs(router *hub.Router) {
+	cfg, err := config.Load()
+	switch {
+	case errors.Is(err, config.ErrConfigNotFound):
+		router.Sync(&config.Config{})
+	case err == nil:
+		router.Sync(cfg)
+	}
+}
 
 // listenAddr is the address vartop web listens on: host, and port from 0
 // (any free port) to 65535.
@@ -194,7 +299,14 @@ func sleep(ctx context.Context, d time.Duration) {
 // The data directory deleted under it stops the web too, with that error,
 // whether it collects or only shows what another collects: its pages would
 // go on reading the deleted files.
-func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(string) error, log *slog.Logger) error {
+//
+// With hf.listen set it also serves the hub listener there: VarMQ
+// instances of hub servers connect to it, and the collector and the pages
+// reach them through it. It stops with the web.
+func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, open func(string) error, log *slog.Logger) error {
+	if err := hf.check(); err != nil {
+		return err
+	}
 	src, release, err := webSource()
 	if err != nil {
 		return err
@@ -203,12 +315,36 @@ func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(stri
 
 	serveCtx, stopServing := context.WithCancel(ctx)
 	defer stopServing()
+
+	hubLn, cert, err := listenHub(hf, out)
+	if err != nil {
+		return err
+	}
+	var router *hub.Router
+	hubStopped := make(chan struct{})
+	var hubErr error
+	if hubLn != nil {
+		router = hub.NewRouter(hub.Options{Log: log})
+		syncHubs(router) // before the first instance and the first pool
+		go followHubs(serveCtx, router, collect.ConfigEvery)
+		go func() {
+			defer close(hubStopped)
+			if hubErr = hub.Serve(serveCtx, hubLn, router, cert, shutdownTimeout, log); hubErr != nil {
+				stopServing()
+			}
+		}()
+	} else {
+		close(hubStopped)
+	}
+	noteHubs(out, router)
+	src.Hubs = router
+
 	collectCtx, stopCollecting := context.WithCancel(ctx)
 	collected := make(chan struct{})
 	var collectErr error
 	go func() {
 		defer close(collected)
-		o := collect.Options{DataDir: src.DataDir, Config: readConfig, Lease: ownLease(), Log: log}
+		o := collect.Options{DataDir: src.DataDir, Config: readConfig, BuildPool: router.BuildPool, Lease: ownLease(), Log: log}
 		run := func(ctx context.Context) (int, error) {
 			// The pages read the control.db opened at the start: deleted,
 			// a Run would make a new one they never see (and the data
@@ -224,10 +360,15 @@ func runWeb(ctx context.Context, key, addr string, out io.Writer, open func(stri
 		}
 	}()
 	err = serveWeb(serveCtx, src, key, addr, out, open)
+	stopServing()
+	<-hubStopped
 	stopCollecting()
 	<-collected
 	if collectErr != nil {
 		return fmt.Errorf("%w; start vartop web again", collectErr)
+	}
+	if err == nil && hubErr != nil {
+		err = fmt.Errorf("hub: %w", hubErr)
 	}
 	return err
 }
@@ -276,7 +417,11 @@ var webCmd = &cobra.Command{
 dashboard has no login) and opens it in your browser. While it runs it
 collects every configured server into the data directory, keeping 24h of
 polls and each worker's rates for the server's history (1d to 30d); when it
-stops, collection stops too.`,
+stops, collection stops too.
+
+With --hub-listen it also serves the hub: VarMQ instances of hub servers
+connect to it with the server's token. It may listen on any address; use
+TLS (--hub-tls-cert, --hub-tls-key) or a trusted network.`,
 	// A failure here (port in use, shutdown) is not a usage mistake.
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -299,7 +444,7 @@ stops, collection stops too.`,
 		if webNoOpen {
 			open = func(string) error { return nil }
 		}
-		return runWeb(ctx, serverFlag, addr, cmd.OutOrStdout(), open, slog.Default())
+		return runWeb(ctx, serverFlag, addr, webHub, cmd.OutOrStdout(), open, slog.Default())
 	},
 }
 
@@ -307,5 +452,8 @@ func init() {
 	webCmd.Flags().StringVar(&webHost, "host", "127.0.0.1", "Loopback host to listen on (the dashboard has no login)")
 	webCmd.Flags().IntVar(&webPort, "port", 7070, "Port to listen on (0: any free port)")
 	webCmd.Flags().BoolVar(&webNoOpen, "no-open", false, "Do not open the browser")
+	webCmd.Flags().StringVar(&webHub.listen, "hub-listen", "", "Address the hub listens on for VarMQ instances of hub servers, e.g. :7071 (default: no hub)")
+	webCmd.Flags().StringVar(&webHub.cert, "hub-tls-cert", "", "TLS certificate file of the hub listener")
+	webCmd.Flags().StringVar(&webHub.key, "hub-tls-key", "", "TLS key file of the hub listener")
 	rootCmd.AddCommand(webCmd)
 }

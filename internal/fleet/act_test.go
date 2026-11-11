@@ -2,6 +2,9 @@ package fleet
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -107,7 +110,7 @@ func TestClientsFor(t *testing.T) {
 		Behind: map[string]int{"http://lb1": 2, "http://lb2": 0, "http://lb3": 1},
 	}
 
-	clients := ClientsFor(latest, "tok")
+	clients := ClientsFor(latest, "tok", nil)
 	var got []string
 	for _, c := range clients {
 		got = append(got, c.PrimaryEndpoint())
@@ -122,7 +125,7 @@ func TestClientsFor(t *testing.T) {
 	if a := auth.Load(); a != "Bearer tok" {
 		t.Errorf("Authorization = %v, want the token", a)
 	}
-	if c := ClientsFor(nil, "tok"); len(c) != 0 {
+	if c := ClientsFor(nil, "tok", nil); len(c) != 0 {
 		t.Errorf("ClientsFor(nil) = %d clients, want none", len(c))
 	}
 }
@@ -138,7 +141,7 @@ func TestScopeOfByLabel(t *testing.T) {
 		},
 		Behind: map[string]int{"http://lb": 1},
 	}
-	clients := ClientsFor(latest, "")
+	clients := ClientsFor(latest, "", nil)
 
 	sc, err := ScopeOf(clients, latest, "instance-1", instanceNoun)
 	if err != nil || len(sc.Direct) != 1 || sc.Direct[0].PrimaryEndpoint() != "http://a" || sc.ViaBalancer() {
@@ -212,11 +215,26 @@ func TestSourceOf(t *testing.T) {
 		"endpoint":  func(s *config.Server) { s.Endpoints = []string{"http://b:8080/varmq"} },
 		"endpoints": func(s *config.Server) { s.Endpoints = append(s.Endpoints, "http://b:8080/varmq") },
 		"dns":       func(s *config.Server) { s.Endpoints, s.DNS = nil, &config.DNSRef{Host: "mux.internal", Port: 8080} },
+		"hub":       func(s *config.Server) { s.Endpoints, s.Hub = nil, true },
 	} {
 		s := base()
 		edit(s)
 		if got := SourceOf(s); got == src {
 			t.Errorf("another %s: SourceOf = %q, want it to change", name, got)
 		}
+	}
+}
+
+// TestSourceOfPullServerUnchanged: a pull server's source is the hash it
+// had before hub servers: no config-changed banner after an upgrade.
+func TestSourceOfPullServerUnchanged(t *testing.T) {
+	srv := &config.Server{Name: "prod", Endpoints: []string{"http://a:8080/varmq"}}
+	b, _ := json.Marshal(struct {
+		Endpoints []string
+		DNS       *config.DNSRef
+	}{srv.Endpoints, srv.DNS})
+	sum := sha256.Sum256(b)
+	if got, want := SourceOf(srv), hex.EncodeToString(sum[:8]); got != want {
+		t.Errorf("SourceOf = %s, want the pre-hub hash %s", got, want)
 	}
 }

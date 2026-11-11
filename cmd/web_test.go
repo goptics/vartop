@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/goptics/vartop/internal/collect"
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/fleet/fleettest"
 	"github.com/goptics/vartop/internal/store"
 	"github.com/goptics/vartop/internal/web"
 )
@@ -573,7 +575,7 @@ func startRunWeb(t *testing.T, ctx context.Context, cfg *config.Config) <-chan e
 	}
 	res := make(chan error, 1)
 	go func() {
-		res <- runWeb(ctx, "", "127.0.0.1:0", io.Discard, func(string) error { return nil }, slog.New(slog.DiscardHandler))
+		res <- runWeb(ctx, "", "127.0.0.1:0", hubFlags{}, io.Discard, func(string) error { return nil }, slog.New(slog.DiscardHandler))
 	}()
 	return res
 }
@@ -814,5 +816,138 @@ func TestReaderWebStopsWhenDataDirRemoved(t *testing.T) {
 	}
 	if _, err := os.Stat(dataDir); err == nil {
 		t.Error("the reader made the deleted data directory anew")
+	}
+}
+
+// hubCfg is a config of one hub server, "h", polled every second.
+func hubCfg(tok string) *config.Config {
+	return &config.Config{DefaultServer: "h", Servers: map[string]*config.Server{
+		"h": {Name: "h", Hub: true, Token: tok, Interval: 1},
+	}}
+}
+
+// latestOf reads the newest snapshot of the server keyed key, nil when
+// none can be read yet.
+func latestOf(dataDir, key string) *fleet.Snapshot {
+	db, err := store.OpenServer(dataDir, key, false)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	latest, _ := db.Latest()
+	return latest
+}
+
+// TestWebServesHub: with --hub-listen vartop web prints where instances
+// connect; an instance of a hub server connects there and the collector
+// stores it as the server's unit; the hub stops with the web.
+func TestWebServesHub(t *testing.T) {
+	dataDir := isolate(t)
+	const tok = "hub-token-0123456789abcdef"
+	if err := config.Save(hubCfg(tok)); err != nil {
+		t.Fatal(err)
+	}
+	var out lockedBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := make(chan error, 1)
+	go func() {
+		res <- runWeb(ctx, "", "127.0.0.1:0", hubFlags{listen: "127.0.0.1:0"}, &out, func(string) error { return nil }, slog.New(slog.DiscardHandler))
+	}()
+	addr := regexp.MustCompile(`vartop hub: (http://\S+) `)
+	var base string
+	fleettest.WaitUntil(t, 5*time.Second, "the hub address", func() bool {
+		m := addr.FindStringSubmatch(out.String())
+		if m != nil {
+			base = m[1]
+		}
+		return m != nil
+	})
+	if !strings.Contains(out.String(), "hub servers: h") {
+		t.Errorf("output does not name the hub servers:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "clear text") {
+		t.Errorf("warned of clear text on a loopback hub:\n%s", out.String())
+	}
+	_, v := fleettest.NewVarmq(t, "pod-1", map[string]*fleettest.Worker{"orders": {Status: "Running", Concurrency: 2}})
+	inst, code := fleettest.DialHub(t, base, tok, "pod-1", fleettest.HubInstanceOptions{Handler: v.Config.Handler})
+	if code != http.StatusOK {
+		t.Fatalf("instance stream: %d", code)
+	}
+	fleettest.WaitUntil(t, 10*time.Second, "a snapshot of the hub instance", func() bool {
+		s := latestOf(dataDir, "h")
+		return s != nil && len(s.Pods) == 1 && s.Pods[0].Instance == "pod-1" && s.Pods[0].Workers["orders"] != nil
+	})
+	cancel()
+	if err := waitResult(t, res); err != nil {
+		t.Fatalf("runWeb() error: %v", err)
+	}
+	select {
+	case <-inst.Done():
+	case <-time.After(5 * time.Second):
+		t.Error("instance stream still open after vartop web stopped")
+	}
+}
+
+// TestWebHubOff: a hub server without --hub-listen is said so at start,
+// and its snapshots carry why it is not collected.
+func TestWebHubOff(t *testing.T) {
+	dataDir := isolate(t)
+	if err := config.Save(hubCfg("hub-token-0123456789abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	var out lockedBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := make(chan error, 1)
+	go func() {
+		res <- runWeb(ctx, "", "127.0.0.1:0", hubFlags{}, &out, func(string) error { return nil }, slog.New(slog.DiscardHandler))
+	}()
+	fleettest.WaitUntil(t, 5*time.Second, "a snapshot saying why", func() bool {
+		s := latestOf(dataDir, "h")
+		return s != nil && strings.Contains(s.Err, "--hub-listen")
+	})
+	if want := `server "h" is a hub server, but vartop web runs without --hub-listen`; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, out.String())
+	}
+	cancel()
+	if err := waitResult(t, res); err != nil {
+		t.Fatalf("runWeb() error: %v", err)
+	}
+}
+
+func TestHubFlags(t *testing.T) {
+	for _, c := range []struct {
+		f    hubFlags
+		want string // "" ok
+	}{
+		{hubFlags{}, ""},
+		{hubFlags{listen: ":7071"}, ""},
+		{hubFlags{listen: ":7071", cert: "c", key: "k"}, ""},
+		{hubFlags{listen: ":7071", cert: "c"}, "go together"},
+		{hubFlags{listen: ":7071", key: "k"}, "go together"},
+		{hubFlags{cert: "c", key: "k"}, "need --hub-listen"},
+	} {
+		err := c.f.check()
+		if (c.want == "") != (err == nil) || err != nil && !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%+v.check() = %v, want %q", c.f, err, c.want)
+		}
+	}
+	for _, name := range []string{"hub-listen", "hub-tls-cert", "hub-tls-key"} {
+		if f := webCmd.Flags().Lookup(name); f == nil || f.DefValue != "" {
+			t.Errorf("--%s = %+v, want a flag defaulting to empty", name, f)
+		}
+	}
+	if _, _, err := listenHub(hubFlags{listen: "127.0.0.1:0", cert: "/nonexistent/c", key: "/nonexistent/k"}, io.Discard); err == nil || !strings.Contains(err.Error(), "TLS") {
+		t.Errorf("listenHub with a missing cert = %v, want a TLS error", err)
+	}
+	var out bytes.Buffer
+	ln, _, err := listenHub(hubFlags{listen: "0.0.0.0:0"}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.Close()
+	if !strings.Contains(out.String(), "clear text") {
+		t.Errorf("no clear-text warning for a plain hub on 0.0.0.0:\n%s", out.String())
 	}
 }

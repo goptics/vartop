@@ -871,7 +871,7 @@ func (h *handler) workflowAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	read := fleet.FetchWorkflow(r.Context(), fleet.ClientsFor(t.latest, t.srv.Token), fleet.UnitLabel(t.latest), id)
+	read := fleet.FetchWorkflow(r.Context(), h.clientsFor(t.latest, t.srv), fleet.UnitLabel(t.latest), id)
 	g, found := read.Group(at)
 	switch {
 	case !found && len(read.Ambiguous) > 0:

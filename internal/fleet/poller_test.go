@@ -16,6 +16,7 @@ import (
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/hub"
 )
 
 // newTestCollector starts a collector polling the endpoints every second
@@ -540,5 +541,67 @@ func TestPanicGroupReraises(t *testing.T) {
 	calm.Go(func() {})
 	if v := raised(calm.Wait); v != nil {
 		t.Errorf("Wait with no panic raised %v", v)
+	}
+}
+
+// TestPollHubServer: a hub server's instances, reached through the hub,
+// poll as direct units through the poller, one per instance and never a
+// balancer, even when each names itself otherwise; an action reaches each
+// once, on the first try; one that disconnects leaves the next poll.
+func TestPollHubServer(t *testing.T) {
+	const tok = "hub-token-0123456789abcdef"
+	srv := &config.Server{Name: "h", Hub: true, Token: tok, Interval: 1}
+	r := hub.NewRouter(hub.Options{})
+	r.Sync(&config.Config{Servers: map[string]*config.Server{"h": srv}})
+	ts := httptest.NewServer(r)
+	t.Cleanup(func() {
+		r.Close()
+		ts.Close()
+	})
+	// Both fakes answer as "liar": the hub names each by its stream.
+	f1, v1 := fleettest.NewVarmq(t, "liar", map[string]*fleettest.Worker{"emails": {Status: "Running", Concurrency: 2}})
+	f2, v2 := fleettest.NewVarmq(t, "liar", map[string]*fleettest.Worker{"emails": {Status: "Running", Concurrency: 1}})
+	fleettest.DialHub(t, ts.URL, tok, "pod-1", fleettest.HubInstanceOptions{Handler: v1.Config.Handler})
+	i2, _ := fleettest.DialHub(t, ts.URL, tok, "pod-2", fleettest.HubInstanceOptions{Handler: v2.Config.Handler})
+
+	pool, err := r.BuildPool(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	tr := newTracker(srv.PollInterval())
+	var snap *Snapshot
+	for range 3 { // a balancer would show from the second tick on
+		snap = pollOnce(context.Background(), pool, tr)
+	}
+	if len(snap.Pods) != 2 || snap.Behind != nil || snap.Err != "" {
+		t.Fatalf("snapshot = %d units, behind %v, err %q; want 2 direct units", len(snap.Pods), snap.Behind, snap.Err)
+	}
+	for _, p := range snap.Pods {
+		if p.Balanced || p.Err != "" || p.Key != hub.Endpoint(p.Instance) || p.Workers["emails"] == nil {
+			t.Errorf("unit %+v: want a direct unit of its instance with emails", p)
+		}
+	}
+
+	sc, err := ScopeOf(ClientsFor(snap, "", r.Transport(tok)), snap, "", instanceNoun)
+	if err != nil || sc.ViaBalancer() || len(sc.Direct) != 2 {
+		t.Fatalf("scope = %d direct, via balancer %v, %v", len(sc.Direct), sc.ViaBalancer(), err)
+	}
+	for _, res := range Act(context.Background(), sc, UnitsOf(snap), instanceNoun, []string{"emails"}, ActionSender("pause"))[0] {
+		if res.Outcome != "ok" {
+			t.Errorf("pause on %s: %s %s", res.Pod, res.Outcome, res.Msg)
+		}
+	}
+	for i, f := range []*fleettest.Varmq{f1, f2} {
+		if n := countCalls(f.Calls(), "PATCH /workers/emails/actions/pause"); n != 1 {
+			t.Errorf("instance %d got %d pauses, want 1", i+1, n)
+		}
+	}
+
+	i2.Close()
+	fleettest.WaitUntil(t, 5*time.Second, "pod-2 gone from discovery", func() bool { return len(pool.Clients()) == 1 })
+	snap = pollOnce(context.Background(), pool, tr)
+	if len(snap.Pods) != 1 || snap.Pods[0].Instance != "pod-1" {
+		t.Errorf("after pod-2 left: %+v, want pod-1 alone", snap.Pods)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/hub"
 	"github.com/goptics/vartop/internal/store"
 )
 
@@ -42,6 +43,7 @@ type target struct {
 	feed   *store.Feed
 	latest *fleet.Snapshot
 	label  string
+	hubs   *hub.Router // reaches a hub server's units
 }
 
 // bind returns what r acts on (see target), once its form names a
@@ -66,7 +68,7 @@ func (h *handler) bind(w http.ResponseWriter, r *http.Request) (*target, bool) {
 		conflict(w, "cannot read the config: "+err.Error())
 		return nil, false
 	}
-	t := &target{key: serverOf(cfg, r.PostFormValue("server"))}
+	t := &target{key: serverOf(cfg, r.PostFormValue("server")), hubs: h.src.Hubs}
 	if t.srv = cfg.Servers[t.key]; t.srv == nil {
 		conflict(w, fleet.NotConfiguredMsg(t.key))
 		return nil, false
@@ -205,7 +207,7 @@ func badRequest(w http.ResponseWriter, msg string) {
 // scope is what an action on t reaches: its clients are made from t's
 // newest snapshot, with the token of the config read for this request.
 func (t *target) scope() (fleet.ActScope, error) {
-	return fleet.ScopeOf(fleet.ClientsFor(t.latest, t.srv.Token), t.latest, t.label, t.noun)
+	return fleet.ScopeOf(clientsFor(t.hubs, t.latest, t.srv), t.latest, t.label, t.noun)
 }
 
 // action runs pause, resume, restart or stop on one worker across the unit

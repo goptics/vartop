@@ -22,6 +22,7 @@ import (
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/hub"
 	"github.com/goptics/vartop/internal/store"
 )
 
@@ -1537,4 +1538,40 @@ func mustURL(t *testing.T, s string) *url.URL {
 		t.Fatal(err)
 	}
 	return u
+}
+
+// TestClientsForHubServer: the pages reach a hub server's units through
+// its hub; without one (no --hub-listen) they fail with hub.ErrHubOff and
+// never dial. A pull server's clients are untouched.
+func TestClientsForHubServer(t *testing.T) {
+	const tok = "hub-token-0123456789abcdef"
+	srv := &config.Server{Name: "h", Hub: true, Token: tok}
+	snap := &fleet.Snapshot{Pods: []fleet.PodSnapshot{{Key: hub.Endpoint("pod-1"), Instance: "pod-1"}}}
+	clients := clientsFor(nil, snap, srv)
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	if _, err := clients[0].ListWorkersCtx(t.Context()); !errors.Is(err, hub.ErrHubOff) {
+		t.Errorf("without a hub: %v, want ErrHubOff", err)
+	}
+
+	r := hub.NewRouter(hub.Options{})
+	r.Sync(&config.Config{Servers: map[string]*config.Server{"h": srv}})
+	ts := httptest.NewServer(r)
+	t.Cleanup(func() {
+		r.Close()
+		ts.Close()
+	})
+	_, v := fleettest.NewVarmq(t, "pod-1", map[string]*fleettest.Worker{"emails": {Status: "Running"}})
+	fleettest.DialHub(t, ts.URL, tok, "pod-1", fleettest.HubInstanceOptions{Handler: v.Config.Handler})
+	list, err := clientsFor(r, snap, srv)[0].ListWorkersCtx(t.Context())
+	if err != nil || len(list) != 1 {
+		t.Errorf("through the hub: %v, %v; want the instance's worker", list, err)
+	}
+
+	_, pull := fleettest.NewVarmq(t, "p", map[string]*fleettest.Worker{"emails": {Status: "Running"}})
+	pullSnap := &fleet.Snapshot{Pods: []fleet.PodSnapshot{{Key: pull.URL, Instance: "p"}}}
+	if list, err := clientsFor(r, pullSnap, &config.Server{Name: "p", Endpoints: []string{pull.URL}})[0].ListWorkersCtx(t.Context()); err != nil || len(list) != 1 {
+		t.Errorf("pull server: %v, %v", list, err)
+	}
 }
