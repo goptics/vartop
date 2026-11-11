@@ -356,6 +356,8 @@ func TestShortOrigin(t *testing.T) {
 		"http://[fd00::1]:8080/varmq": "fd00::1",
 		"http://pod-0:8080/varmq":     "pod-0",
 		"localhost:8080":              "localhost:8080", // no scheme: no host to parse, shown as-is
+		"hub://hub.invalid/orders-7":  "orders-7",       // a hub endpoint: its instance
+		"hub://hub.invalid/a%2Fb%20c": "a/b c",
 		"":                            "",
 	} {
 		if got := ShortOrigin(in); got != want {

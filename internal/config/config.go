@@ -178,8 +178,25 @@ func (s *Server) DisplayEndpoint() string {
 	return fmt.Sprintf("%d pods", len(s.Endpoints))
 }
 
-// ShortOrigin returns a compact display label (the host) for an endpoint URL.
+// HubInstance is the instance ID a hub endpoint URL names
+// (hub://hub.invalid/<id>, see internal/hub.Endpoint), and whether
+// endpoint is one.
+func HubInstance(endpoint string) (string, bool) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "hub" {
+		return "", false
+	}
+	seg, _, _ := strings.Cut(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
+	id, err := url.PathUnescape(seg)
+	return id, err == nil && id != ""
+}
+
+// ShortOrigin returns a compact display label for an endpoint URL: its
+// host, or the instance ID of a hub endpoint.
 func ShortOrigin(endpoint string) string {
+	if id, ok := HubInstance(endpoint); ok {
+		return id
+	}
 	if u, err := url.Parse(endpoint); err == nil && u.Hostname() != "" {
 		return u.Hostname()
 	}

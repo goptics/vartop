@@ -661,6 +661,10 @@ func TestEndpointSplit(t *testing.T) {
 		if !ok || got != id || path != "/workers/x%2Fy?state=pending" {
 			t.Errorf("split(Endpoint(%q)) = %q, %q, %v", id, got, path, ok)
 		}
+		// The pages show the instance, not the internal URL.
+		if got := config.ShortOrigin(Endpoint(id)); got != id {
+			t.Errorf("config.ShortOrigin(Endpoint(%q)) = %q, want the ID", id, got)
+		}
 	}
 }
 

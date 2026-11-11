@@ -542,6 +542,9 @@ func TestTip(t *testing.T) {
 		{PodSnapshot{Via: "http://x"}, "http://x"},
 		{PodSnapshot{Key: "#a"}, "#a"},
 		{PodSnapshot{Key: "#a", Instance: "a"}, "#a"}, // an instance without an address says nothing more
+		{PodSnapshot{Key: "hub://hub.invalid/a%2Fb", Via: "hub://hub.invalid/a%2Fb", Instance: "a/b"}, "a/b via hub"},
+		{PodSnapshot{Key: "hub://hub.invalid/a%2Fb", Via: "hub://hub.invalid/a%2Fb"}, "a/b via hub"}, // down: no instance answered
+		{PodSnapshot{Key: "hub://hub.invalid/a"}, "a via hub"},
 	} {
 		if got := tc.unit.Tip(); got != tc.want {
 			t.Errorf("Tip of %+v = %q, want %q", tc.unit, got, tc.want)
