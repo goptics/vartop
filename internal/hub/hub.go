@@ -8,7 +8,7 @@ package hub
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/base64"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/goptics/vartop/internal/api"
 )
@@ -41,17 +42,34 @@ const (
 	MaxLine = 64 << 10
 	// MaxReply is the largest reply body.
 	MaxReply = 16 << 20
-	// MaxInFlight caps requests waiting on one instance; more callers
-	// wait for a slot or their context.
+	// MaxInFlight caps the callers waiting on one instance: a request
+	// holds a slot from its frame until its reply is read, or its caller
+	// left and no reply is being read. It does not bound what runs at
+	// the instance: a frame whose caller left may still run there.
 	MaxInFlight = 8
 	// DefaultMaxInstances caps connected instances per hub server.
-	DefaultMaxInstances = 10000
+	// ponytail: 1000 per hub server, so a token holder cannot grow the
+	// stored state past it; raise it with Options.MaxInstances (no flag
+	// yet).
+	DefaultMaxInstances = 1000
 	// missedBeats beats missed in a row drop an instance.
 	missedBeats = 3
-	// bodyTimeout bounds reading a reply or beat body.
-	bodyTimeout = time.Minute
-	// maxContentType clips a reply's Content-Type.
-	maxContentType = 256
+	// SessionHeader carries the stream's session on beats and replies.
+	SessionHeader = "X-Hub-Session"
+)
+
+// Hub-wide bounds; tests shorten them through Router.lim.
+const (
+	// requestTimeout bounds reading a hub request, body included; an
+	// authenticated stream clears it.
+	requestTimeout = 10 * time.Second
+	// replyBudget bounds the reply bytes all hub servers buffer at once.
+	replyBudget = 256 << 20
+	// joinBurst and joinRate bound new streams per hub server: a token
+	// bucket of joinBurst, refilled at joinRate a second. A fleet that
+	// redials at once gets in at that pace; the rest get 503 and retry.
+	joinBurst = 200
+	joinRate  = 20
 )
 
 // Scheme and Host make a hub endpoint URL: hub://hub.invalid/<instance>.
@@ -99,32 +117,18 @@ func split(u *url.URL) (id, path string, ok bool) {
 	return id, path, true
 }
 
-// validInstance: 1 to MaxInstanceID bytes.
-func validInstance(id string) bool { return id != "" && len(id) <= MaxInstanceID }
-
-// validRequestID: 1 to 64 bytes of [A-Za-z0-9_-].
-func validRequestID(id string) bool {
-	if id == "" || len(id) > 64 {
+// validInstance: 1 to MaxInstanceID bytes of UTF-8 without control
+// characters (no byte below 0x20, no 0x7F).
+func validInstance(id string) bool {
+	if id == "" || len(id) > MaxInstanceID || !utf8.ValidString(id) {
 		return false
 	}
 	for _, c := range []byte(id) {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
-		default:
+		if c < 0x20 || c == 0x7f {
 			return false
 		}
 	}
 	return true
-}
-
-// newRequestID: 128 random bits, base64url (22 bytes). Unguessable, so an
-// instance cannot answer a request it was not sent.
-func newRequestID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
 // frame is one stream line.
@@ -132,6 +136,7 @@ type frame struct {
 	Type        string `json:"type"`
 	Protocol    int    `json:"protocol,omitempty"`
 	HeartbeatMS int64  `json:"heartbeat_ms,omitempty"`
+	Session     string `json:"session,omitempty"`
 	ID          string `json:"id,omitempty"`
 	Method      string `json:"method,omitempty"`
 	Path        string `json:"path,omitempty"`
@@ -159,61 +164,117 @@ type reply struct {
 	err         error
 }
 
+// waiter is the caller of one request. Its in-flight slot is freed once
+// the caller and the reply handler that claimed it (if any) are done.
+type waiter struct {
+	ch   chan reply    // the reply: buffered, sent once
+	gone chan struct{} // closed when the caller stops waiting
+	refs int           // under conn.mu: the caller, and a claiming reply handler
+}
+
 // conn is one connected instance: its open stream.
 type conn struct {
-	id     string
-	frames chan []byte   // request lines for the stream writer
-	slots  chan struct{} // in-flight cap
-	done   chan struct{} // closed when dropped
-	once   sync.Once
-	beat   atomic.Int64 // last beat, as Hub.since
+	id      string
+	session string        // the stream's secret: beats and replies carry it
+	frames  chan []byte   // request lines for the stream writer
+	slots   chan struct{} // in-flight cap
+	done    chan struct{} // closed when dropped
+	once    sync.Once
+	beat    atomic.Int64 // last beat, as Hub.since
+	listed  atomic.Bool  // the session's first beat came: discovery and requests see it
 
 	mu      sync.Mutex
-	waiting map[string]chan reply // request ID → its caller
+	waiting map[string]*waiter // request ID → its caller
 }
 
 func newConn(id string) *conn {
 	return &conn{
 		id:      id,
+		session: rand.Text(),
 		frames:  make(chan []byte, MaxInFlight),
 		slots:   make(chan struct{}, MaxInFlight),
 		done:    make(chan struct{}),
-		waiting: make(map[string]chan reply),
+		waiting: make(map[string]*waiter),
 	}
 }
 
 // drop closes the connection: its stream ends, its callers fail.
 func (c *conn) drop() { c.once.Do(func() { close(c.done) }) }
 
-func (c *conn) dropped() bool {
-	select {
-	case <-c.done:
-		return true
-	default:
-		return false
+// owns reports whether r carries c's session, compared in constant time.
+func (c *conn) owns(r *http.Request) bool {
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get(SessionHeader)), []byte(c.session)) == 1
+}
+
+// wait registers w, holding a slot, as the caller of request id.
+func (c *conn) wait(id string, w *waiter) {
+	c.mu.Lock()
+	c.waiting[id] = w
+	c.mu.Unlock()
+}
+
+// leave: the caller w of request id stops waiting.
+func (c *conn) leave(id string, w *waiter) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.waiting[id] == w {
+		delete(c.waiting, id)
+	}
+	close(w.gone)
+	c.unref(w)
+}
+
+// claim takes the caller of request id for a reply handler, nil when none
+// waits: only the first reply for an ID finds it. The handler calls
+// release when it returns.
+func (c *conn) claim(id string) *waiter {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := c.waiting[id]
+	if w != nil {
+		delete(c.waiting, id)
+		w.refs++
+	}
+	return w
+}
+
+// release: the reply handler that claimed w returns.
+func (c *conn) release(w *waiter) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unref(w)
+}
+
+// unref drops one holder of w, under c.mu; the last frees w's slot.
+func (c *conn) unref(w *waiter) {
+	if w.refs--; w.refs == 0 {
+		<-c.slots
 	}
 }
 
-// wait registers a caller for request id; false once dropped.
-func (c *conn) wait(id string, ch chan reply) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.dropped() {
+// limits are the hub-wide bounds a Router shares with its Hubs.
+type limits struct {
+	reqTimeout          time.Duration
+	joinBurst, joinRate float64
+	now                 func() time.Time
+	replyMax            int64
+	replyUsed           atomic.Int64
+}
+
+func defaultLimits() *limits {
+	return &limits{reqTimeout: requestTimeout, joinBurst: joinBurst, joinRate: joinRate, now: time.Now, replyMax: replyBudget}
+}
+
+// take reserves n bytes of the reply budget; false when they do not fit.
+func (l *limits) take(n int64) bool {
+	if l.replyUsed.Add(n) > l.replyMax {
+		l.replyUsed.Add(-n)
 		return false
 	}
-	c.waiting[id] = ch
 	return true
 }
 
-// claim takes the caller of request id, nil when none waits. Only the
-// first reply for an ID finds it.
-func (c *conn) claim(id string) chan reply {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ch := c.waiting[id]
-	delete(c.waiting, id)
-	return ch
-}
+func (l *limits) give(n int64) { l.replyUsed.Add(-n) }
 
 // Hub is one hub server's connected instances. Instance IDs are scoped to
 // the Hub: two servers may each hold the same ID.
@@ -221,18 +282,22 @@ type Hub struct {
 	name         atomic.Pointer[string] // config key; logs only
 	heartbeat    time.Duration
 	maxInstances int
+	lim          *limits
 	log          *slog.Logger
 	epoch        time.Time // monotonic base of conn.beat
 
 	mu     sync.Mutex
 	conns  map[string]*conn
 	closed bool
+	tokens float64   // new-stream bucket (see joinBurst)
+	filled time.Time // when tokens was last refilled
 }
 
-func newHub(name string, heartbeat time.Duration, maxInstances int, log *slog.Logger) *Hub {
+func newHub(name string, heartbeat time.Duration, maxInstances int, lim *limits, log *slog.Logger) *Hub {
 	h := &Hub{
-		heartbeat: heartbeat, maxInstances: maxInstances, log: log,
+		heartbeat: heartbeat, maxInstances: maxInstances, lim: lim, log: log,
 		epoch: time.Now(), conns: make(map[string]*conn),
+		tokens: lim.joinBurst, filled: lim.now(),
 	}
 	h.name.Store(&name)
 	return h
@@ -246,10 +311,12 @@ func (h *Hub) since() int64 { return int64(time.Since(h.epoch)) }
 var (
 	errDuplicate = errors.New("duplicate instance")
 	errFull      = errors.New("instance limit reached")
+	errRate      = errors.New("too many new instances; retry later")
 	errClosed    = errors.New("hub closed")
 )
 
-// add registers c, unless its ID is taken, the hub is full or closed.
+// add registers c, unless its ID is taken, the hub is full, closed or
+// past its new-stream rate.
 func (h *Hub) add(c *conn) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -260,10 +327,25 @@ func (h *Hub) add(c *conn) error {
 		return errDuplicate
 	case len(h.conns) >= h.maxInstances:
 		return errFull
+	case !h.join():
+		return errRate
 	}
-	c.beat.Store(h.since()) // the stream's opening counts as a beat
+	c.beat.Store(h.since()) // the stream's opening starts the liveness clock
 	h.conns[c.id] = c
 	return nil
+}
+
+// join takes a token of the new-stream bucket, under h.mu; false when
+// none is left.
+func (h *Hub) join() bool {
+	now := h.lim.now()
+	h.tokens = min(h.lim.joinBurst, h.tokens+now.Sub(h.filled).Seconds()*h.lim.joinRate)
+	h.filled = now
+	if h.tokens < 1 {
+		return false
+	}
+	h.tokens--
+	return true
 }
 
 // remove unregisters c, if still registered, and drops it. A newer conn
@@ -277,10 +359,24 @@ func (h *Hub) remove(c *conn) {
 	c.drop()
 }
 
+// get is the registered conn of id, listed or not.
 func (h *Hub) get(id string) *conn {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.conns[id]
+}
+
+// session is the conn of r's instance whose session r carries, nil when
+// none: beats, byes and replies belong to one stream.
+func (h *Hub) session(r *http.Request) *conn {
+	id := r.URL.Query().Get("instance")
+	if !validInstance(id) {
+		return nil
+	}
+	if c := h.get(id); c != nil && c.owns(r) {
+		return c
+	}
+	return nil
 }
 
 // close drops every instance and refuses new ones.
@@ -295,22 +391,18 @@ func (h *Hub) close() {
 	}
 }
 
-// Endpoints is the endpoint URL of every connected instance, sorted.
+// Endpoints is the endpoint URL of every listed instance, sorted.
 func (h *Hub) Endpoints() []string {
 	h.mu.Lock()
 	out := make([]string, 0, len(h.conns))
-	for id := range h.conns {
-		out = append(out, Endpoint(id))
+	for id, c := range h.conns {
+		if c.listed.Load() {
+			out = append(out, Endpoint(id))
+		}
 	}
 	h.mu.Unlock()
 	slices.Sort(out)
 	return out
-}
-
-// instanceParam is the request's instance query parameter, if valid.
-func instanceParam(r *http.Request) (string, bool) {
-	id := r.URL.Query().Get("instance")
-	return id, validInstance(id)
 }
 
 // stream serves GET /hub/stream: register, hello, then request and ping
@@ -320,9 +412,9 @@ func (h *Hub) stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id, ok := instanceParam(r)
-	if !ok || r.URL.Query().Get("protocol") != strconv.Itoa(Protocol) {
-		http.Error(w, "want instance (1 to 128 bytes) and protocol=1", http.StatusBadRequest)
+	id := r.URL.Query().Get("instance")
+	if !validInstance(id) || r.URL.Query().Get("protocol") != strconv.Itoa(Protocol) {
+		http.Error(w, "want instance (1 to 128 bytes of UTF-8, no control characters) and protocol=1", http.StatusBadRequest)
 		return
 	}
 	c := newConn(id)
@@ -339,7 +431,8 @@ func (h *Hub) stream(w http.ResponseWriter, r *http.Request) {
 	defer h.remove(c)
 
 	rc := http.NewResponseController(w)
-	hello, _ := line(frame{Type: "hello", Protocol: Protocol, HeartbeatMS: h.heartbeat.Milliseconds()})
+	_ = rc.SetReadDeadline(time.Time{}) // authenticated: the stream may live on
+	hello, _ := line(frame{Type: "hello", Protocol: Protocol, HeartbeatMS: h.heartbeat.Milliseconds(), Session: c.session})
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no") // proxies: do not buffer
@@ -388,79 +481,121 @@ func (h *Hub) write(w http.ResponseWriter, rc *http.ResponseController, b []byte
 }
 
 // replyTo serves POST /hub/reply/{id}: hand the body to the caller of
-// request id, sent to this instance.
+// request id, sent down this instance's stream of this session. The
+// caller's slot stays taken until the handler returns, and the body
+// counts against the hub-wide reply budget while it is read.
 func (h *Hub) replyTo(w http.ResponseWriter, r *http.Request) {
-	rid := r.PathValue("id")
-	id, ok := instanceParam(r)
-	var c *conn
-	if ok && validRequestID(rid) {
-		c = h.get(id)
-	}
-	var ch chan reply
+	c := h.session(r)
+	var wt *waiter
 	if c != nil {
-		ch = c.claim(rid) // bound to the instance the frame went to
+		wt = c.claim(r.PathValue("id"))
 	}
-	if ch == nil {
+	if wt == nil {
 		http.Error(w, "no request with that id is waiting", http.StatusNotFound)
 		return
 	}
+	defer c.release(wt)
+	// Every path from here answers the caller once.
+	fail := func(code int, msg string, err error) {
+		wt.ch <- reply{err: err}
+		http.Error(w, msg, code)
+	}
 	status, err := strconv.Atoi(r.Header.Get("X-Hub-Status"))
 	if err != nil || status < 200 || status > 599 {
-		ch <- reply{err: fmt.Errorf("hub: instance %q replied without a valid X-Hub-Status", id)}
-		http.Error(w, "want X-Hub-Status 200 to 599", http.StatusBadRequest)
+		fail(http.StatusBadRequest, "want X-Hub-Status 200 to 599", fmt.Errorf("hub: instance %q replied without a valid X-Hub-Status", c.id))
 		return
 	}
+	tooLarge := fmt.Errorf("hub: reply of instance %q exceeds %d bytes", c.id, MaxReply)
 	if r.ContentLength > MaxReply {
-		ch <- reply{err: fmt.Errorf("hub: reply of instance %q exceeds %d bytes", id, MaxReply)}
-		http.Error(w, "reply too large", http.StatusRequestEntityTooLarge)
+		fail(http.StatusRequestEntityTooLarge, "reply too large", tooLarge)
 		return
 	}
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyTimeout))
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxReply))
-	if err != nil {
-		if mbe := (*http.MaxBytesError)(nil); errors.As(err, &mbe) {
-			ch <- reply{err: fmt.Errorf("hub: reply of instance %q exceeds %d bytes", id, MaxReply)}
-			http.Error(w, "reply too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		ch <- reply{err: fmt.Errorf("hub: read reply of instance %q: %w", id, err)}
-		http.Error(w, "cannot read reply", http.StatusBadRequest)
+	size := r.ContentLength
+	if size < 0 {
+		size = MaxReply // chunked: the most it may be
+	}
+	if !h.lim.take(size) {
+		fail(http.StatusServiceUnavailable, "hub reply memory is full; retry later", fmt.Errorf("hub: reply of instance %q refused: the hub's reply memory is full", c.id))
 		return
 	}
-	ct := r.Header.Get("Content-Type")
-	if len(ct) > maxContentType {
-		ct = ""
+	defer h.lim.give(size)
+	body, err := readReply(w, r, c, wt)
+	switch mbe := (*http.MaxBytesError)(nil); {
+	case err == nil:
+		wt.ch <- reply{status: status, contentType: r.Header.Get("Content-Type"), body: body}
+		w.WriteHeader(http.StatusNoContent)
+	case errors.As(err, &mbe):
+		fail(http.StatusRequestEntityTooLarge, "reply too large", tooLarge)
+	case isClosed(c.done):
+		fail(http.StatusNotFound, "stream closed", fmt.Errorf("%w: %q", ErrDisconnected, c.id))
+	case isClosed(wt.gone):
+		fail(http.StatusNotFound, "the caller left", err)
+	default:
+		fail(http.StatusBadRequest, "cannot read reply", fmt.Errorf("hub: read reply of instance %q: %w", c.id, err))
 	}
-	ch <- reply{status: status, contentType: ct, body: body}
-	w.WriteHeader(http.StatusNoContent)
 }
 
-// beat serves POST /hub/beat: the instance is alive, or with bye=1 leaves.
-func (h *Hub) beatFrom(w http.ResponseWriter, r *http.Request) {
-	id, ok := instanceParam(r)
-	var c *conn
-	if ok {
-		c = h.get(id)
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
+}
+
+// readReply reads r's body, at most MaxReply bytes. It aborts the read
+// when the caller stops waiting or the stream drops: nobody would read it.
+func readReply(w http.ResponseWriter, r *http.Request, c *conn, wt *waiter) ([]byte, error) {
+	rc := http.NewResponseController(w)
+	stop, watched := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watched)
+		select {
+		case <-stop:
+			return
+		case <-wt.gone:
+		case <-c.done:
+		}
+		_ = rc.SetReadDeadline(time.Now())
+	}()
+	defer func() {
+		close(stop)
+		<-watched // no deadline set after the handler returned
+	}()
+	var buf bytes.Buffer
+	if r.ContentLength > 0 {
+		buf.Grow(int(r.ContentLength) + bytes.MinRead)
+	}
+	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, MaxReply))
+	return buf.Bytes(), err
+}
+
+// beatFrom serves POST /hub/beat: the instance is alive, or with bye=1
+// leaves. The session's first beat lists the instance.
+func (h *Hub) beatFrom(w http.ResponseWriter, r *http.Request) {
+	c := h.session(r)
 	if c == nil {
-		http.Error(w, "no open stream for that instance", http.StatusNotFound)
+		http.Error(w, "no open stream with that session for that instance", http.StatusNotFound)
 		return
 	}
 	if r.URL.Query().Get("bye") == "1" {
 		h.remove(c)
-		h.log.Info("hub: instance said bye", "server", h.label(), "instance", id)
+		h.log.Info("hub: instance said bye", "server", h.label(), "instance", c.id)
 	} else {
 		c.beat.Store(h.since())
+		c.listed.Store(true)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // RoundTrip sends req to the instance its URL names (see Endpoint) as a
 // request frame and returns the instance's reply. It fails at once with
-// ErrNotConnected when the instance has no stream, with ErrDisconnected
-// when the stream closes first, and with the context's error when req's
-// context ends first. The reply carries only its status, Content-Type and
-// body; X-Varmq-Instance is always the instance the stream registered as.
+// ErrNotConnected when the instance has no stream or is not listed yet,
+// with ErrDisconnected when the stream closes first, and with the
+// context's error when req's context ends first. The reply carries only
+// its status, Content-Type and body; X-Varmq-Instance is always the
+// instance the stream registered as.
 func (h *Hub) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Body != nil {
 		_ = req.Body.Close() // the API has no request bodies
@@ -473,7 +608,7 @@ func (h *Hub) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("hub: method %s cannot be sent to an instance", req.Method)
 	}
 	c := h.get(id)
-	if c == nil {
+	if c == nil || !c.listed.Load() {
 		return nil, fmt.Errorf("%w: %q", ErrNotConnected, id)
 	}
 	ctx := req.Context()
@@ -484,21 +619,15 @@ func (h *Hub) RoundTrip(req *http.Request) (*http.Response, error) {
 	case <-c.done:
 		return nil, fmt.Errorf("%w: %q", ErrDisconnected, id)
 	}
-	defer func() { <-c.slots }()
-
-	rid, err := newRequestID()
-	if err != nil {
-		return nil, err
-	}
+	rid := rand.Text() // unguessable: an instance cannot answer a request it was not sent
 	out, err := line(frame{Type: "request", ID: rid, Method: req.Method, Path: path})
 	if err != nil {
+		<-c.slots
 		return nil, err
 	}
-	ch := make(chan reply, 1)
-	if !c.wait(rid, ch) {
-		return nil, fmt.Errorf("%w: %q", ErrDisconnected, id)
-	}
-	defer c.claim(rid)
+	wt := &waiter{ch: make(chan reply, 1), gone: make(chan struct{}), refs: 1}
+	c.wait(rid, wt)
+	defer c.leave(rid, wt)
 	select {
 	case c.frames <- out:
 	case <-ctx.Done():
@@ -509,12 +638,12 @@ func (h *Hub) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	var rep reply
 	select {
-	case rep = <-ch:
+	case rep = <-wt.ch:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.done:
 		select {
-		case rep = <-ch:
+		case rep = <-wt.ch:
 		default:
 			return nil, fmt.Errorf("%w: %q", ErrDisconnected, id)
 		}

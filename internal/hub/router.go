@@ -9,12 +9,11 @@ import (
 	"fmt"
 	stdlog "log"
 	"log/slog"
-	"maps"
 	"net"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goptics/vartop/internal/api"
@@ -42,6 +41,7 @@ func keyOf(token string) tokenKey { return sha256.Sum256([]byte(token)) }
 type Router struct {
 	heartbeat    time.Duration
 	maxInstances int
+	lim          *limits
 	log          *slog.Logger
 	mux          *http.ServeMux
 
@@ -67,7 +67,7 @@ func newRouter(heartbeat time.Duration, maxInstances int, log *slog.Logger) *Rou
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	r := &Router{heartbeat: heartbeat, maxInstances: maxInstances, log: log, hubs: make(map[tokenKey]*Hub)}
+	r := &Router{heartbeat: heartbeat, maxInstances: maxInstances, lim: defaultLimits(), log: log, hubs: make(map[tokenKey]*Hub)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /hub/stream", r.authed((*Hub).stream))
 	mux.HandleFunc("POST /hub/reply/{id}", r.authed((*Hub).replyTo))
@@ -78,22 +78,15 @@ func newRouter(heartbeat time.Duration, maxInstances int, log *slog.Logger) *Rou
 
 // Sync makes the hub servers of cfg the ones served, keyed by token. A
 // new token gets a new Hub; a token no longer configured (server removed,
-// token changed) closes its Hub and drops its instances. Servers whose
-// token Validate refuses are skipped.
+// token changed) closes its Hub and drops its instances. cfg is one
+// config.Load accepted: tokens valid and distinct.
 func (r *Router) Sync(cfg *config.Config) {
 	want := make(map[tokenKey]string)
 	if cfg != nil {
-		for _, name := range slices.Sorted(maps.Keys(cfg.Servers)) {
-			srv := cfg.Servers[name]
-			if srv == nil || !srv.Hub || config.ValidHubToken(srv.Token) != nil {
-				continue
+		for name, srv := range cfg.Servers {
+			if srv != nil && srv.Hub {
+				want[keyOf(srv.Token)] = name
 			}
-			k := keyOf(srv.Token)
-			if _, dup := want[k]; dup {
-				r.log.Error("hub: two hub servers share a token; serving the first", "server", name, "first", want[k])
-				continue
-			}
-			want[k] = name
 		}
 	}
 	r.mu.Lock()
@@ -112,25 +105,10 @@ func (r *Router) Sync(cfg *config.Config) {
 	}
 	for k, name := range want {
 		if r.hubs[k] == nil {
-			r.hubs[k] = newHub(name, r.heartbeat, r.maxInstances, r.log)
+			r.hubs[k] = newHub(name, r.heartbeat, r.maxInstances, r.lim, r.log)
 			r.log.Info("hub: serving server", "server", name)
 		}
 	}
-}
-
-// Servers is the names of the hub servers served, sorted.
-func (r *Router) Servers() []string {
-	if r == nil {
-		return nil
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	var names []string
-	for _, h := range r.hubs {
-		names = append(names, h.label())
-	}
-	slices.Sort(names)
-	return names
 }
 
 // hub is the Hub of token, nil when none.
@@ -174,8 +152,14 @@ func (r *Router) authed(serve func(*Hub, http.ResponseWriter, *http.Request)) ht
 	}
 }
 
-// ServeHTTP serves the hub routes of protocol 1.
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) { r.mux.ServeHTTP(w, req) }
+// ServeHTTP serves the hub routes of protocol 1. Every request must be
+// read, body included, within the request timeout; only an authenticated
+// stream clears it. So no client, with or without a token, holds a
+// connection by sending a body slowly.
+func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(r.lim.reqTimeout))
+	r.mux.ServeHTTP(w, req)
+}
 
 // Close drops every instance and serves no hub server from then on. Call
 // it before http.Server.Shutdown: open streams would hold that up.
@@ -298,9 +282,53 @@ func (l serverLog) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// connsPerInstance and connHeadroom size the hub listener's connection
+// cap: over HTTP/1.1 an instance holds its stream and pooled connections
+// for beats and replies; the headroom serves new streams and scanners.
+const (
+	connsPerInstance = 4
+	connHeadroom     = 256
+)
+
+// capListener accepts at most max connections at once. A connection past
+// it is closed at once, so a flood of idle connections cannot pile up.
+type capListener struct {
+	net.Listener
+	max int64
+	n   atomic.Int64
+}
+
+func (l *capListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if l.n.Add(1) <= l.max {
+			return &capConn{Conn: c, l: l}, nil
+		}
+		l.n.Add(-1)
+		_ = c.Close()
+	}
+}
+
+// capConn frees its slot of the capListener on its first Close.
+type capConn struct {
+	net.Conn
+	l    *capListener
+	once sync.Once
+}
+
+func (c *capConn) Close() error {
+	c.once.Do(func() { c.l.n.Add(-1) })
+	return c.Conn.Close()
+}
+
 // Serve serves r on ln (TLS with cert) until ctx ends, then drops every
-// instance and shuts down within timeout.
+// instance and shuts down within timeout. It caps ln's open connections
+// (see connsPerInstance).
 func Serve(ctx context.Context, ln net.Listener, r *Router, cert *tls.Certificate, timeout time.Duration, log *slog.Logger) error {
+	ln = &capListener{Listener: ln, max: int64(connsPerInstance*r.maxInstances + connHeadroom)}
 	srv := NewServer(r, cert, log)
 	errc := make(chan error, 1)
 	go func() {

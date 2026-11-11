@@ -17,13 +17,14 @@ import (
 	"time"
 )
 
-// HubFrame is one line of a hub stream (VarMQ hub protocol 1). The fake
-// spells the wire out itself rather than import internal/hub: an
-// independent check of the hub.
+// HubFrame is one line of a hub stream (VarMQ hub protocol 1, Revision
+// A). The fake spells the wire out itself rather than import internal/hub:
+// an independent check of the hub.
 type HubFrame struct {
 	Type        string `json:"type"`
 	Protocol    int    `json:"protocol"`
 	HeartbeatMS int64  `json:"heartbeat_ms"`
+	Session     string `json:"session"`
 	ID          string `json:"id"`
 	Method      string `json:"method"`
 	Path        string `json:"path"`
@@ -42,8 +43,9 @@ type HubInstanceOptions struct {
 }
 
 // HubInstance is a fake VarMQ instance connected to a hub: it holds the
-// stream open, answers request frames and beats every heartbeat_ms (not
-// clamped: tests use short ones).
+// stream open, answers request frames, and beats at once after hello and
+// then every heartbeat_ms (not clamped: tests use short ones). Beats and
+// replies carry the session of hello.
 type HubInstance struct {
 	ID          string
 	base, token string
@@ -62,8 +64,9 @@ type HubInstance struct {
 }
 
 // DialHub opens id's stream to the hub at base with token. On 200 it
-// waits for the first line and returns the instance; otherwise it returns
-// the status with a nil instance. The stream ends when the test does.
+// waits for the first line, sends the first beat (unless NoBeat), and
+// returns the instance; otherwise it returns the status with a nil
+// instance. The stream ends when the test does.
 func DialHub(t *testing.T, base, token, id string, opts HubInstanceOptions) (*HubInstance, int) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -107,6 +110,7 @@ func DialHub(t *testing.T, base, token, id string, opts HubInstanceOptions) (*Hu
 	t.Cleanup(h.Close)
 	go h.read(ctx, sc, resp.Body)
 	if !opts.NoBeat && h.hello.Type == "hello" && h.hello.HeartbeatMS > 0 {
+		h.beatOnce() // the first beat at once: the hub lists the instance on it
 		go h.beat(ctx, time.Duration(h.hello.HeartbeatMS)*time.Millisecond)
 	}
 	return h, http.StatusOK
@@ -158,16 +162,27 @@ func (h *HubInstance) beat(ctx context.Context, every time.Duration) {
 		case <-h.done:
 			return
 		case <-t.C:
-			code, err := h.Beat(false)
-			if err != nil {
+			if !h.beatOnce() {
 				return
 			}
-			h.mu.Lock()
-			h.beats = append(h.beats, code)
-			h.mu.Unlock()
 		}
 	}
 }
+
+// beatOnce beats and records the status; false when the post failed.
+func (h *HubInstance) beatOnce() bool {
+	code, err := h.Beat(false)
+	if err != nil {
+		return false
+	}
+	h.mu.Lock()
+	h.beats = append(h.beats, code)
+	h.mu.Unlock()
+	return true
+}
+
+// Session is the session secret of hello.
+func (h *HubInstance) Session() string { return h.hello.Session }
 
 // Hello is the stream's first line, decoded.
 func (h *HubInstance) Hello() HubFrame { return h.hello }
@@ -203,6 +218,7 @@ func (h *HubInstance) ReplyAs(instance, id string, status int, header http.Heade
 	}
 	req.ContentLength = n
 	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("X-Hub-Session", h.hello.Session)
 	req.Header.Set("X-Hub-Status", strconv.Itoa(status))
 	for _, k := range []string{"Content-Type", "X-Varmq-Instance"} {
 		if v := header.Get(k); v != "" {
@@ -228,6 +244,7 @@ func (h *HubInstance) Beat(bye bool) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("X-Hub-Session", h.hello.Session)
 	return h.post(req)
 }
 
@@ -239,6 +256,15 @@ func (h *HubInstance) post(req *http.Request) (int, error) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	return resp.StatusCode, nil
+}
+
+// Redial ends the stream as a VarMQ instance that keeps running does: a
+// bye with the old session first, then a new stream of the same ID.
+func (h *HubInstance) Redial(t *testing.T) (*HubInstance, int) {
+	t.Helper()
+	_, _ = h.Beat(true)
+	h.Close()
+	return DialHub(t, h.base, h.token, h.ID, h.opts)
 }
 
 // Close ends the stream without a bye, as a process that dies.

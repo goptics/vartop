@@ -1,13 +1,16 @@
 package hub
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -40,7 +43,16 @@ func hubConfig(servers map[string]string) *config.Config {
 // per server, syncing servers; both close when the test ends.
 func newTestHub(t *testing.T, hb time.Duration, maxInstances int, servers map[string]string) (*Router, string) {
 	t.Helper()
+	return newTestHubWith(t, hb, maxInstances, servers, nil)
+}
+
+// newTestHubWith is newTestHub with its hub-wide limits set by tune first.
+func newTestHubWith(t *testing.T, hb time.Duration, maxInstances int, servers map[string]string, tune func(*limits)) (*Router, string) {
+	t.Helper()
 	r := newRouter(hb, maxInstances, nil)
+	if tune != nil {
+		tune(r.lim)
+	}
 	r.Sync(hubConfig(servers))
 	ts := httptest.NewUnstartedServer(r)
 	ts.Config = NewServer(r, nil, nil)
@@ -129,6 +141,11 @@ func TestStreamBadParams(t *testing.T) {
 		{"instance of 129 bytes", streamURL(base, strings.Repeat("x", 129), "1")},
 		{"no protocol", streamURL(base, "i1", "")},
 		{"protocol 2", streamURL(base, "i1", "2")},
+		{"instance not UTF-8", streamURL(base, "\xff\xfe", "1")},
+		{"instance with a newline", streamURL(base, "a\nb", "1")},
+		{"instance with NUL", streamURL(base, "a\x00", "1")},
+		{"instance with DEL", streamURL(base, "a\x7f", "1")},
+		{"instance with ESC", streamURL(base, "x\x1b[31m", "1")},
 	} {
 		if got := send(t, http.MethodGet, c.url, "Bearer "+tokA); got != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", c.name, got)
@@ -162,8 +179,16 @@ func TestStreamHelloFirst(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatal(code)
 	}
-	if want := `{"type":"hello","protocol":1,"heartbeat_ms":1500}`; inst.FirstLine() != want {
+	s := inst.Session()
+	if want := `{"type":"hello","protocol":1,"heartbeat_ms":1500,"session":"` + s + `"}`; inst.FirstLine() != want {
 		t.Errorf("first line = %s, want %s", inst.FirstLine(), want)
+	}
+	if len(s) < 22 || len(s) > 64 || strings.Trim(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != "" {
+		t.Errorf("session %q: want 22 to 64 bytes of [A-Za-z0-9_-]", s)
+	}
+	other, _ := fleettest.DialHub(t, base, tokA, "i2", fleettest.HubInstanceOptions{})
+	if other.Session() == s {
+		t.Error("two streams got the same session")
 	}
 	// The production constructor keeps heartbeat_ms in the wire range.
 	for _, c := range []struct{ in, want time.Duration }{
@@ -191,7 +216,7 @@ func TestRoundTrip(t *testing.T) {
 	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA})
 	rt := r.Transport(tokA)
 	workers := map[string]*fleettest.Worker{"a b/c": {Status: "Running", Concurrency: 2}}
-	for _, id := range []string{"plain", "with/slash", "50%", "..", "spa ce?#", "\xff\xfe", strings.Repeat("z", 128)} {
+	for _, id := range []string{"plain", "with/slash", "50%", "..", "spa ce?#", "ünï cødé", strings.Repeat("z", 128)} {
 		// The fake varmq says it is "liar": the hub names the instance by
 		// its stream, so one endpoint is always one instance.
 		fv, srv := fleettest.NewVarmq(t, "liar", workers)
@@ -293,7 +318,7 @@ func TestReplyUnknownID404(t *testing.T) {
 	a, _ := fleettest.DialHub(t, base, tokA, "a", fleettest.HubInstanceOptions{})
 	b, _ := fleettest.DialHub(t, base, tokA, "b", fleettest.HubInstanceOptions{})
 	f, res := held(t, context.Background(), r.Transport(tokA), a)
-	if f.Method != http.MethodGet || f.Path != "/workers" || !validRequestID(f.ID) || len(f.ID) < 22 {
+	if f.Method != http.MethodGet || f.Path != "/workers" || len(f.ID) < 22 {
 		t.Errorf("frame = %+v", f)
 	}
 	ok := http.Header{"Content-Type": {"application/json"}}
@@ -463,9 +488,6 @@ func TestTokenRouting(t *testing.T) {
 			t.Errorf("list through %s's hub = %v, %v; want %s", tok[:7], list, err, want)
 		}
 	}
-	if got := r.Servers(); !slices.Equal(got, []string{"a", "b"}) {
-		t.Errorf("Servers = %v", got)
-	}
 
 	// A held request on a cannot be answered through b, even naming the
 	// same instance ID.
@@ -602,8 +624,8 @@ func TestSyncFollowsConfig(t *testing.T) {
 	if _, code := fleettest.DialHub(t, base, tokA2, "a", fleettest.HubInstanceOptions{}); code != http.StatusOK {
 		t.Errorf("new token: %d, want 200", code)
 	}
-	if got := r.Servers(); !slices.Equal(got, []string{"a"}) {
-		t.Errorf("Servers = %v, want [a]", got)
+	if got := served(r); !slices.Equal(got, []string{"a"}) {
+		t.Errorf("served = %v, want [a]", got)
 	}
 
 	// A server whose token is unchanged keeps its instances; Close drops them.
@@ -630,7 +652,7 @@ func TestMaxInstances(t *testing.T) {
 }
 
 func TestEndpointSplit(t *testing.T) {
-	for _, id := range []string{"a", "a/b", "%", "..", "?#", "\xff", strings.Repeat("q", 128)} {
+	for _, id := range []string{"a", "a/b", "%", "..", "?#", "é", strings.Repeat("q", 128)} {
 		u, err := url.Parse(Endpoint(id) + "/workers/x%2Fy?state=pending")
 		if err != nil {
 			t.Fatalf("%q: %v", id, err)
@@ -695,5 +717,457 @@ func TestServeTLS(t *testing.T) {
 	case <-inst.Done():
 	case <-time.After(5 * time.Second):
 		t.Error("stream still open after shutdown")
+	}
+}
+
+// served is the names of the hub servers r serves, sorted.
+func served(r *Router) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for _, h := range r.hubs {
+		names = append(names, h.label())
+	}
+	slices.Sort(names)
+	return names
+}
+
+// post sends POST base+path with tokA and session ("" none), and returns
+// the status.
+func post(t *testing.T, base, path, session string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	if session != "" {
+		req.Header.Set(SessionHeader, session)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// TestSessionBinding: beats, byes and replies belong to the stream's
+// session. A holder of the token cannot evict a connected instance, beat
+// for it, or answer its requests.
+func TestSessionBinding(t *testing.T) {
+	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA})
+	victim, _ := fleettest.DialHub(t, base, tokA, "victim", fleettest.HubInstanceOptions{})
+	for _, session := range []string{"", "wrong-session-0123456789", victim.Session() + "x"} {
+		for _, path := range []string{"/hub/beat?instance=victim&bye=1", "/hub/beat?instance=victim"} {
+			if code := post(t, base, path, session); code != http.StatusNotFound {
+				t.Errorf("POST %s with session %q: %d, want 404", path, session, code)
+			}
+		}
+	}
+	select {
+	case <-victim.Done():
+		t.Fatal("a bye without the session closed the victim's stream")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// A request to the victim cannot be answered without its session.
+	f, res := held(t, context.Background(), r.Transport(tokA), victim)
+	if code := post(t, base, "/hub/reply/"+f.ID+"?instance=victim", ""); code != http.StatusNotFound {
+		t.Errorf("reply without the session: %d, want 404", code)
+	}
+	if code, _ := victim.Reply(f.ID, 200, nil, []byte("[]")); code != http.StatusNoContent {
+		t.Errorf("reply with the session: %d, want 204", code)
+	}
+	if err := wait(t, res); err != nil {
+		t.Error(err)
+	}
+	// The session of an old stream is dead after a redial.
+	again, code := victim.Redial(t)
+	if code != http.StatusOK {
+		t.Fatalf("redial: %d", code)
+	}
+	if code := post(t, base, "/hub/beat?instance=victim&bye=1", victim.Session()); code != http.StatusNotFound {
+		t.Errorf("bye with the old stream's session: %d, want 404", code)
+	}
+	if got := r.Source(tokA).Endpoints(); len(got) != 1 {
+		t.Errorf("endpoints = %v, want the redialed victim", got)
+	}
+	_ = again
+}
+
+// TestListedAfterFirstBeat: an instance is listed, for discovery and for
+// requests, from its session's first beat; its stream's opening starts
+// the liveness clock only.
+func TestListedAfterFirstBeat(t *testing.T) {
+	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA})
+	a, _ := fleettest.DialHub(t, base, tokA, "quiet", fleettest.HubInstanceOptions{NoBeat: true})
+	if got := r.Source(tokA).Endpoints(); len(got) != 0 {
+		t.Errorf("endpoints before the first beat = %v, want none", got)
+	}
+	if _, err := get(context.Background(), r.Transport(tokA), "quiet", "/workers"); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("RoundTrip before the first beat = %v, want ErrNotConnected", err)
+	}
+	if _, code := fleettest.DialHub(t, base, tokA, "quiet", fleettest.HubInstanceOptions{}); code != http.StatusConflict {
+		t.Errorf("same ID before the first beat: %d, want 409", code)
+	}
+	if code, _ := a.Beat(false); code != http.StatusNoContent {
+		t.Fatalf("first beat: %d", code)
+	}
+	if got := r.Source(tokA).Endpoints(); !slices.Equal(got, []string{Endpoint("quiet")}) {
+		t.Errorf("endpoints after the first beat = %v", got)
+	}
+}
+
+// TestByeBeforeRedialFreesID: an instance that says bye before it redials
+// gets its ID back at once, with no 409 window.
+func TestByeBeforeRedialFreesID(t *testing.T) {
+	_, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA})
+	a, _ := fleettest.DialHub(t, base, tokA, "re", fleettest.HubInstanceOptions{})
+	for i := range 5 {
+		next, code := a.Redial(t)
+		if code != http.StatusOK {
+			t.Fatalf("redial %d after bye: %d, want 200", i, code)
+		}
+		a = next
+	}
+}
+
+// silent opens id's stream over raw TCP, reads the hello, then says
+// nothing more and never closes: a half-open peer.
+func silent(t *testing.T, base, id string) net.Conn {
+	t.Helper()
+	u, _ := url.Parse(base)
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	fmt.Fprintf(conn, "GET /hub/stream?instance=%s&protocol=1 HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n\r\n", id, tokA)
+	br := bufio.NewReader(conn)
+	for {
+		l, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(l, `"hello"`) {
+			return conn
+		}
+	}
+}
+
+// TestReview409Bound: the old stream of an ID is held by a peer gone
+// without a FIN, and the instance redials without a bye. The hub never
+// replaces the live stream (409), but frees the ID within 3 to 4
+// heartbeats of the stream's last beat.
+func TestReview409Bound(t *testing.T) {
+	const hb = 200 * time.Millisecond
+	_, base := newTestHub(t, hb, 0, map[string]string{"a": tokA})
+	silent(t, base, "dup")
+	start := time.Now()
+	for {
+		_, code := fleettest.DialHub(t, base, tokA, "dup", fleettest.HubInstanceOptions{})
+		if code == http.StatusOK {
+			break
+		}
+		if code != http.StatusConflict {
+			t.Fatalf("redial: %d", code)
+		}
+		if time.Since(start) > 20*hb {
+			t.Fatal("still 409 after 20 heartbeats")
+		}
+		time.Sleep(hb / 10)
+	}
+	if d := time.Since(start); d > 5*hb {
+		t.Errorf("ID freed after %v, want within 4 heartbeats", d)
+	}
+}
+
+// TestPreAuthReadDeadline: a client that sends headers and then stalls
+// its body, with or without a token, loses its connection at the request
+// timeout. An authenticated stream outlives it.
+func TestPreAuthReadDeadline(t *testing.T) {
+	const timeout = 300 * time.Millisecond
+	_, base := newTestHubWith(t, 200*time.Millisecond, 0, map[string]string{"a": tokA}, func(l *limits) { l.reqTimeout = timeout })
+	addr := strings.TrimPrefix(base, "http://")
+	for _, c := range []struct{ name, req string }{
+		{"no token, beat", "POST /hub/beat?instance=x HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n"},
+		{"no token, reply", "POST /hub/reply/abc?instance=x HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n"},
+		{"no token, unknown path", "POST /nope HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n"},
+		{"no token, chunked", "POST /hub/beat HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"},
+		{"token, beat", "POST /hub/beat?instance=x HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer " + tokA + "\r\nContent-Length: 100\r\n\r\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			start := time.Now()
+			if _, err := io.WriteString(conn, c.req); err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+			_, err = io.Copy(io.Discard, conn)
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				t.Fatalf("connection still held after 10s")
+			}
+			if d := time.Since(start); d > timeout+2*time.Second {
+				t.Errorf("connection held %v, want about %v", d, timeout)
+			}
+		})
+	}
+	t.Run("stream", func(t *testing.T) {
+		in, code := fleettest.DialHub(t, base, tokA, "long", fleettest.HubInstanceOptions{})
+		if code != http.StatusOK {
+			t.Fatal(code)
+		}
+		select {
+		case <-in.Done():
+			t.Fatal("the request timeout cut an authenticated stream")
+		case <-time.After(6 * timeout):
+		}
+	})
+}
+
+// TestCapListener: the hub listener holds at most its cap of connections;
+// one past it is closed at once, and a closed one frees its slot.
+func TestCapListener(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := &capListener{Listener: inner, max: 2}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp", inner.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	open := []net.Conn{dial(), dial()}
+	var held []net.Conn
+	for range 2 {
+		select {
+		case c := <-accepted:
+			held = append(held, c)
+		case <-time.After(5 * time.Second):
+			t.Fatal("not accepted")
+		}
+	}
+	over := dial()
+	_ = over.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := over.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("connection past the cap: read %v, want it closed at once", err)
+	}
+	held[0].Close()
+	held[0].Close() // a second Close frees nothing more
+	_ = open
+	dial()
+	select {
+	case <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a freed slot was not reused")
+	}
+	if n := ln.n.Load(); n != 2 {
+		t.Errorf("open count = %d, want 2", n)
+	}
+	// Serve caps its listener: an instance at the instance limit still
+	// beats over HTTP/1.1 (stream plus a beat connection each).
+	r := newRouter(slowBeat, 2, nil)
+	r.Sync(hubConfig(map[string]string{"a": tokA}))
+	hln, _ := net.Listen("tcp", "127.0.0.1:0")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Serve(ctx, hln, r, nil, time.Second, nil)
+	hbase := "http://" + hln.Addr().String()
+	for _, id := range []string{"1", "2"} {
+		in, code := fleettest.DialHub(t, hbase, tokA, id, fleettest.HubInstanceOptions{})
+		if code != http.StatusOK {
+			t.Fatalf("instance %s: %d", id, code)
+		}
+		if code, err := in.Beat(false); err != nil || code != http.StatusNoContent {
+			t.Errorf("beat of instance %s at the limit: %d, %v", id, code, err)
+		}
+	}
+}
+
+// gate reads n bytes, then blocks until release (or never, when nil).
+type gate struct {
+	n       int
+	release chan struct{}
+	started chan struct{}
+	once    sync.Once
+}
+
+func (g *gate) Read(p []byte) (int, error) {
+	if g.n > 0 {
+		k := min(len(p), g.n)
+		clear(p[:k])
+		g.n -= k
+		return k, nil
+	}
+	g.once.Do(func() { close(g.started) })
+	<-g.release
+	return 0, io.EOF
+}
+
+// TestStalledReplyAborted: a reply whose body stalls keeps its caller's
+// slot while it is read, is aborted once the caller leaves, and is cut at
+// the request timeout when the caller waits on.
+func TestStalledReplyAborted(t *testing.T) {
+	r, base := newTestHubWith(t, slowBeat, 0, map[string]string{"a": tokA}, func(l *limits) { l.reqTimeout = 30 * time.Second })
+	a, _ := fleettest.DialHub(t, base, tokA, "a", fleettest.HubInstanceOptions{})
+	c := r.hub(keyOf(tokA)).get("a")
+	ctx, cancel := context.WithCancel(context.Background())
+	f, res := held(t, ctx, r.Transport(tokA), a)
+	g := &gate{n: 1000, release: make(chan struct{}), started: make(chan struct{})}
+	defer close(g.release)
+	posted := make(chan int, 1)
+	go func() {
+		code, _ := a.ReplyAs(a.ID, f.ID, 200, nil, g, 2000)
+		posted <- code
+	}()
+	<-g.started
+	time.Sleep(50 * time.Millisecond)
+	if n := len(c.slots); n != 1 {
+		t.Errorf("slots taken while the reply is read = %d, want 1", n)
+	}
+	cancel()
+	if err := wait(t, res); !errors.Is(err, context.Canceled) {
+		t.Errorf("RoundTrip = %v, want context.Canceled", err)
+	}
+	select {
+	case code := <-posted:
+		if code != http.StatusNotFound && code != 0 {
+			t.Errorf("aborted reply: %d, want 404 or a closed connection", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reply body still read 5s after its caller left")
+	}
+	fleettest.WaitUntil(t, 5*time.Second, "the slot freed", func() bool { return len(c.slots) == 0 })
+	if used := r.lim.replyUsed.Load(); used != 0 {
+		t.Errorf("reply budget in use after the handler returned = %d, want 0", used)
+	}
+}
+
+// TestReplyReadTimeout: a reply body that stalls while its caller waits is
+// cut at the request timeout; the caller gets an error.
+func TestReplyReadTimeout(t *testing.T) {
+	r, base := newTestHubWith(t, slowBeat, 0, map[string]string{"a": tokA}, func(l *limits) { l.reqTimeout = 300 * time.Millisecond })
+	a, _ := fleettest.DialHub(t, base, tokA, "a", fleettest.HubInstanceOptions{})
+	f, res := held(t, context.Background(), r.Transport(tokA), a)
+	g := &gate{n: 10, release: make(chan struct{}), started: make(chan struct{})}
+	defer close(g.release)
+	go a.ReplyAs(a.ID, f.ID, 200, nil, g, 100)
+	if err := wait(t, res); err == nil || !strings.Contains(err.Error(), "read reply") {
+		t.Errorf("RoundTrip = %v, want a read error", err)
+	}
+}
+
+// TestReplyBudget503: reply bytes buffered at once across the hub are
+// bounded; a reply past the budget gets 503 and its caller an error, and
+// the budget comes back when a reply is done.
+func TestReplyBudget503(t *testing.T) {
+	r, base := newTestHubWith(t, slowBeat, 0, map[string]string{"a": tokA}, func(l *limits) { l.replyMax = 1000 })
+	a, _ := fleettest.DialHub(t, base, tokA, "a", fleettest.HubInstanceOptions{})
+	rt := r.Transport(tokA)
+
+	f, res := held(t, context.Background(), rt, a)
+	if code, _ := a.Reply(f.ID, 200, nil, make([]byte, 1001)); code != http.StatusServiceUnavailable {
+		t.Errorf("reply past the budget: %d, want 503", code)
+	}
+	if err := wait(t, res); err == nil || !strings.Contains(err.Error(), "reply memory") {
+		t.Errorf("RoundTrip = %v, want a reply memory error", err)
+	}
+
+	// One stalled reply holds 800; a second of 300 does not fit.
+	f1, res1 := held(t, context.Background(), rt, a)
+	g := &gate{n: 10, release: make(chan struct{}), started: make(chan struct{})}
+	go a.ReplyAs(a.ID, f1.ID, 200, nil, g, 800)
+	<-g.started
+	f2, res2 := held(t, context.Background(), rt, a)
+	if code, _ := a.Reply(f2.ID, 200, nil, make([]byte, 300)); code != http.StatusServiceUnavailable {
+		t.Errorf("reply while the budget is held: %d, want 503", code)
+	}
+	if err := wait(t, res2); err == nil {
+		t.Error("RoundTrip past the budget succeeded")
+	}
+	close(g.release)
+	_ = wait(t, res1) // short body: an error, the budget freed
+	fleettest.WaitUntil(t, 5*time.Second, "the budget freed", func() bool { return r.lim.replyUsed.Load() == 0 })
+	f3, res3 := held(t, context.Background(), rt, a)
+	if code, _ := a.Reply(f3.ID, 200, nil, make([]byte, 300)); code != http.StatusNoContent {
+		t.Errorf("reply after the budget came back: %d, want 204", code)
+	}
+	if err := wait(t, res3); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestJoinRate503: new streams of a hub server are rate limited; a
+// refused one gets 503, a 409 costs nothing, and the bucket refills.
+func TestJoinRate503(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Unix(1_000_000, 0)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	_, base := newTestHubWith(t, slowBeat, 0, map[string]string{"a": tokA}, func(l *limits) {
+		l.joinBurst, l.joinRate, l.now = 2, 1, clock
+	})
+	for _, id := range []string{"1", "2"} {
+		if _, code := fleettest.DialHub(t, base, tokA, id, fleettest.HubInstanceOptions{}); code != http.StatusOK {
+			t.Fatalf("instance %s within the burst: %d", id, code)
+		}
+	}
+	if _, code := fleettest.DialHub(t, base, tokA, "1", fleettest.HubInstanceOptions{}); code != http.StatusConflict {
+		t.Errorf("duplicate: %d, want 409", code)
+	}
+	if _, code := fleettest.DialHub(t, base, tokA, "3", fleettest.HubInstanceOptions{}); code != http.StatusServiceUnavailable {
+		t.Errorf("instance past the burst: %d, want 503", code)
+	}
+	mu.Lock()
+	now = now.Add(time.Second)
+	mu.Unlock()
+	if _, code := fleettest.DialHub(t, base, tokA, "3", fleettest.HubInstanceOptions{}); code != http.StatusOK {
+		t.Errorf("instance a second later: %d, want 200", code)
+	}
+	if _, code := fleettest.DialHub(t, base, tokA, "4", fleettest.HubInstanceOptions{}); code != http.StatusServiceUnavailable {
+		t.Errorf("second instance in that second: %d, want 503", code)
+	}
+}
+
+// TestSyncRename: a hub server renamed with the same token keeps its Hub
+// and its instances, under the new name.
+func TestSyncRename(t *testing.T) {
+	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA})
+	a, _ := fleettest.DialHub(t, base, tokA, "a", fleettest.HubInstanceOptions{})
+	before := r.hub(keyOf(tokA))
+	r.Sync(hubConfig(map[string]string{"renamed": tokA}))
+	if r.hub(keyOf(tokA)) != before {
+		t.Error("a rename made a new Hub")
+	}
+	if got := served(r); !slices.Equal(got, []string{"renamed"}) {
+		t.Errorf("served = %v, want [renamed]", got)
+	}
+	select {
+	case <-a.Done():
+		t.Fatal("a rename dropped the instance")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := r.Source(tokA).Endpoints(); len(got) != 1 {
+		t.Errorf("endpoints after a rename = %v", got)
 	}
 }
