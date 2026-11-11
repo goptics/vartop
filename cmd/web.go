@@ -108,10 +108,10 @@ func noteHubs(out io.Writer, router *hub.Router) {
 	}
 }
 
-// followHubs has router serve the hub servers of the config, read again
-// every collect.ConfigEvery until ctx ends: servers added, removed or
-// given a new token are followed as the collector follows them.
-func followHubs(ctx context.Context, router *hub.Router, every time.Duration) {
+// followHubs has s's router serve the hub servers of the config, read
+// again every collect.ConfigEvery until ctx ends: servers added, removed
+// or given a new token are followed as the collector follows them.
+func followHubs(ctx context.Context, s *hubSync, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -119,21 +119,39 @@ func followHubs(ctx context.Context, router *hub.Router, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			syncHubs(router)
+			s.sync()
 		}
 	}
 }
 
-// syncHubs syncs router with the config. A config that cannot be read
-// keeps the last good one; no config file is no hub server.
-func syncHubs(router *hub.Router) {
+// hubSync syncs a Router with the config.
+type hubSync struct {
+	router *hub.Router
+	log    *slog.Logger
+	bad    string // the load error last logged; "" while the config reads
+}
+
+// sync syncs the router with the config; no config file is no hub
+// server. A config that cannot be read keeps the last good one, so a
+// token changed by hand with a mistake leaves the old token valid: it
+// logs a warning once while that lasts, and once more when it reads.
+func (s *hubSync) sync() {
 	cfg, err := config.Load()
 	switch {
 	case errors.Is(err, config.ErrConfigNotFound):
-		router.Sync(&config.Config{})
-	case err == nil:
-		router.Sync(cfg)
+		cfg, err = &config.Config{}, nil
+	case err != nil:
+		if msg := err.Error(); msg != s.bad {
+			s.bad = msg
+			s.log.Warn("hub: cannot read the config; hub servers keep their last tokens until it reads again", "err", err)
+		}
+		return
 	}
+	if s.bad != "" {
+		s.bad = ""
+		s.log.Info("hub: the config reads again; hub servers follow it")
+	}
+	s.router.Sync(cfg)
 }
 
 // listenAddr is the address vartop web listens on: host, and port from 0
@@ -315,6 +333,10 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 
 	serveCtx, stopServing := context.WithCancel(ctx)
 	defer stopServing()
+	// The hub outlives ctx until the collector has stopped: a last poll
+	// must not find the instances gone.
+	hubCtx, stopHub := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopHub()
 
 	hubLn, cert, err := listenHub(hf, out)
 	if err != nil {
@@ -325,11 +347,12 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 	var hubErr error
 	if hubLn != nil {
 		router = hub.NewRouter(hub.Options{Log: log})
-		syncHubs(router) // before the first instance and the first pool
-		go followHubs(serveCtx, router, collect.ConfigEvery)
+		hs := &hubSync{router: router, log: log}
+		hs.sync() // before the first instance and the first pool
+		go followHubs(serveCtx, hs, collect.ConfigEvery)
 		go func() {
 			defer close(hubStopped)
-			if hubErr = hub.Serve(serveCtx, hubLn, router, cert, shutdownTimeout, log); hubErr != nil {
+			if hubErr = hub.Serve(hubCtx, hubLn, router, cert, shutdownTimeout, log); hubErr != nil {
 				stopServing()
 			}
 		}()
@@ -364,6 +387,7 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 	stopCollecting()
 	<-collected
 	stopServing()
+	stopHub()
 	<-hubStopped
 	if collectErr != nil {
 		return fmt.Errorf("%w; start vartop web again", collectErr)
