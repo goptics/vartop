@@ -144,6 +144,9 @@ func (r *Router) authed(serve func(*Hub, http.ResponseWriter, *http.Request)) ht
 	return func(w http.ResponseWriter, req *http.Request) {
 		h := r.auth(req)
 		if h == nil {
+			// Close: the server then drops the connection at once rather
+			// than read an unread body first.
+			w.Header().Set("Connection", "close")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="vartop hub"`)
 			http.Error(w, "missing or wrong token", http.StatusUnauthorized)
 			return

@@ -922,6 +922,19 @@ func TestPreAuthReadDeadline(t *testing.T) {
 			}
 		})
 	}
+	// Without a token the 401 comes at once, not after the unread body.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	start := time.Now()
+	io.WriteString(conn, "POST /hub/beat HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n")
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	status, _ := bufio.NewReader(conn).ReadString('\n')
+	if d := time.Since(start); !strings.HasPrefix(status, "HTTP/1.1 401") || d > timeout/2 {
+		t.Errorf("tokenless stalled POST: %q after %v, want a 401 at once", status, d)
+	}
 	t.Run("stream", func(t *testing.T) {
 		in, code := fleettest.DialHub(t, base, tokA, "long", fleettest.HubInstanceOptions{})
 		if code != http.StatusOK {
