@@ -300,12 +300,11 @@ A hub server has `"hub": true` and a `token` of at least 16 characters. Two hub 
 }
 ```
 
-`vartop server add` asks for the token. If you leave it empty, it makes a random token and prints it.
+`vartop server add` asks for the token. If you leave it empty, it makes a random token and prints it. If you type a token, it does not print it.
 
 Start vartop web with a hub listener. The hub listener can bind any address, but the dashboard stays on loopback.
 
 ```bash
-vartop web --hub-listen :7071
 vartop web --hub-listen :7071 --hub-tls-cert hub.crt --hub-tls-key hub.key
 ```
 
@@ -314,20 +313,36 @@ vartop web prints the hub address when it starts. If a hub server is configured 
 In your app, connect each VarMQ instance to the hub with the server's token:
 
 ```go
-go varmq.ConnectHub(ctx, hubURL, token)
+go func() {
+	err := varmq.ConnectHub(ctx, "https://vartop.internal:7071", token,
+		varmq.WithHubErrHandler(func(err error) { log.Printf("hub: %v", err) }),
+	)
+	log.Printf("hub connection stopped: %v", err) // a bad config returns at once
+}()
 ```
+
+`WithHubErrHandler` receives the connection errors, such as a rejected token. VarMQ refuses plain `http://` to a host that is not loopback, because the token would travel in clear text. To allow it on a trusted network, add `varmq.WithHubInsecure()`.
 
 Each instance keeps one stream open to vartop. vartop sends its usual API requests down the stream, and the instance posts the replies back. The pages, actions and history work as for other servers.
 
-Each instance is one unit, and vartop never treats it as a load balancer. An action reaches the right instance on the first try. An instance that disconnects leaves the fleet at once. An instance that stops its heartbeats leaves after three missed heartbeats (15 seconds by default).
+Each instance is one unit, and vartop never treats it as a load balancer. An action reaches the right instance on the first try. vartop lists an instance after its first heartbeat, which the instance sends at once. An instance that disconnects leaves the fleet at once. An instance that stops its heartbeats leaves after 3 to 4 heartbeats of 5 seconds each. You cannot change this period. The pages show each change at their next poll.
 
-vartop web follows changes to the config while it runs. A new hub server accepts instances within a few seconds. A removed server, or a changed token, disconnects its instances.
+vartop web follows changes to the config while it runs. A new hub server accepts instances within a few seconds. A removed server, or a changed token, disconnects its instances. If the config cannot be read, the hub servers keep their last tokens, and vartop web logs a warning.
 
 `vartop action` and `vartop concurrency` run in their own process, so they cannot reach hub instances. For a hub server, they fail and point to the dashboard.
 
+Limits:
+
+- Each hub server accepts at most 1000 instances. It accepts a burst of 200 new instance streams, and then 20 each second.
+- The hub listener holds at most 4 connections for each instance, plus 256. Each heartbeat and reply must arrive in full within 10 seconds.
+- The hub holds at most 256 MiB of replies at once, and each reply is at most 16 MiB.
+- Above a limit, the hub answers with status 503, and the instance tries again later.
+
 Security:
 
-- **The token gives control.** Anyone with the token of a server can read the data of its instances and stop their workers. Keep the token secret, and use a different token for each server.
+- **Whoever answers at the hub URL controls the instances.** That party can read the data of the instances and stop their workers. It is the vartop host, or, without TLS, any party on the network path.
+- **The token proves the instances, not vartop.** A holder of the token can connect false instances to its server, and can hold an instance ID that is not in use. It cannot read or control a real instance. Keep the token secret, and use a different token for each server.
+- **Each stream has its own session.** The hub gives each stream a secret session, and heartbeats and replies must carry it. So an instance cannot disconnect another instance, or answer for it.
 - **Use TLS or a trusted network.** Without TLS, the token travels in clear text. Use `--hub-tls-cert` and `--hub-tls-key`, or TLS at a proxy. vartop web warns when a hub listener on a non-loopback address has no TLS.
 - **The token stays out of URLs and logs.** vartop reads the token only from the `Authorization` header, and never writes it to its log.
 - **Run one vartop replica.** An instance connects to one vartop, so a second replica cannot reach it.
