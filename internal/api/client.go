@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -146,6 +148,13 @@ func (c *Client) send(hc *http.Client, req *http.Request) (*http.Response, error
 	resp, err := hc.Do(req)
 	if err == nil {
 		c.recordInstance(resp.Header.Get(InstanceHeader))
+	}
+	// A hub endpoint's URL is internal: its errors leave it out (the
+	// callers name the unit by ShortOrigin).
+	if ue := (*url.Error)(nil); errors.As(err, &ue) {
+		if _, hub := config.HubInstance(c.endpoint); hub {
+			err = ue.Err
+		}
 	}
 	return resp, err
 }

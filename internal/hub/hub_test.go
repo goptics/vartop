@@ -570,6 +570,11 @@ func TestNotConnected(t *testing.T) {
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("failing took %v: a disconnected instance must fail at once", d)
 	}
+	// Errors name the instance, never the internal hub URL.
+	_, _, err := api.NewClientVia(Endpoint("ghost"), "", r.Transport(tokA)).ListWorkersFresh(context.Background())
+	if err == nil || !errors.Is(err, ErrNotConnected) || !strings.Contains(err.Error(), `"ghost"`) || strings.Contains(err.Error(), "hub.invalid") || strings.Contains(err.Error(), "hub://") {
+		t.Errorf("unit error = %v, want ErrNotConnected naming the instance and no hub URL", err)
+	}
 	var nilRouter *Router
 	if _, err := get(context.Background(), nilRouter.Transport(tokA), "x", "/workers"); !errors.Is(err, ErrHubOff) {
 		t.Errorf("nil router: %v, want ErrHubOff", err)
@@ -678,7 +683,9 @@ func TestServeTLS(t *testing.T) {
 	cert, client := tmp.TLS.Certificates[0], tmp.Client() // trusts cert, attempts HTTP/2
 	tmp.Close()
 
+	const timeout = 300 * time.Millisecond
 	r := newRouter(slowBeat, 0, nil)
+	r.lim.reqTimeout = timeout // an HTTP/2 stream must outlive it too
 	r.Sync(hubConfig(map[string]string{"a": tokA}))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -704,6 +711,11 @@ func TestServeTLS(t *testing.T) {
 	inst, code := fleettest.DialHub(t, base, tokA, "tls", fleettest.HubInstanceOptions{Handler: v.Config.Handler, Client: client})
 	if code != http.StatusOK {
 		t.Fatalf("dial over TLS: %d", code)
+	}
+	select {
+	case <-inst.Done():
+		t.Fatal("the request timeout cut an HTTP/2 stream")
+	case <-time.After(4 * timeout):
 	}
 	if list, err := api.NewClientVia(Endpoint("tls"), "", r.Transport(tokA)).ListWorkersCtx(context.Background()); err != nil || len(list) != 1 {
 		t.Errorf("round trip over TLS: %v, %v", list, err)
