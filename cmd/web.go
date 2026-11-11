@@ -41,11 +41,15 @@ var (
 // hubFlags are vartop web's hub listener flags: listen "" is no hub.
 type hubFlags struct {
 	listen, cert, key string
+	perIP             int // connections per source IP; 0: no limit
 }
 
-// check refuses a TLS flag without its pair or without --hub-listen.
+// check refuses a TLS flag without its pair or without --hub-listen, and a
+// negative per-IP limit.
 func (f hubFlags) check() error {
 	switch {
+	case f.perIP < 0:
+		return errors.New("--hub-max-conns-per-ip must be 0 (no limit) or more")
 	case (f.cert == "") != (f.key == ""):
 		return errors.New("--hub-tls-cert and --hub-tls-key go together")
 	case f.cert != "" && f.listen == "":
@@ -346,7 +350,7 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 	hubStopped := make(chan struct{})
 	var hubErr error
 	if hubLn != nil {
-		router = hub.NewRouter(hub.Options{Log: log})
+		router = hub.NewRouter(hub.Options{MaxConnsPerIP: hf.perIP, Log: log})
 		hs := &hubSync{router: router, log: log}
 		hs.sync() // before the first instance and the first pool
 		go followHubs(serveCtx, hs, collect.ConfigEvery)
@@ -480,5 +484,6 @@ func init() {
 	webCmd.Flags().StringVar(&webHub.listen, "hub-listen", "", "Address the hub listens on for VarMQ instances of hub servers, e.g. :7071 (default: no hub)")
 	webCmd.Flags().StringVar(&webHub.cert, "hub-tls-cert", "", "TLS certificate file of the hub listener")
 	webCmd.Flags().StringVar(&webHub.key, "hub-tls-key", "", "TLS key file of the hub listener")
+	webCmd.Flags().IntVar(&webHub.perIP, "hub-max-conns-per-ip", hub.DefaultMaxConnsPerIP, "Open hub connections allowed from one source IP (0: no limit, e.g. behind one proxy or NAT address)")
 	rootCmd.AddCommand(webCmd)
 }

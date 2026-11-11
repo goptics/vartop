@@ -950,6 +950,7 @@ func TestHubFlags(t *testing.T) {
 		{hubFlags{listen: ":7071", cert: "c"}, "go together"},
 		{hubFlags{listen: ":7071", key: "k"}, "go together"},
 		{hubFlags{cert: "c", key: "k"}, "need --hub-listen"},
+		{hubFlags{listen: ":7071", perIP: -1}, "0 (no limit) or more"},
 	} {
 		err := c.f.check()
 		if (c.want == "") != (err == nil) || err != nil && !strings.Contains(err.Error(), c.want) {
@@ -960,6 +961,9 @@ func TestHubFlags(t *testing.T) {
 		if f := webCmd.Flags().Lookup(name); f == nil || f.DefValue != "" {
 			t.Errorf("--%s = %+v, want a flag defaulting to empty", name, f)
 		}
+	}
+	if f := webCmd.Flags().Lookup("hub-max-conns-per-ip"); f == nil || f.DefValue != "64" {
+		t.Errorf("--hub-max-conns-per-ip = %+v, want a flag defaulting to 64", f)
 	}
 	if _, _, err := listenHub(hubFlags{listen: "127.0.0.1:0", cert: "/nonexistent/c", key: "/nonexistent/k"}, io.Discard); err == nil || !strings.Contains(err.Error(), "TLS") {
 		t.Errorf("listenHub with a missing cert = %v, want a TLS error", err)

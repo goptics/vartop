@@ -63,8 +63,13 @@ const (
 	// requestTimeout bounds reading a hub request, body included; an
 	// authenticated stream clears it.
 	requestTimeout = 10 * time.Second
-	// replyBudget bounds the reply bytes all hub servers buffer at once.
+	// replyBudget bounds the reply bytes one hub server buffers at once,
+	// so a token holder fills its own server's budget only.
+	// ponytail: 256 MiB per hub server; raise it here.
 	replyBudget = 256 << 20
+	// replyStep is what a reply of unknown length (chunked) reserves of
+	// the budget at a time, as its bytes arrive.
+	replyStep = 64 << 10
 	// joinBurst and joinRate bound new streams per hub server: a token
 	// bucket of joinBurst, refilled at joinRate a second. A fleet that
 	// redials at once gets in at that pace; the rest get 503 and retry.
@@ -252,29 +257,17 @@ func (c *conn) unref(w *waiter) {
 	}
 }
 
-// limits are the hub-wide bounds a Router shares with its Hubs.
+// limits are the bounds a Router gives each of its Hubs.
 type limits struct {
 	reqTimeout          time.Duration
 	joinBurst, joinRate float64
 	now                 func() time.Time
-	replyMax            int64
-	replyUsed           atomic.Int64
+	replyMax            int64 // per Hub
 }
 
 func defaultLimits() *limits {
 	return &limits{reqTimeout: requestTimeout, joinBurst: joinBurst, joinRate: joinRate, now: time.Now, replyMax: replyBudget}
 }
-
-// take reserves n bytes of the reply budget; false when they do not fit.
-func (l *limits) take(n int64) bool {
-	if l.replyUsed.Add(n) > l.replyMax {
-		l.replyUsed.Add(-n)
-		return false
-	}
-	return true
-}
-
-func (l *limits) give(n int64) { l.replyUsed.Add(-n) }
 
 // Hub is one hub server's connected instances. Instance IDs are scoped to
 // the Hub: two servers may each hold the same ID.
@@ -284,7 +277,8 @@ type Hub struct {
 	maxInstances int
 	lim          *limits
 	log          *slog.Logger
-	epoch        time.Time // monotonic base of conn.beat
+	epoch        time.Time    // monotonic base of conn.beat
+	replyUsed    atomic.Int64 // reply bytes reserved, of lim.replyMax
 
 	mu     sync.Mutex
 	conns  map[string]*conn
@@ -302,6 +296,18 @@ func newHub(name string, heartbeat time.Duration, maxInstances int, lim *limits,
 	h.name.Store(&name)
 	return h
 }
+
+// take reserves n bytes of the hub server's reply budget; false when they
+// do not fit.
+func (h *Hub) take(n int64) bool {
+	if h.replyUsed.Add(n) > h.lim.replyMax {
+		h.replyUsed.Add(-n)
+		return false
+	}
+	return true
+}
+
+func (h *Hub) give(n int64) { h.replyUsed.Add(-n) }
 
 // label is the hub server's config key, for logs.
 func (h *Hub) label() string { return *h.name.Load() }
@@ -417,6 +423,10 @@ func (h *Hub) stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "want instance (1 to 128 bytes of UTF-8, no control characters) and protocol=1", http.StatusBadRequest)
 		return
 	}
+	if r.ContentLength != 0 { // with a body, or chunked: one nobody reads
+		http.Error(w, "the stream request has no body", http.StatusBadRequest)
+		return
+	}
 	c := newConn(id)
 	switch err := h.add(c); {
 	case errors.Is(err, errDuplicate):
@@ -429,6 +439,7 @@ func (h *Hub) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.remove(c)
+	_ = r.Body.Close()
 
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{}) // authenticated: the stream may live on
@@ -483,7 +494,7 @@ func (h *Hub) write(w http.ResponseWriter, rc *http.ResponseController, b []byte
 // replyTo serves POST /hub/reply/{id}: hand the body to the caller of
 // request id, sent down this instance's stream of this session. The
 // caller's slot stays taken until the handler returns, and the body
-// counts against the hub-wide reply budget while it is read.
+// counts against the hub server's reply budget while it is read.
 func (h *Hub) replyTo(w http.ResponseWriter, r *http.Request) {
 	c := h.session(r)
 	var wt *waiter
@@ -510,20 +521,28 @@ func (h *Hub) replyTo(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusRequestEntityTooLarge, "reply too large", tooLarge)
 		return
 	}
-	size := r.ContentLength
-	if size < 0 {
-		size = MaxReply // chunked: the most it may be
-	}
-	if !h.lim.take(size) {
+	full := func() {
 		fail(http.StatusServiceUnavailable, "hub reply memory is full; retry later", fmt.Errorf("hub: reply of instance %q refused: the hub's reply memory is full", c.id))
+	}
+	// A known length is reserved up front; chunked, step by step.
+	held := max(r.ContentLength, 0)
+	if !h.take(held) {
+		full()
 		return
 	}
-	defer h.lim.give(size)
-	body, err := readReply(w, r, c, wt)
+	var body io.Reader = r.Body
+	chunked := &budgeted{h: h, r: r.Body}
+	if r.ContentLength < 0 {
+		body = chunked
+	}
+	defer func() { h.give(held + chunked.held) }()
+	read, err := readReply(w, r, body, c, wt)
 	switch mbe := (*http.MaxBytesError)(nil); {
 	case err == nil:
-		wt.ch <- reply{status: status, contentType: r.Header.Get("Content-Type"), body: body}
+		wt.ch <- reply{status: status, contentType: r.Header.Get("Content-Type"), body: read}
 		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, errBudget):
+		full()
 	case errors.As(err, &mbe):
 		fail(http.StatusRequestEntityTooLarge, "reply too large", tooLarge)
 	case isClosed(c.done):
@@ -544,9 +563,36 @@ func isClosed(ch <-chan struct{}) bool {
 	}
 }
 
-// readReply reads r's body, at most MaxReply bytes. It aborts the read
-// when the caller stops waiting or the stream drops: nobody would read it.
-func readReply(w http.ResponseWriter, r *http.Request, c *conn, wt *waiter) ([]byte, error) {
+var errBudget = errors.New("hub reply memory is full")
+
+// budgeted reads r, a body of unknown length, at most held bytes, held of
+// its Hub's reply budget; when they are read it takes replyStep more, or
+// fails with errBudget.
+type budgeted struct {
+	h          *Hub
+	r          io.Reader
+	read, held int64
+}
+
+func (b *budgeted) Read(p []byte) (int, error) {
+	if b.read == b.held {
+		if len(p) == 0 {
+			return 0, nil
+		}
+		if !b.h.take(replyStep) {
+			return 0, errBudget
+		}
+		b.held += replyStep
+	}
+	n, err := b.r.Read(p[:min(int64(len(p)), b.held-b.read)])
+	b.read += int64(n)
+	return n, err
+}
+
+// readReply reads r's body through body, at most MaxReply bytes. It aborts
+// the read when the caller stops waiting or the stream drops: nobody would
+// read it.
+func readReply(w http.ResponseWriter, r *http.Request, body io.Reader, c *conn, wt *waiter) ([]byte, error) {
 	rc := http.NewResponseController(w)
 	stop, watched := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -567,7 +613,7 @@ func readReply(w http.ResponseWriter, r *http.Request, c *conn, wt *waiter) ([]b
 	if r.ContentLength > 0 {
 		buf.Grow(int(r.ContentLength) + bytes.MinRead)
 	}
-	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, MaxReply))
+	_, err := buf.ReadFrom(http.MaxBytesReader(w, io.NopCloser(body), MaxReply))
 	return buf.Bytes(), err
 }
 

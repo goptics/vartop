@@ -3,6 +3,7 @@ package hub
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -706,6 +708,15 @@ func TestServeTLS(t *testing.T) {
 		t.Errorf("stream over TLS = %s %d, want HTTP/2 200", resp.Proto, resp.StatusCode)
 	}
 	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodGet, streamURL(base, "body", "1"), io.MultiReader(strings.NewReader("x")))
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	if resp, err = client.Do(req); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.ProtoMajor != 2 || resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("stream with a body over TLS = %s %d, want HTTP/2 400", resp.Proto, resp.StatusCode)
+	}
 
 	_, v := fleettest.NewVarmq(t, "x", map[string]*fleettest.Worker{"w": {Status: "Running"}})
 	inst, code := fleettest.DialHub(t, base, tokA, "tls", fleettest.HubInstanceOptions{Handler: v.Config.Handler, Client: client})
@@ -967,7 +978,9 @@ func TestCapListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln := &capListener{Listener: inner, max: 2}
+	var max atomic.Int64
+	max.Store(2)
+	ln := &capListener{Listener: inner, max: &max}
 	defer ln.Close()
 	accepted := make(chan net.Conn, 4)
 	go func() {
@@ -1011,7 +1024,7 @@ func TestCapListener(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a freed slot was not reused")
 	}
-	if n := ln.n.Load(); n != 2 {
+	if n := ln.open(); n != 2 {
 		t.Errorf("open count = %d, want 2", n)
 	}
 	// Serve caps its listener: an instance at the instance limit still
@@ -1088,7 +1101,7 @@ func TestStalledReplyAborted(t *testing.T) {
 		t.Fatal("reply body still read 5s after its caller left")
 	}
 	fleettest.WaitUntil(t, 5*time.Second, "the slot freed", func() bool { return len(c.slots) == 0 })
-	if used := r.lim.replyUsed.Load(); used != 0 {
+	if used := r.hub(keyOf(tokA)).replyUsed.Load(); used != 0 {
 		t.Errorf("reply budget in use after the handler returned = %d, want 0", used)
 	}
 }
@@ -1107,7 +1120,7 @@ func TestReplyReadTimeout(t *testing.T) {
 	}
 }
 
-// TestReplyBudget503: reply bytes buffered at once across the hub are
+// TestReplyBudget503: reply bytes a hub server buffers at once are
 // bounded; a reply past the budget gets 503 and its caller an error, and
 // the budget comes back when a reply is done.
 func TestReplyBudget503(t *testing.T) {
@@ -1137,7 +1150,7 @@ func TestReplyBudget503(t *testing.T) {
 	}
 	close(g.release)
 	_ = wait(t, res1) // short body: an error, the budget freed
-	fleettest.WaitUntil(t, 5*time.Second, "the budget freed", func() bool { return r.lim.replyUsed.Load() == 0 })
+	fleettest.WaitUntil(t, 5*time.Second, "the budget freed", func() bool { return r.hub(keyOf(tokA)).replyUsed.Load() == 0 })
 	f3, res3 := held(t, context.Background(), rt, a)
 	if code, _ := a.Reply(f3.ID, 200, nil, make([]byte, 300)); code != http.StatusNoContent {
 		t.Errorf("reply after the budget came back: %d, want 204", code)
@@ -1198,5 +1211,235 @@ func TestSyncRename(t *testing.T) {
 	}
 	if got := r.Source(tokA).Endpoints(); len(got) != 1 {
 		t.Errorf("endpoints after a rename = %v", got)
+	}
+}
+
+// fromListener makes each connection inner accepts come from the next
+// address of from (a "host:port").
+type fromListener struct {
+	net.Listener
+	from chan string
+}
+
+type fromConn struct {
+	net.Conn
+	addr net.Addr
+}
+
+func (c fromConn) RemoteAddr() net.Addr { return c.addr }
+
+func (l fromListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	addr, err := net.ResolveTCPAddr("tcp", <-l.from)
+	if err != nil {
+		c.Close()
+		return nil, err
+	}
+	return fromConn{c, addr}, nil
+}
+
+// TestCapPerIP: the hub listener holds at most perIP connections of one
+// source IP; other IPs still get in, and a closed one frees its slot.
+func TestCapPerIP(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := make(chan string, 1)
+	var max atomic.Int64
+	max.Store(100)
+	ln := &capListener{Listener: fromListener{inner, from}, max: &max, perIP: 2}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 8)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+	// dial connects as ip; ok: it was accepted, else closed at once.
+	dial := func(ip string, ok bool) net.Conn {
+		t.Helper()
+		from <- ip + ":1"
+		c, err := net.Dial("tcp", inner.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		if !ok {
+			_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Errorf("connection of %s past its IP's limit: read %v, want it closed at once", ip, err)
+			}
+			return nil
+		}
+		select {
+		case sc := <-accepted:
+			return sc
+		case <-time.After(5 * time.Second):
+			t.Fatalf("connection of %s not accepted", ip)
+			return nil
+		}
+	}
+	a1 := dial("10.0.0.1", true)
+	a2 := dial("10.0.0.1", true)
+	dial("10.0.0.1", false)
+	dial("10.0.0.2", true)
+	a1.Close()
+	dial("10.0.0.1", true)
+	a2.Close()
+	ln.mu.Lock()
+	n, ips := ln.n, len(ln.byIP)
+	ln.mu.Unlock()
+	if n != 2 || ips != 2 {
+		t.Errorf("open = %d over %d IPs, want 2 over 2", n, ips)
+	}
+	if r := NewRouter(Options{MaxConnsPerIP: 5}); r.perIP != 5 {
+		t.Errorf("Options.MaxConnsPerIP 5: perIP = %d", r.perIP)
+	}
+}
+
+// TestUnauthedConnClosed: a connection that carried no request with a
+// valid token is closed at the request timeout, idle HTTP/2 and HTTP/1.1
+// keep-alive alike; one that carried a token lives on.
+func TestUnauthedConnClosed(t *testing.T) {
+	tmp := httptest.NewUnstartedServer(http.NotFoundHandler())
+	tmp.EnableHTTP2 = true
+	tmp.StartTLS()
+	cert := tmp.TLS.Certificates[0]
+	pool := tmp.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	tmp.Close()
+	const timeout = 300 * time.Millisecond
+	r := newRouter(slowBeat, 0, nil)
+	r.lim.reqTimeout = timeout
+	r.Sync(hubConfig(map[string]string{"a": tokA}))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- Serve(ctx, ln, r, &cert, time.Second, nil) }()
+	defer func() { cancel(); <-served }()
+
+	dial := func(proto, req string) *tls.Conn {
+		t.Helper()
+		c, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: pool, NextProtos: []string{proto}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		if _, err := io.WriteString(c, req); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	// closedWithin: c is closed by the server within d.
+	closedWithin := func(c net.Conn, d time.Duration) bool {
+		_ = c.SetReadDeadline(time.Now().Add(d))
+		_, err := io.Copy(io.Discard, c)
+		var ne net.Error
+		return !errors.As(err, &ne) || !ne.Timeout()
+	}
+	h2 := dial("h2", "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+	h1 := dial("http/1.1", "GET /nope HTTP/1.1\r\nHost: h\r\n\r\n")
+	authed := dial("http/1.1", "POST /hub/beat?instance=x HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer "+tokA+"\r\n\r\n")
+	if !closedWithin(h2, timeout+3*time.Second) {
+		t.Error("an idle tokenless HTTP/2 connection outlived the request timeout")
+	}
+	if !closedWithin(h1, timeout+3*time.Second) {
+		t.Error("a tokenless HTTP/1.1 keep-alive connection outlived the request timeout")
+	}
+	if closedWithin(authed, 4*timeout) {
+		t.Error("a connection that carried a token was closed at the request timeout")
+	}
+}
+
+// TestConnCapFollowsSync: the listener's cap is connsPerInstance per
+// instance of every hub server served, plus the headroom, and follows Sync.
+func TestConnCapFollowsSync(t *testing.T) {
+	r := newRouter(slowBeat, 3, nil)
+	for _, c := range []struct {
+		servers map[string]string
+		want    int64
+	}{
+		{nil, 10*3 + connHeadroom},
+		{map[string]string{"a": tokA, "b": tokB}, 10*3*2 + connHeadroom},
+		{map[string]string{"a": tokA}, 10*3 + connHeadroom},
+	} {
+		r.Sync(hubConfig(c.servers))
+		if got := r.connCap.Load(); got != c.want {
+			t.Errorf("cap with %d servers = %d, want %d", len(c.servers), got, c.want)
+		}
+	}
+}
+
+// TestReplyBudgetPerServer: chunked replies reserve the budget as their
+// bytes arrive, and each hub server has its own budget: 16 stalled
+// one-byte chunked replies of server a leave room for a's and b's replies.
+func TestReplyBudgetPerServer(t *testing.T) {
+	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA, "b": tokB})
+	rtA := r.Transport(tokA)
+	var gates []*gate
+	defer func() {
+		for _, g := range gates {
+			close(g.release)
+		}
+	}()
+	var a *fleettest.HubInstance
+	for i := range 2 {
+		var code int
+		if a, code = fleettest.DialHub(t, base, tokA, fmt.Sprintf("a%d", i), fleettest.HubInstanceOptions{}); code != http.StatusOK {
+			t.Fatal(code)
+		}
+		for range MaxInFlight {
+			f, _ := held(t, context.Background(), rtA, a)
+			g := &gate{n: 1, release: make(chan struct{}), started: make(chan struct{})}
+			gates = append(gates, g)
+			go a.ReplyAs(a.ID, f.ID, 200, nil, g, -1) // chunked
+			<-g.started
+		}
+	}
+	fleettest.WaitUntil(t, 5*time.Second, "a's replies read", func() bool { return r.hub(keyOf(tokA)).replyUsed.Load() == 16*replyStep })
+	a2, _ := fleettest.DialHub(t, base, tokA, "a2", fleettest.HubInstanceOptions{})
+	b, _ := fleettest.DialHub(t, base, tokB, "b", fleettest.HubInstanceOptions{})
+	for _, c := range []struct {
+		in *fleettest.HubInstance
+		rt http.RoundTripper
+	}{{a2, rtA}, {b, r.Transport(tokB)}} {
+		f, res := held(t, context.Background(), c.rt, c.in)
+		if code, _ := c.in.Reply(f.ID, 200, nil, []byte(`[]`)); code != http.StatusNoContent {
+			t.Errorf("reply of %s while a's chunked replies stall: %d, want 204", c.in.ID, code)
+		}
+		if err := wait(t, res); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// TestStreamBody400: a stream request with a body, sized or chunked, gets
+// 400: the hub never reads a stream's body.
+func TestStreamBody400(t *testing.T) {
+	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA})
+	for _, body := range []io.Reader{strings.NewReader("x"), io.MultiReader(strings.NewReader("x"))} {
+		req, _ := http.NewRequest(http.MethodGet, streamURL(base, "body", "1"), body)
+		req.Header.Set("Authorization", "Bearer "+tokA)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("stream with a body (length %d, 0: chunked): %d, want 400", req.ContentLength, resp.StatusCode)
+		}
+	}
+	if r.hub(keyOf(tokA)).get("body") != nil {
+		t.Error("a stream with a body was registered")
 	}
 }

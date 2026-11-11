@@ -29,7 +29,11 @@ type Options struct {
 	// MaxInstances caps connected instances per hub server:
 	// DefaultMaxInstances when 0.
 	MaxInstances int
-	Log          *slog.Logger // discarded when nil
+	// MaxConnsPerIP caps the hub listener's open connections from one
+	// source IP: 0 is no limit (one proxy or NAT address for every
+	// instance). vartop web's --hub-max-conns-per-ip sets it.
+	MaxConnsPerIP int
+	Log           *slog.Logger // discarded when nil
 }
 
 type tokenKey [sha256.Size]byte
@@ -41,6 +45,8 @@ func keyOf(token string) tokenKey { return sha256.Sum256([]byte(token)) }
 type Router struct {
 	heartbeat    time.Duration
 	maxInstances int
+	perIP        int          // Options.MaxConnsPerIP
+	connCap      atomic.Int64 // the listener's connection cap; Sync sets it
 	lim          *limits
 	log          *slog.Logger
 	mux          *http.ServeMux
@@ -56,7 +62,9 @@ func NewRouter(o Options) *Router {
 	if hb == 0 {
 		hb = DefaultHeartbeat
 	}
-	return newRouter(min(max(hb, MinHeartbeat), MaxHeartbeat), o.MaxInstances, o.Log)
+	r := newRouter(min(max(hb, MinHeartbeat), MaxHeartbeat), o.MaxInstances, o.Log)
+	r.perIP = max(o.MaxConnsPerIP, 0)
+	return r
 }
 
 // newRouter is NewRouter with heartbeat unclamped (tests).
@@ -68,6 +76,7 @@ func newRouter(heartbeat time.Duration, maxInstances int, log *slog.Logger) *Rou
 		log = slog.New(slog.DiscardHandler)
 	}
 	r := &Router{heartbeat: heartbeat, maxInstances: maxInstances, lim: defaultLimits(), log: log, hubs: make(map[tokenKey]*Hub)}
+	r.setCap()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /hub/stream", r.authed((*Hub).stream))
 	mux.HandleFunc("POST /hub/reply/{id}", r.authed((*Hub).replyTo))
@@ -109,6 +118,14 @@ func (r *Router) Sync(cfg *config.Config) {
 			r.log.Info("hub: serving server", "server", name)
 		}
 	}
+	r.setCap()
+}
+
+// setCap sizes the listener's connection cap to the hub servers served,
+// under r.mu or before r is shared: maxInstances each (see
+// connsPerInstance), at least one server's worth.
+func (r *Router) setCap() {
+	r.connCap.Store(int64(connsPerInstance*r.maxInstances*max(len(r.hubs), 1) + connHeadroom))
 }
 
 // hub is the Hub of token, nil when none.
@@ -150,6 +167,9 @@ func (r *Router) authed(serve func(*Hub, http.ResponseWriter, *http.Request)) ht
 			w.Header().Set("WWW-Authenticate", `Bearer realm="vartop hub"`)
 			http.Error(w, "missing or wrong token", http.StatusUnauthorized)
 			return
+		}
+		if m, ok := req.Context().Value(authedKey{}).(*atomic.Bool); ok {
+			m.Store(true) // the connection carried a token: it may idle on
 		}
 		serve(h, w, req)
 	}
@@ -254,9 +274,16 @@ func LoadCert(certFile, keyFile string) (*tls.Certificate, error) {
 	return &cert, nil
 }
 
+// authedKey keys a connection's context to its *atomic.Bool: set once a
+// request on it carried a valid token.
+type authedKey struct{}
+
 // NewServer is the hub listener's http.Server: bounded headers, a
 // ReadHeaderTimeout, and no server-wide read or write timeout, which would
-// cut the long-lived stream (handlers set their own deadlines).
+// cut the long-lived stream (handlers set their own deadlines). A
+// connection that carried no request with a valid token within the request
+// timeout is closed: a client without the token holds no connection, idle
+// HTTP/2 included, for longer.
 func NewServer(r *Router, cert *tls.Certificate, log *slog.Logger) *http.Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -264,9 +291,21 @@ func NewServer(r *Router, cert *tls.Certificate, log *slog.Logger) *http.Server 
 	srv := &http.Server{
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
+		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 		ErrorLog:          stdlog.New(serverLog{log}, "", 0),
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if tc, ok := c.(*tls.Conn); ok {
+				c = tc.NetConn() // close the socket, no TLS alert to wait on
+			}
+			authed := new(atomic.Bool)
+			time.AfterFunc(r.lim.reqTimeout, func() {
+				if !authed.Load() {
+					_ = c.Close()
+				}
+			})
+			return context.WithValue(ctx, authedKey{}, authed)
+		},
 	}
 	if cert != nil {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{*cert}}
@@ -286,19 +325,31 @@ func (l serverLog) Write(p []byte) (int, error) {
 }
 
 // connsPerInstance and connHeadroom size the hub listener's connection
-// cap: over HTTP/1.1 an instance holds its stream and pooled connections
-// for beats and replies; the headroom serves new streams and scanners.
+// cap, shared by every hub server: over HTTP/1.1 an instance holds its
+// stream, a connection per reply in flight (MaxInFlight) and one for
+// beats; the headroom serves new streams and scanners.
+// ponytail: 10 per instance and 256 spare; raise connsPerInstance if
+// instances keep more connections open (VarMQ keeps up to 10 idle).
 const (
-	connsPerInstance = 4
+	connsPerInstance = 10
 	connHeadroom     = 256
+	// DefaultMaxConnsPerIP is --hub-max-conns-per-ip's default.
+	// ponytail: 64 per source IP; raise it, or 0 for none, when many
+	// instances share one address (a proxy, a NAT).
+	DefaultMaxConnsPerIP = 64
 )
 
-// capListener accepts at most max connections at once. A connection past
-// it is closed at once, so a flood of idle connections cannot pile up.
+// capListener accepts at most *max connections at once, and at most perIP
+// (0: no limit) from one source IP. A connection past either is closed at
+// once, so a flood of idle connections cannot pile up.
 type capListener struct {
 	net.Listener
-	max int64
-	n   atomic.Int64
+	max   *atomic.Int64
+	perIP int
+
+	mu   sync.Mutex
+	n    int64
+	byIP map[string]int
 }
 
 func (l *capListener) Accept() (net.Conn, error) {
@@ -307,23 +358,59 @@ func (l *capListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l.n.Add(1) <= l.max {
-			return &capConn{Conn: c, l: l}, nil
+		ip := c.RemoteAddr().String()
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			ip = host
 		}
-		l.n.Add(-1)
+		if l.admit(ip) {
+			return &capConn{Conn: c, l: l, ip: ip}, nil
+		}
 		_ = c.Close()
 	}
+}
+
+// admit takes a slot for a connection from ip; false when none is free.
+func (l *capListener) admit(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.n >= l.max.Load() || l.perIP > 0 && l.byIP[ip] >= l.perIP {
+		return false
+	}
+	if l.byIP == nil {
+		l.byIP = make(map[string]int)
+	}
+	l.n++
+	l.byIP[ip]++
+	return true
+}
+
+// free gives back the slot of a connection from ip.
+func (l *capListener) free(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.n--
+	if l.byIP[ip]--; l.byIP[ip] == 0 {
+		delete(l.byIP, ip)
+	}
+}
+
+// open is the number of connections held.
+func (l *capListener) open() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.n
 }
 
 // capConn frees its slot of the capListener on its first Close.
 type capConn struct {
 	net.Conn
 	l    *capListener
+	ip   string
 	once sync.Once
 }
 
 func (c *capConn) Close() error {
-	c.once.Do(func() { c.l.n.Add(-1) })
+	c.once.Do(func() { c.l.free(c.ip) })
 	return c.Conn.Close()
 }
 
@@ -338,9 +425,9 @@ func (c *capConn) CloseWrite() error {
 
 // Serve serves r on ln (TLS with cert) until ctx ends, then drops every
 // instance and shuts down within timeout. It caps ln's open connections
-// (see connsPerInstance).
+// (see connsPerInstance) and those of one source IP (Options.MaxConnsPerIP).
 func Serve(ctx context.Context, ln net.Listener, r *Router, cert *tls.Certificate, timeout time.Duration, log *slog.Logger) error {
-	ln = &capListener{Listener: ln, max: int64(connsPerInstance*r.maxInstances + connHeadroom)}
+	ln = &capListener{Listener: ln, max: &r.connCap, perIP: r.perIP}
 	srv := NewServer(r, cert, log)
 	errc := make(chan error, 1)
 	go func() {
