@@ -425,6 +425,13 @@ type LabelNumber struct {
 // Seen is over freeAfter and a minute old.
 const freeAfter = 24 * time.Hour
 
+// maxNumbers caps the numbers a tracker keeps (and the store keeps of
+// it): past it the longest unshown are freed before freeAfter, so a
+// churn of instance IDs cannot grow the label state without bound.
+// ponytail: 10000, ten hub servers' worth of DefaultMaxInstances; raise
+// it here if one server ever shows more units at once.
+const maxNumbers = 10000
+
 // tracker remembers, across a collector's ticks, which instances answered
 // through which endpoint and when, and the numbers units were given. It
 // belongs to the poller goroutine, which lends it to the balancer pass while
@@ -610,13 +617,14 @@ func (t *tracker) label(pods []PodSnapshot, now time.Time) {
 	t.free(now)
 
 	number := make(map[string]int, len(pods)) // unit key → its number
+	lowestFree := t.lowestFree()
 	for i, p := range pods {
 		if _, ok := t.numbers[f[i]]; !ok {
 			if t.handsOn(p.Key) {
 				t.numbers[f[i]] = t.numbers[p.Key] // its first instance: the key's number moves to it
 				delete(t.numbers, p.Key)
 			} else {
-				t.numbers[f[i]] = LabelNumber{N: t.lowestFree(), Seen: seen}
+				t.numbers[f[i]] = LabelNumber{N: lowestFree(), Seen: seen}
 			}
 			t.changed = true
 		}
@@ -650,12 +658,26 @@ func (t *tracker) see(f string, at time.Time) {
 }
 
 // free forgets the numbers no unit has shown for over freeAfter (and a
-// minute: see freeAfter) at now, and that unit keys followed them.
+// minute: see freeAfter) at now, then the longest unshown past
+// maxNumbers, but never one shown in now's minute; and that unit keys
+// followed them.
 func (t *tracker) free(now time.Time) {
 	for f, n := range t.numbers {
 		if now.Sub(n.Seen) > freeAfter+time.Minute {
 			delete(t.numbers, f)
 			t.changed = true
+		}
+	}
+	if over := len(t.numbers) - maxNumbers; over > 0 {
+		shown := now.Truncate(time.Minute)
+		old := slices.SortedFunc(maps.Keys(t.numbers), func(a, b string) int {
+			return cmp.Or(t.numbers[a].Seen.Compare(t.numbers[b].Seen), strings.Compare(a, b))
+		})
+		for _, f := range old[:over] {
+			if t.numbers[f].Seen.Before(shown) {
+				delete(t.numbers, f)
+				t.changed = true
+			}
 		}
 	}
 	for key, f := range t.followed {
@@ -666,15 +688,20 @@ func (t *tracker) free(now time.Time) {
 	}
 }
 
-// lowestFree is the lowest number no unit holds.
-func (t *tracker) lowestFree() int {
+// lowestFree returns a func giving the lowest number no unit holds, and
+// holding it: the numbers held now are gathered once, so one label call
+// is linear however many numbers are kept.
+func (t *tracker) lowestFree() func() int {
 	held := make(map[int]bool, len(t.numbers))
 	for _, n := range t.numbers {
 		held[n.N] = true
 	}
 	n := 1
-	for held[n] {
-		n++
+	return func() int {
+		for held[n] {
+			n++
+		}
+		held[n] = true
+		return n
 	}
-	return n
 }
