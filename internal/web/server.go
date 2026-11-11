@@ -98,11 +98,12 @@ func (h *handler) clientsFor(latest *fleet.Snapshot, srv *config.Server) []*api.
 }
 
 func clientsFor(hubs *hub.Router, latest *fleet.Snapshot, srv *config.Server) []*api.Client {
-	var rt http.RoundTripper
 	if srv.Hub {
-		rt = hubs.Transport(srv.Token)
+		// The hub token picks the Hub; it is no API token, so the
+		// clients carry none.
+		return fleet.ClientsFor(latest, "", hubs.Transport(srv.Token))
 	}
-	return fleet.ClientsFor(latest, srv.Token, rt)
+	return fleet.ClientsFor(latest, srv.Token, nil)
 }
 
 // handler serves the pages of every configured server from the store.
