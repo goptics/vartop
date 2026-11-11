@@ -48,7 +48,11 @@ func PromptOnboarding() (*Config, error) {
 	}
 
 	path, _ := Path()
-	fmt.Printf("\n✓ Configuration saved to %s\n\n", path)
+	fmt.Printf("\n✓ Configuration saved to %s\n", path)
+	if server.Hub {
+		fmt.Printf("Start vartop web with --hub-listen, and give the VarMQ instances this token:\n  %s\n", server.Token)
+	}
+	fmt.Println()
 	return cfg, nil
 }
 
@@ -83,6 +87,7 @@ func PromptServer() (*Server, error) {
 				Options(
 					huh.NewOption("Static endpoints", "endpoints"),
 					huh.NewOption("DNS (all addresses of a hostname)", "dns"),
+					huh.NewOption("Hub (instances connect to vartop web)", "hub"),
 				).
 				Value(&serverType),
 		),
@@ -127,7 +132,20 @@ func PromptServer() (*Server, error) {
 				Title("Auth Token (Optional)").
 				Description("Bearer token if your server requires authentication").
 				Value(&token),
-		),
+		).WithHideFunc(func() bool { return serverType == "hub" }),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Hub Token").
+				Description(fmt.Sprintf("The token VarMQ instances connect with (at least %d characters); leave empty to generate one", MinHubToken)).
+				Value(&token).
+				EchoMode(huh.EchoModePassword).
+				Validate(func(s string) error {
+					if s == "" {
+						return nil
+					}
+					return ValidHubToken(s)
+				}),
+		).WithHideFunc(func() bool { return serverType != "hub" }),
 	)
 
 	if err := form.Run(); err != nil {
@@ -146,6 +164,11 @@ func PromptServer() (*Server, error) {
 	case "dns":
 		port, _ := strconv.Atoi(dnsPort) // validated by the form
 		server.DNS = &DNSRef{Host: dnsHost, Port: port}
+	case "hub":
+		server.Hub = true
+		if server.Token == "" {
+			server.Token = NewHubToken()
+		}
 	}
 
 	if err := server.Validate(); err != nil {

@@ -51,6 +51,35 @@ func TestValidate(t *testing.T) {
 			server:  &Server{Name: "bad"},
 			wantErr: true,
 		},
+		{
+			name:   "hub",
+			server: &Server{Name: "h", Hub: true, Token: "0123456789abcdef"},
+		},
+		{
+			name:    "hub without token",
+			server:  &Server{Name: "h", Hub: true},
+			wantErr: true,
+		},
+		{
+			name:    "hub token of 15 characters",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789abcde"},
+			wantErr: true,
+		},
+		{
+			name:    "hub token with a space",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789 abcdef"},
+			wantErr: true,
+		},
+		{
+			name:    "hub and endpoints",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789abcdef", Endpoints: []string{"http://a:1/varmq"}},
+			wantErr: true,
+		},
+		{
+			name:    "hub and dns",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789abcdef", DNS: &DNSRef{Host: "varmq", Port: 8080}},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -410,5 +439,46 @@ func TestLoadRejectsKubernetes(t *testing.T) {
 	write(`{"servers":{"s":{"name":"s","endpoints":["http://a:1/varmq"],"kubernetes":null}}}`)
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load() with null kubernetes: %v", err)
+	}
+}
+
+// TestHubTokensDistinct: two hub servers may not share a token (it picks
+// the server an instance joins); Load refuses such a config.
+func TestHubTokensDistinct(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const tok = "0123456789abcdef"
+	cfg := &Config{Servers: map[string]*Server{
+		"a": {Name: "a", Hub: true, Token: tok},
+		"b": {Name: "b", Hub: true, Token: tok},
+		"c": {Name: "c", Endpoints: []string{"http://c/varmq"}, Token: tok}, // a pull server's token is no hub token
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "distinct tokens") {
+		t.Fatalf("Validate() = %v, want a distinct-tokens error", err)
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "distinct tokens") {
+		t.Fatalf("Load() = %v, want a distinct-tokens error", err)
+	}
+	cfg.Servers["b"].Token = tok + "x"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with distinct tokens: %v", err)
+	}
+}
+
+func TestNewHubToken(t *testing.T) {
+	a, b := NewHubToken(), NewHubToken()
+	if a == b || ValidHubToken(a) != nil || len(a) != 43 {
+		t.Errorf("NewHubToken = %q, %q: want two distinct valid 43-character tokens", a, b)
+	}
+	for kind, s := range map[string]*Server{
+		"hub":       {Hub: true},
+		"dns":       {DNS: &DNSRef{}},
+		"endpoints": {Endpoints: []string{"x"}},
+	} {
+		if got := s.Kind(); got != kind {
+			t.Errorf("Kind = %q, want %q", got, kind)
+		}
 	}
 }

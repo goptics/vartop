@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,8 +41,11 @@ type Server struct {
 	Name      string   `json:"name"`
 	Endpoints []string `json:"endpoints,omitempty"`
 	DNS       *DNSRef  `json:"dns,omitempty"`
-	Token     string   `json:"token,omitempty"`
-	Interval  int      `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
+	// Hub: the instances dial vartop web's hub listener (--hub-listen)
+	// with Token, required then, instead of being dialed.
+	Hub      bool   `json:"hub,omitempty"`
+	Token    string `json:"token,omitempty"`
+	Interval int    `json:"interval,omitempty"` // Polling interval in seconds (0 for default)
 	// History is how far back the server's longer charts reach, in whole
 	// days: "7d". Empty is DefaultHistory.
 	History string `json:"history,omitempty"`
@@ -88,23 +93,67 @@ func (s *Server) HistorySpan() time.Duration {
 	return d
 }
 
-// Validate checks that exactly one of Endpoints or DNS is
+// MinHubToken is the shortest hub token, in characters.
+const MinHubToken = 16
+
+// ValidHubToken checks a hub server's token: at least MinHubToken
+// printable ASCII characters, no spaces (it travels in a header).
+func ValidHubToken(token string) error {
+	if len(token) < MinHubToken {
+		return fmt.Errorf("hub token must be at least %d characters", MinHubToken)
+	}
+	for _, c := range []byte(token) {
+		if c < 0x21 || c > 0x7e {
+			return errors.New("hub token must be printable ASCII without spaces")
+		}
+	}
+	return nil
+}
+
+// NewHubToken is a random hub token: 32 bytes, base64url.
+func NewHubToken() string {
+	return base64.RawURLEncoding.EncodeToString(randBytes(32))
+}
+
+func randBytes(n int) []byte {
+	b := make([]byte, n)
+	_, _ = rand.Read(b) // never fails (crypto/rand)
+	return b
+}
+
+// Kind is how the server's instances are found: "endpoints", "dns" or "hub".
+func (s *Server) Kind() string {
+	switch {
+	case s.Hub:
+		return "hub"
+	case s.DNS != nil:
+		return "dns"
+	}
+	return "endpoints"
+}
+
+// Validate checks that exactly one of Endpoints, DNS or Hub is
 // configured and that the chosen block has its required fields.
 func (s *Server) Validate() error {
 	hasEndpoints := len(s.Endpoints) > 0
 	hasDNS := s.DNS != nil
 
 	set := 0
-	for _, has := range []bool{hasEndpoints, hasDNS} {
+	for _, has := range []bool{hasEndpoints, hasDNS, s.Hub} {
 		if has {
 			set++
 		}
 	}
 	if set > 1 {
-		return fmt.Errorf("server %q: exactly one of endpoints or dns must be set, got %d", s.Name, set)
+		return fmt.Errorf("server %q: exactly one of endpoints, dns or hub must be set, got %d", s.Name, set)
 	}
 	if set == 0 {
-		return fmt.Errorf("server %q: exactly one of endpoints or dns must be set, got neither", s.Name)
+		return fmt.Errorf("server %q: exactly one of endpoints, dns or hub must be set, got none", s.Name)
+	}
+	if s.Hub {
+		if err := ValidHubToken(s.Token); err != nil {
+			return fmt.Errorf("server %q: %w", s.Name, err)
+		}
 	}
 
 	if s.History != "" {
@@ -128,6 +177,9 @@ func (s *Server) Validate() error {
 // DisplayEndpoint returns a human-readable representation of the endpoint(s).
 // For single endpoints, returns the full URL; for multi-pod, returns "N pods".
 func (s *Server) DisplayEndpoint() string {
+	if s.Hub {
+		return "(hub: instances connect to vartop web)"
+	}
 	if len(s.Endpoints) == 0 {
 		return "(no endpoints)"
 	}
@@ -200,16 +252,34 @@ func Load() (*Config, error) {
 		cfg.Servers = make(map[string]*Server)
 	}
 
-	for name, server := range cfg.Servers {
-		if server == nil {
-			return nil, fmt.Errorf("server %q: empty definition", name)
-		}
-		if err := server.Validate(); err != nil {
-			return nil, err
-		}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+// Validate checks every server, and that no two hub servers share a
+// token: the token picks the server an instance joins.
+func (cfg *Config) Validate() error {
+	hubs := make(map[string]string) // token → server
+	for _, name := range slices.Sorted(maps.Keys(cfg.Servers)) {
+		server := cfg.Servers[name]
+		if server == nil {
+			return fmt.Errorf("server %q: empty definition", name)
+		}
+		if err := server.Validate(); err != nil {
+			return err
+		}
+		if !server.Hub {
+			continue
+		}
+		if other, dup := hubs[server.Token]; dup {
+			return fmt.Errorf("servers %q and %q: hub servers need distinct tokens", other, name)
+		}
+		hubs[server.Token] = name
+	}
+	return nil
 }
 
 // Save writes the configuration to os.UserConfigDir()/vartop/config.json. It
