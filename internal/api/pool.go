@@ -1,6 +1,9 @@
 package api
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/goptics/vartop/internal/config"
@@ -13,12 +16,20 @@ type Pool struct {
 	mu      sync.Mutex
 	source  discovery.Source
 	token   string
+	rt      http.RoundTripper  // the clients' transport; nil: default
 	clients map[string]*Client // endpoint URL -> client
 }
+
+// ErrHubServer: a hub server's instances connect to vartop web, so only
+// that process reaches them.
+var ErrHubServer = errors.New("its instances connect to vartop web (--hub-listen) and only the dashboard reaches them")
 
 // PoolFor builds a Pool over the discovery source matching the server
 // configuration: DNS resolution for dns servers, a fixed list otherwise. Callers must Close the pool to stop DNS refresh.
 func PoolFor(server *config.Server) (*Pool, error) {
+	if server.Hub {
+		return nil, fmt.Errorf("server %q is a hub server: %w", server.Name, ErrHubServer)
+	}
 	if server.DNS != nil {
 		source, err := discovery.NewDNS(*server.DNS)
 		if err != nil {
@@ -31,9 +42,15 @@ func PoolFor(server *config.Server) (*Pool, error) {
 
 // NewPool returns a Pool backed by the given endpoint source.
 func NewPool(source discovery.Source, token string) *Pool {
+	return NewPoolVia(source, token, nil)
+}
+
+// NewPoolVia is NewPool whose clients send through rt (see NewClientVia).
+func NewPoolVia(source discovery.Source, token string, rt http.RoundTripper) *Pool {
 	return &Pool{
 		source:  source,
 		token:   token,
+		rt:      rt,
 		clients: make(map[string]*Client),
 	}
 }
@@ -56,7 +73,7 @@ func (p *Pool) Clients() []*Client {
 		next[ep] = struct{}{}
 		c := p.clients[ep]
 		if c == nil {
-			c = NewClient(ep, p.token)
+			c = NewClientVia(ep, p.token, p.rt)
 			p.clients[ep] = c
 		}
 		clients = append(clients, c)
