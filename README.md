@@ -336,7 +336,7 @@ Limits:
 - Each hub server accepts at most 1000 instances. It accepts a burst of 200 new instance streams, and then 20 each second.
 - The hub listener holds at most 4,256 connections, shared by all hub servers. Each heartbeat and reply must arrive in full within 10 seconds.
 - The hub holds at most 256 MiB of replies at once, and each reply is at most 16 MiB.
-- Above a limit, the hub answers with status 503, and the instance tries again later.
+- At the instance limit or the new-stream rate, the hub refuses the stream with status 503, and the instance tries again later.
 
 Security:
 
