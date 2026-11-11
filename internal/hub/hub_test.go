@@ -975,7 +975,8 @@ func TestCapListener(t *testing.T) {
 		t.Cleanup(func() { c.Close() })
 		return c
 	}
-	open := []net.Conn{dial(), dial()}
+	dial()
+	dial()
 	var held []net.Conn
 	for range 2 {
 		select {
@@ -992,7 +993,6 @@ func TestCapListener(t *testing.T) {
 	}
 	held[0].Close()
 	held[0].Close() // a second Close frees nothing more
-	_ = open
 	dial()
 	select {
 	case <-accepted:

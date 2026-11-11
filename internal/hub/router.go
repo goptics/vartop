@@ -327,6 +327,15 @@ func (c *capConn) Close() error {
 	return c.Conn.Close()
 }
 
+// CloseWrite passes on the TCP half-close http.Server sends before it
+// closes a connection.
+func (c *capConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // Serve serves r on ln (TLS with cert) until ctx ends, then drops every
 // instance and shuts down within timeout. It caps ln's open connections
 // (see connsPerInstance).
