@@ -605,3 +605,56 @@ func TestPollHubServer(t *testing.T) {
 		t.Errorf("after pod-2 left: %+v, want pod-1 alone", snap.Pods)
 	}
 }
+
+// peakServer serves h, counting the requests whose path starts with
+// prefix in flight at once, each held for hold; peak is the most seen.
+func peakServer(t *testing.T, h http.Handler, prefix string, hold time.Duration) (srv *httptest.Server, peak func() int32) {
+	var now, most atomic.Int32
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			n := now.Add(1)
+			defer now.Add(-1)
+			for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+			}
+			time.Sleep(hold)
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, most.Load
+}
+
+// TestPollDirectBoundsFetches: a unit's worker fetches run unitFetches at
+// a time, however many workers it lists.
+func TestPollDirectBoundsFetches(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range 5 * unitFetches {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	_, v := fleettest.NewVarmq(t, "a", workers)
+	srv, peak := peakServer(t, v.Config.Handler, "/workers/", 20*time.Millisecond)
+	pod, _ := pollDirect(context.Background(), fleettest.StaticPool(t, srv.URL).Clients()[0])
+	if pod.Err != "" || len(pod.Workers) != len(workers) {
+		t.Fatalf("pod: err %q, %d workers, want %d", pod.Err, len(pod.Workers), len(workers))
+	}
+	if p := peak(); p > unitFetches || p < 2 {
+		t.Errorf("worker fetches in flight at once: %d, want 2 to %d", p, unitFetches)
+	}
+}
+
+// TestPollDirectWorkerCap: a unit that lists over maxUnitWorkers workers
+// is errored, and none of them is fetched.
+func TestPollDirectWorkerCap(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range maxUnitWorkers + 1 {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	v, srv := fleettest.NewVarmq(t, "a", workers)
+	pod, answered := pollDirect(context.Background(), fleettest.StaticPool(t, srv.URL).Clients()[0])
+	if !strings.Contains(pod.Err, "too many workers") || len(pod.Workers) != 0 || !slices.Equal(answered, []string{"a"}) {
+		t.Errorf("pod: err %q, %d workers, answered %v; want too many workers, none, [a]", pod.Err, len(pod.Workers), answered)
+	}
+	if calls := v.Calls(); len(calls) != 1 {
+		t.Errorf("requests %d, want the list only", len(calls))
+	}
+}

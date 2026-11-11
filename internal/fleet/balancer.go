@@ -305,9 +305,14 @@ func (r *reacher) settled() bool {
 	return true
 }
 
-// listFresh is (*api.Client).ListWorkersFresh as a job's send.
+// listFresh is (*api.Client).ListWorkersFresh as a job's send. A list of
+// over maxUnitWorkers is an error: each listed worker costs a fetch.
 func listFresh(ctx context.Context, c *api.Client) ([]api.WorkerSummary, string, error) {
-	return c.ListWorkersFresh(ctx)
+	list, instance, err := c.ListWorkersFresh(ctx)
+	if err == nil && len(list) > maxUnitWorkers {
+		return nil, instance, fmt.Errorf("too many workers: %d listed, at most %d", len(list), maxUnitWorkers)
+	}
+	return list, instance, err
 }
 
 // isNotFound reports whether err is a 404 reply.

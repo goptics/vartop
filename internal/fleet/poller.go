@@ -179,20 +179,39 @@ func (c *Collector) tick() (ok bool) {
 	return c.sink(tick) == nil
 }
 
+// Bounds of the fan-out over one unit's workers.
+// ponytail: 2000 workers a unit and 8 fetches at once; raise them here.
+const (
+	// maxUnitWorkers caps the workers one unit may list: past it the unit
+	// is errored, as each listed worker costs a fetch.
+	maxUnitWorkers = 2000
+	// unitFetches caps one unit's worker fetches in flight, as a hub
+	// instance's requests in flight are (hub.MaxInFlight).
+	unitFetches = 8
+)
+
 // panicGroup is a WaitGroup that carries a panic of one of its goroutines
 // to Wait, which raises it again once they have all returned: a poll's
 // goroutines panic on the goroutine that waits for them, and so, through
 // any number of groups, on the poller goroutine, where tick recovers it.
 type panicGroup struct {
-	wg sync.WaitGroup
-	mu sync.Mutex
-	p  *TickPanic // the first panic of a goroutine
+	wg  sync.WaitGroup
+	sem chan struct{} // when set, Go waits for a free slot: its cap runs at once
+	mu  sync.Mutex
+	p   *TickPanic // the first panic of a goroutine
 }
 
-// Go runs f on a goroutine of its own.
+// Go runs f on a goroutine of its own, once g's semaphore, if any, has a
+// slot.
 func (g *panicGroup) Go(f func()) {
+	if g.sem != nil {
+		g.sem <- struct{}{}
+	}
 	g.wg.Go(func() {
 		defer g.catch()
+		if g.sem != nil {
+			defer func() { <-g.sem }()
+		}
 		f()
 	})
 }
@@ -327,19 +346,17 @@ func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Sna
 
 // pollDirect lists one endpoint's workers on a new connection, so that a
 // balancer picking per connection is seen sending it elsewhere, then fetches
-// every worker concurrently. The endpoint is a direct unit: its key and the
-// endpoint it was reached through are the same, and its instance is the one
-// that answered the list. A failed or timed-out list marks the unit errored.
+// its workers, unitFetches at a time. The endpoint is a direct unit: its key
+// and the endpoint it was reached through are the same, and its instance is
+// the one that answered the list. A failed or timed-out list, or one of
+// over maxUnitWorkers, marks the unit errored.
 // A worker that answers 404 was removed since the list and is skipped; any
 // other fetch error also marks the unit errored, naming the worker, since its
 // state is unknown, not absent. answered is the distinct instances that
 // replied to the list or with a sample, sorted.
-//
-// ponytail: no per-pod request limit; add a semaphore of ~4 if TIME_WAIT
-// build-up or tick latency shows up.
 func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered []string) {
 	endpoint := c.PrimaryEndpoint()
-	list, instance, err := c.ListWorkersFresh(ctx)
+	list, instance, err := listFresh(ctx, c)
 	pod = PodSnapshot{Key: endpoint, Via: endpoint, Instance: instance}
 	if instance != "" {
 		answered = append(answered, instance)
@@ -351,7 +368,7 @@ func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered [
 
 	samples := make([]*Sample, len(list))
 	errs := make([]error, len(list))
-	var g panicGroup
+	g := panicGroup{sem: make(chan struct{}, unitFetches)}
 	for i, w := range list {
 		g.Go(func() {
 			d, err := c.GetWorkerCtx(ctx, url.PathEscape(w.Name))

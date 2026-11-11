@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -236,5 +237,27 @@ func TestSourceOfPullServerUnchanged(t *testing.T) {
 	sum := sha256.Sum256(b)
 	if got, want := SourceOf(srv), hex.EncodeToString(sum[:8]); got != want {
 		t.Errorf("SourceOf = %s, want the pre-hub hash %s", got, want)
+	}
+}
+
+// TestActBoundsNames: Act sends to unitFetches names at a time, however
+// many it is given.
+func TestActBoundsNames(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	var names []string
+	for i := range 5 * unitFetches {
+		names = append(names, fmt.Sprintf("w%d", i))
+		workers[names[i]] = &fleettest.Worker{Status: "Running"}
+	}
+	_, v := fleettest.NewVarmq(t, "a", workers)
+	srv, peak := peakServer(t, v.Config.Handler, "/workers/", 20*time.Millisecond)
+	sc := ActScope{Direct: fleettest.StaticPool(t, srv.URL).Clients()}
+	for i, res := range Act(context.Background(), sc, nil, instanceNoun, names, ActionSender("pause")) {
+		if len(res) != 1 || res[0].Outcome != "ok" {
+			t.Errorf("%s: %+v", names[i], res)
+		}
+	}
+	if p := peak(); p > unitFetches || p < 2 {
+		t.Errorf("actions in flight at once: %d, want 2 to %d", p, unitFetches)
 	}
 }

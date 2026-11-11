@@ -102,9 +102,16 @@ func (r *Rater) Rate(s *Snapshot) {
 				continue
 			}
 			sm.CompletedRate, sm.FailedRate, sm.RateOK = rate(prev, sm, r.interval)
-			// ponytail: never pruned; entries for vanished pods are tiny and
-			// fall out of rate()'s 3x window anyway.
 			r.last[key] = sm
+		}
+	}
+	// Drop the bases rate() would refuse: over 3 intervals before s. A
+	// worker of s is never one (its base is new, or early: within half an
+	// interval), so only gone units and workers go, whose samples would
+	// otherwise be kept forever.
+	for key, sm := range r.last {
+		if s.At.Sub(sm.At) > 3*r.interval {
+			delete(r.last, key)
 		}
 	}
 }

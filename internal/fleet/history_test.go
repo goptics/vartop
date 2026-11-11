@@ -255,6 +255,36 @@ func TestAppendCarriesRateOverEarlyPoll(t *testing.T) {
 	}
 }
 
+// TestRaterPrunesGoneUnits: the rater forgets the samples of units and
+// workers gone for over 3 intervals, which no rate uses, and keeps those
+// still polled, early polls included: churning instances do not grow it.
+func TestRaterPrunesGoneUnits(t *testing.T) {
+	iv := 5 * time.Second
+	t0 := time.Unix(1000, 0)
+	snap := func(at time.Duration, keys ...string) *Snapshot {
+		s := &Snapshot{At: t0.Add(at)}
+		for _, k := range keys {
+			sm := &Sample{At: s.At}
+			s.Pods = append(s.Pods, PodSnapshot{Key: k, Workers: map[string]*Sample{"w": sm}})
+		}
+		return s
+	}
+	r := NewRater(iv)
+	r.Rate(snap(0, "stay", "gone"))
+	r.Rate(snap(iv, "stay"))
+	r.Rate(snap(iv+iv/10, "stay")) // early
+	r.Rate(snap(3*iv, "stay"))
+	if len(r.last) != 2 {
+		t.Errorf("rater keeps %d samples 3 intervals on, want 2: a gone unit is kept for 3 intervals", len(r.last))
+	}
+	for i := range 100 {
+		r.Rate(snap(time.Duration(4+i)*iv, "stay", fmt.Sprintf("churn-%d", i)))
+	}
+	if _, ok := r.last["stay\x00w"]; !ok || len(r.last) != 1+4 {
+		t.Errorf("rater keeps %d samples after 100 units came and went, want the polled one and the last 4 (kept: %v)", len(r.last), ok)
+	}
+}
+
 func TestHistoryConcurrentAppendAndRead(t *testing.T) {
 	const appends = 1000
 	iv := 5 * time.Second

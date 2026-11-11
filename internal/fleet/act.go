@@ -237,14 +237,18 @@ func Act(ctx context.Context, sc ActScope, units map[string]PodSnapshot, n Noun,
 	results := make([][]ActionResult, len(names))
 	var reached [][]ActionResult
 	var g panicGroup
-	for i, name := range names {
-		escaped := url.PathEscape(name)
-		g.Go(func() {
-			results[i] = fanOut(ctx, sc.Direct, units, n, func(ctx context.Context, c *api.Client) error {
-				return send.Direct(ctx, c, escaped)
+	g.Go(func() {
+		perName := panicGroup{sem: make(chan struct{}, unitFetches)} // names × units goroutines: a few names at once
+		for i, name := range names {
+			escaped := url.PathEscape(name)
+			perName.Go(func() {
+				results[i] = fanOut(ctx, sc.Direct, units, n, func(ctx context.Context, c *api.Client) error {
+					return send.Direct(ctx, c, escaped)
+				})
 			})
-		})
-	}
+		}
+		perName.Wait()
+	})
 	if len(sc.Balanced) > 0 {
 		g.Go(func() { reached = reachUnits(ctx, sc, units, n, names, send.Fresh) })
 	}
