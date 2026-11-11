@@ -77,7 +77,7 @@ var serverAddCmd = &cobra.Command{
 			}
 		}
 
-		server, err := config.PromptServer()
+		server, generated, err := config.PromptServer()
 		if err != nil {
 			return err
 		}
@@ -102,7 +102,7 @@ var serverAddCmd = &cobra.Command{
 
 		switch {
 		case server.Hub:
-			fmt.Printf("Added hub server '%s'. Start vartop web with --hub-listen, and give the VarMQ instances this token:\n  %s\n", server.Name, server.Token)
+			fmt.Printf("Added hub server '%s'. %s", server.Name, config.HubAdded(server, generated))
 		case server.DNS != nil:
 			fmt.Printf("Added dns server '%s' (%s:%d)\n", server.Name, server.DNS.Host, server.DNS.Port)
 		case len(server.Endpoints) > 1:

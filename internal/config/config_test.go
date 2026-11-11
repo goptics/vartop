@@ -471,7 +471,18 @@ func TestHubTokensDistinct(t *testing.T) {
 
 func TestNewHubToken(t *testing.T) {
 	a, b := NewHubToken(), NewHubToken()
-	if a == b || ValidHubToken(a) != nil || len(a) != 43 {
-		t.Errorf("NewHubToken = %q, %q: want two distinct valid 43-character tokens", a, b)
+	if a == b || ValidHubToken(a) != nil || len(a) != 26 {
+		t.Errorf("NewHubToken = %q, %q: want two distinct valid 26-character tokens", a, b)
+	}
+}
+
+// TestHubAdded: the token is printed only when vartop made it.
+func TestHubAdded(t *testing.T) {
+	srv := &Server{Name: "h", Hub: true, Token: "typed-token-0123456789"}
+	if got := HubAdded(srv, false); strings.Contains(got, srv.Token) || !strings.Contains(got, "--hub-listen") {
+		t.Errorf("HubAdded of a typed token = %q: want no token, and where instances connect", got)
+	}
+	if got := HubAdded(srv, true); !strings.Contains(got, srv.Token) {
+		t.Errorf("HubAdded of a generated token = %q: want the token", got)
 	}
 }

@@ -2,7 +2,6 @@ package config
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,16 +109,8 @@ func ValidHubToken(token string) error {
 	return nil
 }
 
-// NewHubToken is a random hub token: 32 bytes, base64url.
-func NewHubToken() string {
-	return base64.RawURLEncoding.EncodeToString(randBytes(32))
-}
-
-func randBytes(n int) []byte {
-	b := make([]byte, n)
-	_, _ = rand.Read(b) // never fails (crypto/rand)
-	return b
-}
+// NewHubToken is a random hub token (130 bits, base32).
+func NewHubToken() string { return rand.Text() }
 
 // Validate checks that exactly one of Endpoints, DNS or Hub is
 // configured and that the chosen block has its required fields.
