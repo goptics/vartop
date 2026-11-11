@@ -175,6 +175,8 @@ vartop web --no-open                   # print the URL, don't launch a browser
 | `--port` | Port to listen on; `0` picks any free port | `7070` |
 | `--no-open` | Don't open the browser | *(opens it)* |
 | `-s`, `--server` | Server to show first; the page can switch to any configured server | *(default server, else the first configured)* |
+| `--hub-listen` | Address the hub listens on for VarMQ instances of hub servers, see [Hub mode](#hub-mode) | *(no hub)* |
+| `--hub-tls-cert`, `--hub-tls-key` | TLS certificate and key files of the hub listener | *(plain HTTP)* |
 
 Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 
@@ -185,7 +187,7 @@ Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 | `vartop` | Print help |
 | `vartop web` | Serve the dashboard and collect every server while it runs |
 | `vartop server list` | List all servers (static servers with their health status) |
-| `vartop server add` | Register a new server via the interactive wizard (static or DNS) |
+| `vartop server add` | Register a new server via the interactive wizard (static, DNS or hub) |
 | `vartop server use <name>` | Set the default server |
 | `vartop server remove <name>` | Remove a server (`--all`: every server) |
 | `vartop server set <name> endpoint\|token\|interval\|history <value>` | Update a server property (`endpoint` accepts a comma-separated list, static servers only; `history` is whole days, `1d` to `30d`) |
@@ -193,7 +195,7 @@ Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 | `vartop concurrency <worker> <n>` | Set a worker's concurrency pool size |
 | `-s`, `--server <name>` | The server `web`, `action` and `concurrency` use (overrides the default) |
 
-`action` and `concurrency` run against **every endpoint** of the server (each static endpoint, or each address DNS discovery finds) concurrently and print one result line per endpoint; the command fails if any endpoint fails. Behind a load-balancer URL that is one instance, the one the balancer picks: see [Load balancers](#load-balancers). `concurrency` is per instance, so `concurrency orders 8` on 3 endpoints gives 24 workers in total. To target one endpoint, pass its URL:
+`action` and `concurrency` cannot reach the instances of a [hub server](#hub-mode): for one, they fail and point to the dashboard. Otherwise they run against **every endpoint** of the server (each static endpoint, or each address DNS discovery finds) concurrently and print one result line per endpoint; the command fails if any endpoint fails. Behind a load-balancer URL that is one instance, the one the balancer picks: see [Load balancers](#load-balancers). `concurrency` is per instance, so `concurrency orders 8` on 3 endpoints gives 24 workers in total. To target one endpoint, pass its URL:
 
 ```bash
 vartop action orders pause                                        # every endpoint
@@ -229,7 +231,7 @@ If `config.json` is a symlink, say into a dotfiles repository, vartop saves thro
 
 ### Schema
 
-Each server uses **exactly one** of `endpoints` (static list) or `dns` (live discovery). Setting both, or neither, is rejected when the config is loaded. A server with a `kubernetes` block (discovery removed) fails to load with *kubernetes discovery was removed; use endpoints or dns*: replace the block with `endpoints` or `dns`.
+Each server uses **exactly one** of `endpoints` (static list), `dns` (live discovery) or `hub` (the instances connect to vartop, see [Hub mode](#hub-mode)). Setting more than one, or none, is rejected when the config is loaded. A server with a `kubernetes` block (discovery removed) fails to load with *kubernetes discovery was removed; use endpoints or dns*: replace the block with `endpoints` or `dns`.
 
 ```json
 {
@@ -257,9 +259,10 @@ Each server uses **exactly one** of `endpoints` (static list) or `dns` (live dis
 | Field | Description | Default |
 | --- | --- | --- |
 | `default_server` | Server to use when no `-s` flag is given | *(none)* |
-| `servers.<name>.endpoints` | Static list of mux endpoint URLs (one for a single instance, several for more) | *(one of endpoints / dns)* |
-| `servers.<name>.dns` | DNS discovery block, see [DNS](#dns) | *(one of endpoints / dns)* |
-| `servers.<name>.token` | Bearer token for authentication (sent as `Authorization` header) | *(none)* |
+| `servers.<name>.endpoints` | Static list of mux endpoint URLs (one for a single instance, several for more) | *(one of endpoints / dns / hub)* |
+| `servers.<name>.dns` | DNS discovery block, see [DNS](#dns) | *(one of endpoints / dns / hub)* |
+| `servers.<name>.hub` | `true`: the instances connect to vartop web, see [Hub mode](#hub-mode) | *(one of endpoints / dns / hub)* |
+| `servers.<name>.token` | Bearer token for authentication (sent as `Authorization` header). For a hub server, the token the instances connect with: required, at least 16 characters, unique among hub servers | *(none)* |
 | `servers.<name>.interval` | How often vartop web polls the server, in seconds | `5` |
 | `servers.<name>.history` | How far back a worker page's charts reach: whole days, `1d` to `30d`. Each worker's rates are kept that long, in 5-minute buckets (about 4–5 MB a day for 10 instances of 20 workers); lowering it drops the older ones within 5 minutes, and later buckets reuse their space (the file does not shrink) | `1d` |
 
@@ -278,6 +281,58 @@ Resolves a hostname to **all** of its addresses and dials each one, re-resolving
 | `path` | Mux API path on each instance | `/varmq` |
 
 An unresolvable host fails at connect time with the lookup error; a failed refresh later keeps the last known instances. Instances are dialed directly over `http://`, so their addresses must be reachable from vartop. The `server add` wizard asks for host and port; edit the config file to change `path`.
+
+### Hub mode
+
+In hub mode, the VarMQ instances connect to vartop. vartop does not need their addresses, and the instances need no inbound port. Use it when pods are short-lived, or when vartop cannot reach them.
+
+A hub server has `"hub": true` and a `token` of at least 16 characters. Two hub servers cannot share a token, because the token selects the server.
+
+```json
+{
+  "servers": {
+    "jobs": {
+      "name": "jobs",
+      "hub": true,
+      "token": "a-long-random-secret-of-16-or-more-characters"
+    }
+  }
+}
+```
+
+`vartop server add` asks for the token. If you leave it empty, it makes a random token and prints it.
+
+Start vartop web with a hub listener. The hub listener can bind any address, but the dashboard stays on loopback.
+
+```bash
+vartop web --hub-listen :7071
+vartop web --hub-listen :7071 --hub-tls-cert hub.crt --hub-tls-key hub.key
+```
+
+vartop web prints the hub address when it starts. If a hub server is configured and `--hub-listen` is not given, vartop web says so, and the server's snapshots show the cause.
+
+In your app, connect each VarMQ instance to the hub with the server's token:
+
+```go
+go varmq.ConnectHub(ctx, hubURL, token)
+```
+
+Each instance keeps one stream open to vartop. vartop sends its usual API requests down the stream, and the instance posts the replies back. The pages, actions and history work as for other servers.
+
+Each instance is one unit, and vartop never treats it as a load balancer. An action reaches the right instance on the first try. An instance that disconnects leaves the fleet at once. An instance that stops its heartbeats leaves after three missed heartbeats (15 seconds by default).
+
+vartop web follows changes to the config while it runs. A new hub server accepts instances within a few seconds. A removed server, or a changed token, disconnects its instances.
+
+`vartop action` and `vartop concurrency` run in their own process, so they cannot reach hub instances. For a hub server, they fail and point to the dashboard.
+
+Security:
+
+- **The token gives control.** Anyone with the token of a server can read the data of its instances and stop their workers. Keep the token secret, and use a different token for each server.
+- **Use TLS or a trusted network.** Without TLS, the token travels in clear text. Use `--hub-tls-cert` and `--hub-tls-key`, or TLS at a proxy. vartop web warns when a hub listener on a non-loopback address has no TLS.
+- **The token stays out of URLs and logs.** vartop reads the token only from the `Authorization` header, and never writes it to its log.
+- **Run one vartop replica.** An instance connects to one vartop, so a second replica cannot reach it.
+- **The dashboard stays on loopback.** It has no login, so only the hub listener can bind a public address. Every request to the hub listener needs a token.
+- **Proxies must not buffer the stream.** A proxy between the instances and vartop must pass each line at once, and must not close a connection that is idle for less than a heartbeat.
 
 ## How it works
 
