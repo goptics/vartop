@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -31,9 +30,6 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	server, err := cfg.GetActiveServer(serverFlag)
 	if err != nil {
 		return err
-	}
-	if server.Hub {
-		return fmt.Errorf("server %q is a hub server: its instances connect to vartop web, so this command cannot reach them; act on them from the dashboard (vartop web --hub-listen)", cmp.Or(serverFlag, cfg.DefaultServer))
 	}
 
 	pool, err := api.PoolFor(server)
