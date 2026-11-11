@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	stdlog "log"
 	"log/slog"
 	"maps"
 	"net"
@@ -278,13 +279,23 @@ func NewServer(r *Router, cert *tls.Certificate, log *slog.Logger) *http.Server 
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    16 << 10,
-		// Handshake noise from scanners stays out of the log.
-		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug),
+		ErrorLog:          stdlog.New(serverLog{log}, "", 0),
 	}
 	if cert != nil {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{*cert}}
 	}
 	return srv
+}
+
+// serverLog passes the http.Server's errors to log as warnings, but for
+// TLS handshake failures: scanner noise on a public port.
+type serverLog struct{ log *slog.Logger }
+
+func (l serverLog) Write(p []byte) (int, error) {
+	if msg := strings.TrimSpace(string(p)); !strings.Contains(msg, "TLS handshake error") {
+		l.log.Warn("hub: " + msg)
+	}
+	return len(p), nil
 }
 
 // Serve serves r on ln (TLS with cert) until ctx ends, then drops every

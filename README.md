@@ -332,7 +332,7 @@ Security:
 - **The token stays out of URLs and logs.** vartop reads the token only from the `Authorization` header, and never writes it to its log.
 - **Run one vartop replica.** An instance connects to one vartop, so a second replica cannot reach it.
 - **The dashboard stays on loopback.** It has no login, so only the hub listener can bind a public address. Every request to the hub listener needs a token.
-- **Proxies must not buffer the stream.** A proxy between the instances and vartop must pass each line at once, and must not close a connection that is idle for less than a heartbeat.
+- **Proxies must not buffer the stream.** A proxy between the instances and vartop must pass each line at once. It must also keep idle connections open for longer than a heartbeat.
 
 ## How it works
 

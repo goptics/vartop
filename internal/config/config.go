@@ -121,17 +121,6 @@ func randBytes(n int) []byte {
 	return b
 }
 
-// Kind is how the server's instances are found: "endpoints", "dns" or "hub".
-func (s *Server) Kind() string {
-	switch {
-	case s.Hub:
-		return "hub"
-	case s.DNS != nil:
-		return "dns"
-	}
-	return "endpoints"
-}
-
 // Validate checks that exactly one of Endpoints, DNS or Hub is
 // configured and that the chosen block has its required fields.
 func (s *Server) Validate() error {

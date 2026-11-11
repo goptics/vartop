@@ -360,10 +360,11 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 		}
 	}()
 	err = serveWeb(serveCtx, src, key, addr, out, open)
-	stopServing()
-	<-hubStopped
+	// The collector first: a last tick must not find the hub gone.
 	stopCollecting()
 	<-collected
+	stopServing()
+	<-hubStopped
 	if collectErr != nil {
 		return fmt.Errorf("%w; start vartop web again", collectErr)
 	}

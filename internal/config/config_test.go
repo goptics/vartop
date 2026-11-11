@@ -472,13 +472,4 @@ func TestNewHubToken(t *testing.T) {
 	if a == b || ValidHubToken(a) != nil || len(a) != 43 {
 		t.Errorf("NewHubToken = %q, %q: want two distinct valid 43-character tokens", a, b)
 	}
-	for kind, s := range map[string]*Server{
-		"hub":       {Hub: true},
-		"dns":       {DNS: &DNSRef{}},
-		"endpoints": {Endpoints: []string{"x"}},
-	} {
-		if got := s.Kind(); got != kind {
-			t.Errorf("Kind = %q, want %q", got, kind)
-		}
-	}
 }
