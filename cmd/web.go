@@ -248,7 +248,7 @@ func serveWeb(ctx context.Context, src web.Source, key, addr string, out io.Writ
 // vartop's environment, the config read again on every request (the
 // collector follows its changes too), and the check of the lease against
 // this environment (R31). release closes it.
-func webSource() (src web.Source, release func(), err error) {
+func webSource(hub string) (src web.Source, release func(), err error) {
 	dataDir, err := store.DataDir()
 	if err != nil {
 		return src, nil, err
@@ -257,7 +257,7 @@ func webSource() (src web.Source, release func(), err error) {
 	if err != nil {
 		return src, nil, err
 	}
-	return web.Source{DataDir: dataDir, Config: config.Load, Control: ctl, SameEnv: sameEnvAsOwn()},
+	return web.Source{DataDir: dataDir, Config: config.Load, Control: ctl, SameEnv: sameEnvAsOwn(hub)},
 		func() { _ = ctl.Close() }, nil
 }
 
@@ -329,7 +329,7 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 	if err := hf.check(); err != nil {
 		return err
 	}
-	src, release, err := webSource()
+	src, release, err := webSource(hf.listen)
 	if err != nil {
 		return err
 	}
@@ -371,7 +371,7 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 	var collectErr error
 	go func() {
 		defer close(collected)
-		o := collect.Options{DataDir: src.DataDir, Config: readConfig, BuildPool: router.BuildPool, Lease: ownLease(), Log: log}
+		o := collect.Options{DataDir: src.DataDir, Config: readConfig, BuildPool: router.BuildPool, Lease: ownLease(hf.listen), Log: log}
 		run := func(ctx context.Context) (int, error) {
 			// The pages read the control.db opened at the start: deleted,
 			// a Run would make a new one they never see (and the data
@@ -402,11 +402,11 @@ func runWeb(ctx context.Context, key, addr string, hf hubFlags, out io.Writer, o
 	return err
 }
 
-// ownLease is this vartop as the lease records its collector: its pid, and
-// the config it collects with.
-func ownLease() store.Lease {
+// ownLease is this vartop as the lease records its collector: its pid, the
+// config it collects with, and its hub address (--hub-listen, "": none).
+func ownLease(hub string) store.Lease {
 	path, _ := config.Path() // "" when there is no config dir: the collector reads no config either
-	return store.Lease{PID: os.Getpid(), ConfigPath: path}
+	return store.Lease{PID: os.Getpid(), ConfigPath: path, Hub: hub}
 }
 
 // readConfig is the collector's Options.Config: the config, and where its
@@ -422,20 +422,21 @@ func readConfig() (*config.Config, string, error) {
 }
 
 // sameEnv reports whether the collectors of leases a and b collect in the
-// same environment: the same config path. vartop web acts
+// same environment: the same config path and hub address. vartop web acts
 // on a server only while the collector collects in its environment (R31):
 // the token it sends must not go to endpoints discovered under another
-// config.
+// config, and a hub server's instances are reachable only through the hub
+// they dialled.
 func sameEnv(a, b store.Lease) bool {
-	return a.ConfigPath == b.ConfigPath
+	return a.ConfigPath == b.ConfigPath && a.Hub == b.Hub
 }
 
 // sameEnvAsOwn returns vartop web's check of a lease (R31): whether its
 // collector collects in this vartop's environment, sameEnv with ownLease
 // (read once). It checks the lease whether it is fresh, released or stale:
 // the snapshots stored under it are of its collector's environment (R44).
-func sameEnvAsOwn() func(store.Lease) bool {
-	own := ownLease()
+func sameEnvAsOwn(hub string) func(store.Lease) bool {
+	own := ownLease(hub)
 	return func(l store.Lease) bool { return sameEnv(l, own) }
 }
 

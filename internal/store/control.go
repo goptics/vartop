@@ -29,8 +29,11 @@ var ErrLeaseLost = errors.New("collector lease lost")
 type Lease struct {
 	Token string // "" once released
 	PID   int
-	// The collector's environment, as far as collection depends on it.
+	// The collector's environment, as far as collection depends on it:
+	// its config file, and the hub address it listens on ("": no hub),
+	// the only way to reach a hub server's instances.
 	ConfigPath    string
+	Hub           string
 	Started, Beat time.Time
 }
 
@@ -139,8 +142,8 @@ func (c *Control) claim(l Lease, now time.Time, dead string) (token string, ok b
 	ms := now.UnixMilli()
 	if _, err := tx.Exec(`INSERT OR REPLACE INTO daemon
 		(id, token, pid, build, config_path, kubeconfig, path_env, started, beat, stop)
-		VALUES (1, ?, ?, '', ?, '', '', ?, ?, 0)`,
-		token, l.PID, l.ConfigPath, ms, ms); err != nil {
+		VALUES (1, ?, ?, '', ?, ?, '', ?, ?, 0)`,
+		token, l.PID, l.ConfigPath, l.Hub, ms, ms); err != nil {
 		return "", false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -238,8 +241,10 @@ func (c *Control) Release(token string) error {
 func (c *Control) Lease() (Lease, bool, error) {
 	var l Lease
 	var started, beat int64
-	err := c.db.QueryRow(`SELECT token, pid, config_path, started, beat FROM daemon WHERE id = 1`).
-		Scan(&l.Token, &l.PID, &l.ConfigPath, &started, &beat)
+	// ponytail: Hub lives in the kubeconfig column, unused since Kubernetes
+	// support went; a migration if the column ever needs its name.
+	err := c.db.QueryRow(`SELECT token, pid, config_path, kubeconfig, started, beat FROM daemon WHERE id = 1`).
+		Scan(&l.Token, &l.PID, &l.ConfigPath, &l.Hub, &started, &beat)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Lease{}, false, nil
 	}
