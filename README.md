@@ -177,7 +177,7 @@ vartop web --no-open                   # print the URL, don't launch a browser
 | `-s`, `--server` | Server to show first; the page can switch to any configured server | *(default server, else the first configured)* |
 | `--hub-listen` | Address the hub listens on for VarMQ instances of hub servers, see [Hub mode](#hub-mode) | *(no hub)* |
 | `--hub-tls-cert`, `--hub-tls-key` | TLS certificate and key files of the hub listener | *(plain HTTP)* |
-| `--hub-max-conns-per-ip` | Open connections the hub listener accepts from one IP address; `0` for no limit, for example behind one proxy or NAT address | `64` |
+| `--hub-max-conns-per-ip` | Tokenless connections the hub listener holds from one source IP; `0` for no limit | `64` |
 
 Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 
@@ -336,7 +336,7 @@ Limits:
 
 - Each hub server accepts at most 1000 instances. It accepts a burst of 200 new instance streams, and then 20 each second.
 - The hub listener holds at most 10 connections for each instance that the hub servers accept, plus 256. With one hub server, that is 10,256 connections.
-- The hub listener holds at most 64 connections from one IP address. An instance can use up to 10 connections. For more than 6 instances behind one proxy or NAT address, raise `--hub-max-conns-per-ip`, or set it to `0` for no limit.
+- The hub listener holds at most 64 tokenless connections per source IP. A connection is tokenless until one of its requests is authenticated. Authenticated connections do not count, so many instances can share one proxy or NAT address. When a 65th tokenless connection arrives, the hub closes the oldest tokenless connection of that IP. Set `--hub-max-conns-per-ip` to change the limit, or to `0` for no limit.
 - A connection must carry a request with a valid token within 10 seconds, or the hub closes it. An idle connection closes after 30 seconds.
 - Each heartbeat and reply must arrive in full within 10 seconds.
 - Each hub server reads at most 256 MiB of replies at once, and each reply is at most 16 MiB. A reply of unknown length counts against this limit in steps of 64 KiB as it arrives. A reply that does not fit gets status 503, and its request fails.

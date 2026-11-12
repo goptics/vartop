@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -29,9 +30,9 @@ type Options struct {
 	// MaxInstances caps connected instances per hub server:
 	// DefaultMaxInstances when 0.
 	MaxInstances int
-	// MaxConnsPerIP caps the hub listener's open connections from one
-	// source IP: 0 is no limit (one proxy or NAT address for every
-	// instance). vartop web's --hub-max-conns-per-ip sets it.
+	// MaxConnsPerIP caps the hub listener's tokenless connections from
+	// one source IP: 0 is no limit. vartop web's --hub-max-conns-per-ip
+	// sets it.
 	MaxConnsPerIP int
 	Log           *slog.Logger // discarded when nil
 }
@@ -168,8 +169,8 @@ func (r *Router) authed(serve func(*Hub, http.ResponseWriter, *http.Request)) ht
 			http.Error(w, "missing or wrong token", http.StatusUnauthorized)
 			return
 		}
-		if m, ok := req.Context().Value(authedKey{}).(*atomic.Bool); ok {
-			m.Store(true) // the connection carried a token: it may idle on
+		if st, ok := req.Context().Value(connKey{}).(*connState); ok {
+			st.mark() // the connection carried a token: it may idle on
 		}
 		serve(h, w, req)
 	}
@@ -274,9 +275,23 @@ func LoadCert(certFile, keyFile string) (*tls.Certificate, error) {
 	return &cert, nil
 }
 
-// authedKey keys a connection's context to its *atomic.Bool: set once a
-// request on it carried a valid token.
-type authedKey struct{}
+// connKey keys a connection's context to its *connState.
+type connKey struct{}
+
+// connState is one hub connection's: authenticated or not, and its slot
+// of the capListener, nil when Serve did not cap the listener.
+type connState struct {
+	authed atomic.Bool // a request on it carried a valid token
+	c      *capConn
+}
+
+// mark: the connection is authenticated. It no longer counts toward its
+// IP's tokenless connections.
+func (s *connState) mark() {
+	if !s.authed.Swap(true) && s.c != nil {
+		s.c.l.authed(s.c)
+	}
+}
 
 // NewServer is the hub listener's http.Server: bounded headers, a
 // ReadHeaderTimeout, and no server-wide read or write timeout, which would
@@ -298,13 +313,14 @@ func NewServer(r *Router, cert *tls.Certificate, log *slog.Logger) *http.Server 
 			if tc, ok := c.(*tls.Conn); ok {
 				c = tc.NetConn() // close the socket, no TLS alert to wait on
 			}
-			authed := new(atomic.Bool)
+			st := new(connState)
+			st.c, _ = c.(*capConn)
 			time.AfterFunc(r.lim.reqTimeout, func() {
-				if !authed.Load() {
+				if !st.authed.Load() {
 					_ = c.Close()
 				}
 			})
-			return context.WithValue(ctx, authedKey{}, authed)
+			return context.WithValue(ctx, connKey{}, st)
 		},
 	}
 	if cert != nil {
@@ -334,22 +350,27 @@ const (
 	connsPerInstance = 10
 	connHeadroom     = 256
 	// DefaultMaxConnsPerIP is --hub-max-conns-per-ip's default.
-	// ponytail: 64 per source IP; raise it, or 0 for none, when many
-	// instances share one address (a proxy, a NAT).
+	// ponytail: 64 tokenless connections per source IP; authenticated
+	// ones do not count.
 	DefaultMaxConnsPerIP = 64
 )
 
-// capListener accepts at most *max connections at once, and at most perIP
-// (0: no limit) from one source IP. A connection past either is closed at
+// capListener accepts at most *max connections at once. Of one source IP
+// it holds at most perIP (0: no limit) tokenless connections: one more
+// closes the IP's oldest tokenless one, so a tokenless client cannot lock
+// out the instances of its address. A connection past *max is closed at
 // once, so a flood of idle connections cannot pile up.
 type capListener struct {
 	net.Listener
-	max   *atomic.Int64
-	perIP int
+	max     *atomic.Int64
+	perIP   int
+	log     *slog.Logger // nil: discarded
+	evicted rateLog
+	refused rateLog
 
 	mu   sync.Mutex
 	n    int64
-	byIP map[string]int
+	byIP map[string]*list.List // tokenless capConns of each IP, oldest first
 }
 
 func (l *capListener) Accept() (net.Conn, error) {
@@ -362,36 +383,72 @@ func (l *capListener) Accept() (net.Conn, error) {
 		if host, _, err := net.SplitHostPort(ip); err == nil {
 			ip = host
 		}
-		if l.admit(ip) {
-			return &capConn{Conn: c, l: l, ip: ip}, nil
+		cc := &capConn{Conn: c, l: l, ip: ip}
+		ok, old := l.admit(cc)
+		if old != nil {
+			_ = old.Close()
+			l.evicted.warn(l.log, "hub: tokenless connections of one IP at the limit; its oldest closed", "ip", ip)
+		}
+		if ok {
+			return cc, nil
 		}
 		_ = c.Close()
+		l.refused.warn(l.log, "hub: connection limit reached; connection refused", "ip", ip)
 	}
 }
 
-// admit takes a slot for a connection from ip; false when none is free.
-func (l *capListener) admit(ip string) bool {
+// admit takes a slot for c; false when none is free. At the limit of c's
+// IP it takes the slot of the IP's oldest tokenless connection, old, for
+// the caller to close.
+func (l *capListener) admit(c *capConn) (ok bool, old *capConn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.n >= l.max.Load() || l.perIP > 0 && l.byIP[ip] >= l.perIP {
-		return false
+	q := l.byIP[c.ip]
+	switch {
+	case l.perIP > 0 && q != nil && q.Len() >= l.perIP:
+		old = q.Remove(q.Front()).(*capConn)
+		old.elem = nil
+	case l.n >= l.max.Load():
+		return false, nil
 	}
-	if l.byIP == nil {
-		l.byIP = make(map[string]int)
+	if q == nil {
+		if l.byIP == nil {
+			l.byIP = make(map[string]*list.List)
+		}
+		q = list.New()
+		l.byIP[c.ip] = q
 	}
+	c.elem = q.PushBack(c)
 	l.n++
-	l.byIP[ip]++
-	return true
+	return true, old
 }
 
-// free gives back the slot of a connection from ip.
-func (l *capListener) free(ip string) {
+// unqueue takes c off its IP's tokenless connections, under l.mu.
+func (l *capListener) unqueue(c *capConn) {
+	if c.elem == nil {
+		return
+	}
+	q := l.byIP[c.ip]
+	q.Remove(c.elem)
+	c.elem = nil
+	if q.Len() == 0 {
+		delete(l.byIP, c.ip)
+	}
+}
+
+// authed: c is authenticated; it no longer counts for its IP.
+func (l *capListener) authed(c *capConn) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.unqueue(c)
+}
+
+// free gives back c's slot.
+func (l *capListener) free(c *capConn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.n--
-	if l.byIP[ip]--; l.byIP[ip] == 0 {
-		delete(l.byIP, ip)
-	}
+	l.unqueue(c)
 }
 
 // open is the number of connections held.
@@ -406,12 +463,40 @@ type capConn struct {
 	net.Conn
 	l    *capListener
 	ip   string
+	elem *list.Element // under l.mu: in l.byIP while tokenless and open
 	once sync.Once
 }
 
 func (c *capConn) Close() error {
-	c.once.Do(func() { c.l.free(c.ip) })
+	c.once.Do(func() { c.l.free(c) })
 	return c.Conn.Close()
+}
+
+// rateLog logs a warning at most once per logEvery, with the number of
+// those skipped since.
+type rateLog struct {
+	mu      sync.Mutex
+	next    time.Time
+	skipped int
+}
+
+const logEvery = 10 * time.Second
+
+func (r *rateLog) warn(log *slog.Logger, msg string, args ...any) {
+	if log == nil {
+		return
+	}
+	r.mu.Lock()
+	now := time.Now()
+	if now.Before(r.next) {
+		r.skipped++
+		r.mu.Unlock()
+		return
+	}
+	r.next, args = now.Add(logEvery), append(args, "skipped", r.skipped)
+	r.skipped = 0
+	r.mu.Unlock()
+	log.Warn(msg, args...)
 }
 
 // CloseWrite passes on the TCP half-close http.Server sends before it
@@ -425,9 +510,10 @@ func (c *capConn) CloseWrite() error {
 
 // Serve serves r on ln (TLS with cert) until ctx ends, then drops every
 // instance and shuts down within timeout. It caps ln's open connections
-// (see connsPerInstance) and those of one source IP (Options.MaxConnsPerIP).
+// (see connsPerInstance) and the tokenless ones of one source IP
+// (Options.MaxConnsPerIP).
 func Serve(ctx context.Context, ln net.Listener, r *Router, cert *tls.Certificate, timeout time.Duration, log *slog.Logger) error {
-	ln = &capListener{Listener: ln, max: &r.connCap, perIP: r.perIP}
+	ln = &capListener{Listener: ln, max: &r.connCap, perIP: r.perIP, log: log}
 	srv := NewServer(r, cert, log)
 	errc := make(chan error, 1)
 	go func() {

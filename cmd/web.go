@@ -41,7 +41,7 @@ var (
 // hubFlags are vartop web's hub listener flags: listen "" is no hub.
 type hubFlags struct {
 	listen, cert, key string
-	perIP             int // connections per source IP; 0: no limit
+	perIP             int // tokenless connections per source IP; 0: no limit
 }
 
 // check refuses a TLS flag without its pair or without --hub-listen, and a
@@ -484,6 +484,6 @@ func init() {
 	webCmd.Flags().StringVar(&webHub.listen, "hub-listen", "", "Address the hub listens on for VarMQ instances of hub servers, e.g. :7071 (default: no hub)")
 	webCmd.Flags().StringVar(&webHub.cert, "hub-tls-cert", "", "TLS certificate file of the hub listener")
 	webCmd.Flags().StringVar(&webHub.key, "hub-tls-key", "", "TLS key file of the hub listener")
-	webCmd.Flags().IntVar(&webHub.perIP, "hub-max-conns-per-ip", hub.DefaultMaxConnsPerIP, "Open hub connections allowed from one source IP (0: no limit, e.g. behind one proxy or NAT address)")
+	webCmd.Flags().IntVar(&webHub.perIP, "hub-max-conns-per-ip", hub.DefaultMaxConnsPerIP, "Tokenless connections per source IP the hub listener holds; one more closes the oldest (0: no limit)")
 	rootCmd.AddCommand(webCmd)
 }

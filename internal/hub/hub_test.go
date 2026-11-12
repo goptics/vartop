@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1241,8 +1243,10 @@ func (l fromListener) Accept() (net.Conn, error) {
 	return fromConn{c, addr}, nil
 }
 
-// TestCapPerIP: the hub listener holds at most perIP connections of one
-// source IP; other IPs still get in, and a closed one frees its slot.
+// TestCapPerIP: the hub listener holds at most perIP tokenless connections
+// of one source IP: one more closes the IP's oldest. Other IPs are not
+// touched, an authenticated one no longer counts, and a closed one frees
+// its slot.
 func TestCapPerIP(t *testing.T) {
 	inner, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1263,8 +1267,8 @@ func TestCapPerIP(t *testing.T) {
 			accepted <- c
 		}
 	}()
-	// dial connects as ip; ok: it was accepted, else closed at once.
-	dial := func(ip string, ok bool) net.Conn {
+	// dial connects as ip and returns the accepted connection.
+	dial := func(ip string) net.Conn {
 		t.Helper()
 		from <- ip + ":1"
 		c, err := net.Dial("tcp", inner.Addr().String())
@@ -1272,13 +1276,6 @@ func TestCapPerIP(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { c.Close() })
-		if !ok {
-			_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
-			if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
-				t.Errorf("connection of %s past its IP's limit: read %v, want it closed at once", ip, err)
-			}
-			return nil
-		}
 		select {
 		case sc := <-accepted:
 			return sc
@@ -1287,18 +1284,33 @@ func TestCapPerIP(t *testing.T) {
 			return nil
 		}
 	}
-	a1 := dial("10.0.0.1", true)
-	a2 := dial("10.0.0.1", true)
-	dial("10.0.0.1", false)
-	dial("10.0.0.2", true)
-	a1.Close()
-	dial("10.0.0.1", true)
-	a2.Close()
-	ln.mu.Lock()
-	n, ips := ln.n, len(ln.byIP)
-	ln.mu.Unlock()
-	if n != 2 || ips != 2 {
-		t.Errorf("open = %d over %d IPs, want 2 over 2", n, ips)
+	// count is the open connections and the tokenless ones of each IP.
+	count := func() (int64, map[string]int) {
+		ln.mu.Lock()
+		defer ln.mu.Unlock()
+		ips := make(map[string]int)
+		for ip, q := range ln.byIP {
+			ips[ip] = q.Len()
+		}
+		return ln.n, ips
+	}
+	a1 := dial("10.0.0.1")
+	a2 := dial("10.0.0.1")
+	a3 := dial("10.0.0.1") // past the limit: the oldest, a1, is closed
+	if _, err := a1.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("the IP's oldest connection: read %v, want it closed", err)
+	}
+	b := dial("10.0.0.2")
+	ln.authed(a2.(*capConn)) // authenticated: no longer counted for its IP
+	a4 := dial("10.0.0.1")
+	if n, ips := count(); n != 4 || !maps.Equal(ips, map[string]int{"10.0.0.1": 2, "10.0.0.2": 1}) {
+		t.Errorf("open = %d, tokenless per IP %v; want 4, a3 and a4 of 10.0.0.1, b of 10.0.0.2", n, ips)
+	}
+	for _, c := range []net.Conn{a1, a2, a3, a4, b} {
+		c.Close()
+	}
+	if n, ips := count(); n != 0 || len(ips) != 0 {
+		t.Errorf("after closing all: open = %d, tokenless per IP %v; want none", n, ips)
 	}
 	if r := NewRouter(Options{MaxConnsPerIP: 5}); r.perIP != 5 {
 		t.Errorf("Options.MaxConnsPerIP 5: perIP = %d", r.perIP)
@@ -1441,5 +1453,92 @@ func TestStreamBody400(t *testing.T) {
 	}
 	if r.hub(keyOf(tokA)).get("body") != nil {
 		t.Error("a stream with a body was registered")
+	}
+}
+
+// logBuf is a log sink safe for concurrent writes.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestPerIPCountsTokenless: the per-IP limit counts tokenless connections
+// only, and at the limit the IP's oldest one is closed for the new one:
+// instances behind one address are not cut, and a tokenless client of
+// their address cannot lock them out.
+func TestPerIPCountsTokenless(t *testing.T) {
+	var logs logBuf
+	r := newRouter(slowBeat, 0, nil)
+	r.perIP = 3
+	r.Sync(hubConfig(map[string]string{"a": tokA}))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- Serve(ctx, ln, r, nil, time.Second, slog.New(slog.NewTextHandler(&logs, nil))) }()
+	defer func() { cancel(); <-served }()
+	base := "http://" + ln.Addr().String()
+
+	a, code := fleettest.DialHub(t, base, tokA, "a", fleettest.HubInstanceOptions{})
+	if code != http.StatusOK {
+		t.Fatal(code)
+	}
+	fleettest.WaitUntil(t, 5*time.Second, "a listed", func() bool { return len(r.Source(tokA).Endpoints()) == 1 })
+	if code, err := a.Beat(false); code != http.StatusNoContent {
+		t.Fatalf("beat: %d, %v", code, err)
+	}
+	idle := func() net.Conn {
+		t.Helper()
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	// closed: the server closed c within d; else it still holds it.
+	closed := func(c net.Conn, d time.Duration) bool {
+		_ = c.SetReadDeadline(time.Now().Add(d))
+		_, err := c.Read(make([]byte, 1))
+		return !errors.Is(err, os.ErrDeadlineExceeded)
+	}
+	// a's stream and beat connections leave the IP's 3 tokenless slots.
+	held := []net.Conn{idle(), idle(), idle()}
+	for i, c := range held {
+		if closed(c, 200*time.Millisecond) {
+			t.Fatalf("tokenless connection %d closed with a's connections open: they counted", i)
+		}
+	}
+	// A fourth closes the oldest.
+	fourth := idle()
+	if !closed(held[0], 5*time.Second) {
+		t.Error("the oldest tokenless connection was not closed for a new one")
+	}
+	if closed(fourth, 200*time.Millisecond) {
+		t.Error("a tokenless connection at the IP's limit was refused")
+	}
+	// An instance of the same address still gets in, and a stays.
+	if _, code := fleettest.DialHub(t, base, tokA, "b", fleettest.HubInstanceOptions{}); code != http.StatusOK {
+		t.Errorf("instance b of a full address: %d, want 200", code)
+	}
+	if code, err := a.Beat(false); code != http.StatusNoContent {
+		t.Errorf("beat of a after the evictions: %d, %v", code, err)
+	}
+	if out := logs.String(); !strings.Contains(out, "127.0.0.1") || strings.Contains(out, tokA) {
+		t.Errorf("logs: want the eviction with its IP, never the token:\n%s", out)
 	}
 }
