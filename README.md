@@ -341,7 +341,7 @@ Limits:
 - Each heartbeat and reply must arrive in full within 10 seconds.
 - Each hub server reads at most 256 MiB of replies at once, and each reply is at most 16 MiB. A reply of unknown length counts against this limit in steps of 64 KiB as it arrives. A reply that does not fit gets status 503, and its request fails.
 - At the instance limit or the new-stream rate, the hub refuses the stream with status 503, and the instance tries again later.
-- vartop reads at most 2000 workers of one instance, 8 at a time. An instance that lists more shows the error *too many workers*. This limit applies to every server, not only to hub servers.
+- vartop reads at most 2000 workers of one instance. An instance that lists more shows the error *too many workers*. This limit applies to every server, not only to hub servers. vartop fetches the workers of a hub instance 8 at a time, and the workers of other instances 64 at a time. Behind a load balancer, vartop fetches all listed workers at once.
 
 Security:
 

@@ -624,21 +624,66 @@ func peakServer(t *testing.T, h http.Handler, prefix string, hold time.Duration)
 	return srv, most.Load
 }
 
-// TestPollDirectBoundsFetches: a unit's worker fetches run unitFetches at
-// a time, however many workers it lists.
+// peakRT serves a hub unit's requests on h (its instance path stripped),
+// counting worker fetches in flight at once, each held for hold.
+type peakRT struct {
+	h         http.Handler
+	hold      time.Duration
+	now, most atomic.Int32
+}
+
+func (p *peakRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	_, path, _ := strings.Cut(strings.TrimPrefix(req.URL.Path, "/"), "/")
+	if strings.HasPrefix(path, "workers/") {
+		n := p.now.Add(1)
+		defer p.now.Add(-1)
+		for m := p.most.Load(); n > m && !p.most.CompareAndSwap(m, n); m = p.most.Load() {
+		}
+		time.Sleep(p.hold)
+	}
+	r := req.Clone(req.Context())
+	r.URL.Path, r.URL.RawPath = "/"+path, ""
+	rec := httptest.NewRecorder()
+	p.h.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
+// TestPollDirectBoundsFetches: a hub unit's worker fetches run unitFetches
+// at a time (the instance's in-flight cap), however many workers it lists.
 func TestPollDirectBoundsFetches(t *testing.T) {
 	workers := make(map[string]*fleettest.Worker)
 	for i := range 5 * unitFetches {
 		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
 	}
 	_, v := fleettest.NewVarmq(t, "a", workers)
-	srv, peak := peakServer(t, v.Config.Handler, "/workers/", 20*time.Millisecond)
-	pod, _ := pollDirect(context.Background(), fleettest.StaticPool(t, srv.URL).Clients()[0])
+	rt := &peakRT{h: v.Config.Handler, hold: 20 * time.Millisecond}
+	pod, _ := pollDirect(context.Background(), api.NewClientVia(hub.Endpoint("a"), "", rt))
 	if pod.Err != "" || len(pod.Workers) != len(workers) {
 		t.Fatalf("pod: err %q, %d workers, want %d", pod.Err, len(pod.Workers), len(workers))
 	}
-	if p := peak(); p > unitFetches || p < 2 {
+	if p := rt.most.Load(); p > unitFetches || p < 2 {
 		t.Errorf("worker fetches in flight at once: %d, want 2 to %d", p, unitFetches)
+	}
+}
+
+// TestPollDirectPullFetchesInTick: a pull unit fetches more workers at
+// once than a hub unit: 100 workers of 70ms each fit a 1s interval's tick
+// (0.8s); 8 at a time took 0.9s.
+func TestPollDirectPullFetchesInTick(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range 100 {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	_, v := fleettest.NewVarmq(t, "a", workers)
+	srv, peak := peakServer(t, v.Config.Handler, "/workers/", 70*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	pod, _ := pollDirect(ctx, fleettest.StaticPool(t, srv.URL).Clients()[0])
+	if pod.Err != "" || len(pod.Workers) != len(workers) {
+		t.Fatalf("pod: err %q, %d workers, want %d", pod.Err, len(pod.Workers), len(workers))
+	}
+	if p := peak(); p <= unitFetches {
+		t.Errorf("worker fetches in flight at once: %d, want over %d", p, unitFetches)
 	}
 }
 

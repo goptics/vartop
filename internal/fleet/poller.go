@@ -180,14 +180,18 @@ func (c *Collector) tick() (ok bool) {
 }
 
 // Bounds of the fan-out over one unit's workers.
-// ponytail: 2000 workers a unit and 8 fetches at once; raise them here.
+// ponytail: 2000 workers a unit, 8 fetches at once on a hub unit, 64 on
+// a pull unit; raise them here.
 const (
 	// maxUnitWorkers caps the workers one unit may list: past it the unit
 	// is errored, as each listed worker costs a fetch.
 	maxUnitWorkers = 2000
-	// unitFetches caps one unit's worker fetches in flight, as a hub
+	// unitFetches caps a hub unit's worker fetches in flight, as the
 	// instance's requests in flight are (hub.MaxInFlight).
 	unitFetches = 8
+	// pullFetches caps a pull (endpoint, DNS) unit's worker fetches in
+	// flight.
+	pullFetches = 64
 )
 
 // panicGroup is a WaitGroup that carries a panic of one of its goroutines
@@ -346,7 +350,8 @@ func pollAt(ctx context.Context, pool *api.Pool, t *tracker, now time.Time) *Sna
 
 // pollDirect lists one endpoint's workers on a new connection, so that a
 // balancer picking per connection is seen sending it elsewhere, then fetches
-// its workers, unitFetches at a time. The endpoint is a direct unit: its key
+// its workers, unitFetches at a time for a hub unit, pullFetches for
+// another. The endpoint is a direct unit: its key
 // and the endpoint it was reached through are the same, and its instance is
 // the one that answered the list. A failed or timed-out list, or one of
 // over maxUnitWorkers, marks the unit errored.
@@ -368,7 +373,11 @@ func pollDirect(ctx context.Context, c *api.Client) (pod PodSnapshot, answered [
 
 	samples := make([]*Sample, len(list))
 	errs := make([]error, len(list))
-	g := panicGroup{sem: make(chan struct{}, unitFetches)}
+	fetches := pullFetches
+	if _, hub := config.HubInstance(endpoint); hub {
+		fetches = unitFetches
+	}
+	g := panicGroup{sem: make(chan struct{}, fetches)}
 	for i, w := range list {
 		g.Go(func() {
 			d, err := c.GetWorkerCtx(ctx, url.PathEscape(w.Name))

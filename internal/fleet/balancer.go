@@ -306,14 +306,20 @@ func (r *reacher) settled() bool {
 }
 
 // listFresh is (*api.Client).ListWorkersFresh as a job's send. A list of
-// over maxUnitWorkers is an error: each listed worker costs a fetch.
+// over maxUnitWorkers is an errTooMany: each listed worker costs a fetch.
 func listFresh(ctx context.Context, c *api.Client) ([]api.WorkerSummary, string, error) {
 	list, instance, err := c.ListWorkersFresh(ctx)
 	if err == nil && len(list) > maxUnitWorkers {
-		return nil, instance, fmt.Errorf("too many workers: %d listed, at most %d", len(list), maxUnitWorkers)
+		return nil, instance, fmt.Errorf("%w: %d listed, at most %d", errTooMany, len(list), maxUnitWorkers)
 	}
 	return list, instance, err
 }
+
+// errTooMany: a list of over maxUnitWorkers. Definitive for a list job:
+// listing again would download it again.
+var errTooMany = errors.New("too many workers")
+
+func isTooMany(err error) bool { return errors.Is(err, errTooMany) }
 
 // isNotFound reports whether err is a 404 reply.
 func isNotFound(err error) bool {
@@ -338,7 +344,7 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[s
 	known := t.known(endpoints, skip, now)
 	r := newReacher(eps, attemptCap(max(len(known), behind, len(eps))))
 
-	lists := addJob(r, listFresh, nil)
+	lists := addJob(r, listFresh, isTooMany)
 	lists.want(slices.Collect(maps.Keys(known))...)
 	fetches := make(map[string]*job[*api.WorkerDetails]) // by worker name
 	replied := false                                     // some list reply named an instance
@@ -371,7 +377,9 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[s
 	var units []PodSnapshot
 	for id := range lists.wants {
 		unit := PodSnapshot{Key: "#" + id, Instance: id, Balanced: true}
-		if list, ok := lists.got[id]; ok {
+		if list, ok := lists.got[id]; ok && list.Err != nil {
+			unit.Via, unit.Err = list.Via, list.Err.Error()
+		} else if ok {
 			unit.Via = list.Via
 			unit.Workers = make(map[string]*Sample, len(list.V))
 			for _, w := range list.V {

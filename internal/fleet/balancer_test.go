@@ -1241,3 +1241,32 @@ func TestLabelCap(t *testing.T) {
 		}
 	}
 }
+
+// TestPollBalancerTooManyWorkers: an instance behind a balancer that lists
+// over maxUnitWorkers is errored after one list: the error is definitive,
+// so its list is not fetched again until the budget ends.
+func TestPollBalancerTooManyWorkers(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range maxUnitWorkers + 1 {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	big, bigSrv := fleettest.NewVarmq(t, "big", workers)
+	lb := fleettest.NewRoundRobinLB(t, bigSrv)
+	pool, tr := lbPoll(t, lb.URL)
+	now := time.Now()
+	tr.saw(lb.URL, "big", now)
+
+	units := pollBalanced(context.Background(), pool.Clients(), tr, nil, now)
+	var u *PodSnapshot
+	for i := range units {
+		if units[i].Instance == "big" {
+			u = &units[i]
+		}
+	}
+	if u == nil || !strings.Contains(u.Err, "too many workers") || len(u.Workers) != 0 {
+		t.Errorf("unit of big = %+v, want errored with too many workers", u)
+	}
+	if n := countCalls(big.Calls(), "GET /workers"); n != 1 {
+		t.Errorf("big's list fetched %d times, want 1", n)
+	}
+}
