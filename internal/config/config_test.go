@@ -431,7 +431,7 @@ func TestLoadRejectsKubernetes(t *testing.T) {
 
 	write(`{"default_server":"k","servers":{"k":{"name":"k","kubernetes":{"context":"prod","namespace":"jobs","service":"varmq"}}}}`)
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), `server "k": kubernetes discovery was removed; use endpoints or dns`) {
+	if err == nil || !strings.Contains(err.Error(), `server "k": kubernetes discovery was removed; use endpoints, dns or hub`) {
 		t.Fatalf("Load() error = %v, want kubernetes removed", err)
 	}
 	if !errors.Is(err, ErrKubernetesRemoved) {

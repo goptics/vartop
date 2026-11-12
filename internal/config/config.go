@@ -24,7 +24,7 @@ const (
 var (
 	ErrConfigNotFound = errors.New("config file not found")
 	// ErrKubernetesRemoved is why a config with a kubernetes server fails to load.
-	ErrKubernetesRemoved = errors.New("kubernetes discovery was removed; use endpoints or dns")
+	ErrKubernetesRemoved = errors.New("kubernetes discovery was removed; use endpoints, dns or hub")
 )
 
 // DNSRef discovers varmq instances by resolving a hostname to all of its

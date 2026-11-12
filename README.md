@@ -34,9 +34,9 @@ and pause, resume, restart, stop or resize it, from your browser or the command 
 [VarMQ](https://github.com/goptics/varmq) is a typed worker pool and job queue for Go. Each process that uses it can serve its workers over a small REST API, `varmq.Handler`. **vartop** talks to that API on every instance of your service and puts the whole fleet in one place:
 
 - **`vartop web`**, a dashboard in your browser. It merges every instance (or shows one), refreshes at each poll, and keeps the history in a local SQLite store. It lets you act on workers, queues, jobs and workflows.
-- **`vartop action`** and **`vartop concurrency`**, the same actions from a terminal or a script, against every endpoint of a server at once: each static URL, or each address DNS discovery finds.
+- **`vartop action`** and **`vartop concurrency`**, the same actions from a terminal or a script, against every endpoint of a server at once: each static URL, or each address DNS discovery finds. A hub server's instances are reachable only through `vartop web`, so the CLI refuses hub servers.
 
-There is no agent to deploy and no database to run: vartop is one binary on your machine. It finds your instances from a fixed list of URLs or the addresses a DNS name resolves to, and it collects only while `vartop web` runs.
+There is no agent to deploy and no database to run: vartop is one binary on your machine. It finds your instances from a fixed list of URLs or the addresses a DNS name resolves to, or lets them connect to it ([hub mode](#hub-mode)), and it collects only while `vartop web` runs.
 
 ## Features
 
@@ -62,6 +62,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 **Find every instance**
 
 - **Static endpoints or DNS**, DNS followed live as instances scale, restart or move.
+- **Hub mode.** The instances connect to vartop instead, with the server's token: no inbound port on them, and no addresses to configure. See [Hub mode](#hub-mode).
 - **Load-balancer detection.** One URL answered by several instances is recognised, and each instance behind it is listed.
 
 **Safe by default**
@@ -72,7 +73,7 @@ There is no agent to deploy and no database to run: vartop is one binary on your
 
 ## Prerequisites
 
-**Your service serves VarMQ's REST API** on each instance. Mount `varmq.Handler` on any `http.ServeMux` (see [VarMQ's REST API](https://github.com/goptics/varmq#rest-api)):
+**Your service serves VarMQ's REST API** on each instance: mount `varmq.Handler` as below, or, in [hub mode](#hub-mode), connect each instance to vartop with VarMQ's hub client instead. To mount `varmq.Handler` on any `http.ServeMux` (see [VarMQ's REST API](https://github.com/goptics/varmq#rest-api)):
 
 ```go
 mux := http.NewServeMux()
@@ -104,7 +105,7 @@ vartop then calls `http://<instance>:8080/varmq`. The API is unauthenticated by 
 
    Or build from source: `git clone https://github.com/goptics/vartop.git && cd vartop && make build` (binary at `bin/vartop`).
 
-2. **Open the dashboard.** On first run a short wizard sets up your first server: a name, then a **static endpoint** or **DNS** discovery (host and port), and an optional token.
+2. **Open the dashboard.** On first run a short wizard sets up your first server: a name, then a **static endpoint**, **DNS** discovery (host and port) or **hub** mode, and a token (optional, except in hub mode).
 
    ```bash
    vartop web
@@ -271,7 +272,7 @@ If `config.json` is a symlink, say into a dotfiles repository, vartop saves thro
 
 ### Schema
 
-Each server uses **exactly one** of `endpoints` (static list), `dns` (live discovery) or `hub` (the instances connect to vartop, see [Hub mode](#hub-mode)). Setting more than one, or none, is rejected when the config is loaded. A server with a `kubernetes` block (discovery removed) fails to load with *kubernetes discovery was removed; use endpoints or dns*: replace the block with `endpoints` or `dns`.
+Each server uses **exactly one** of `endpoints` (static list), `dns` (live discovery) or `hub` (the instances connect to vartop, see [Hub mode](#hub-mode)). Setting more than one, or none, is rejected when the config is loaded. A server with a `kubernetes` block (discovery removed) fails to load with *kubernetes discovery was removed; use endpoints, dns or hub*: replace the block with `endpoints`, `dns` or `hub`.
 
 ```json
 {
@@ -375,12 +376,12 @@ Limits:
 
 - Each hub server accepts at most 1000 instances. It accepts a burst of 200 new instance streams, and then 20 each second.
 - The hub listener holds at most 10 connections for each instance that the hub servers accept, plus 256. With one hub server, that is 10,256 connections. Each hub server has its own share of 10 authenticated connections per instance. Past its share, the hub closes new connections of that server, and other servers are not affected.
-- The hub listener holds at most 64 tokenless connections per source IP. A connection is tokenless until it sends a request with a valid token. Connections that sent a valid token do not count, so many instances can share one proxy or NAT address. When a 65th tokenless connection arrives, the hub closes the oldest tokenless connection of that IP. Set `--hub-max-conns-per-ip` to change the limit, or to `0` for no limit.
+- The hub listener holds at most 64 tokenless connections per source IP. A connection is tokenless until it sends a request with a valid token. Connections that sent a valid token do not count, so many instances can share one proxy or NAT address. When a 65th tokenless connection arrives, the hub closes the oldest tokenless connection of that IP. At the listener's connection limit, a new connection closes the oldest tokenless connection of any IP, so tokenless clients of many addresses cannot lock out the instances. Only when every connection is authenticated is a new one refused. Set `--hub-max-conns-per-ip` to change the limit, or to `0` for no limit.
 - Set `--hub-max-conns-per-ip` to `0` behind a reverse proxy that opens a new upstream connection for each request. If you are not sure, set `0`.
 - Known limit: a client on the same source address as the instances can still open connections very fast. The same host, a NAT or a proxy address counts as one source address. Such a client can disturb new connections from that address while their TLS handshake or request headers are in progress. Live streams and authenticated connections are not affected.
 - A connection is authenticated when it carries an accepted stream, heartbeat or reply. A valid token alone is not enough. The hub closes a connection that is not authenticated within 10 seconds. A request with a valid token that is still in progress at that time delays the close until the request ends. An idle connection closes after 30 seconds.
 - Each heartbeat and reply must arrive in full within 10 seconds.
-- Each hub server reads at most 256 MiB of replies at once, and each reply is at most 16 MiB. A reply of unknown length counts against this limit in steps of 64 KiB as it arrives. A reply that does not fit gets status 503, and its request fails.
+- Each hub server reads at most 256 MiB of replies at once, and each reply is at most 16 MiB. A reply of unknown length counts against this limit in steps of 64 KiB as it arrives. A reply over 16 MiB gets status 413, and one that does not fit in the 256 MiB gets status 503; either way its request fails.
 - At the instance limit or the new-stream rate, the hub refuses the stream with status 503, and the instance tries again later.
 - vartop reads at most 2000 workers of one instance. An instance that lists more shows the error *too many workers*. This limit applies to every server, not only to hub servers. vartop fetches the workers of a hub instance 8 at a time, and the workers of other instances 64 at a time. Behind a load balancer, vartop fetches all listed workers at once.
 
@@ -445,7 +446,7 @@ flowchart LR
 - **Loopback only.** The dashboard has no login, and whoever reaches it can stop your workers, so vartop refuses any `--host` that is not a loopback address (`127.0.0.1`, `localhost`, `::1`), and the server only answers requests addressed to its own loopback host name.
 - **The token stays on the server.** vartop calls VarMQ on the page's behalf; the bearer token is never sent to the browser.
 - **Stale data is visible.** When no new data has arrived for three times the polling interval plus 2 seconds, a banner says how old the data is and why (vartop web is not collecting, or the server's error). Everything current shows `—` or is hidden (the values, the health count, the load-balancer note, per-instance errors, the list of reporting instances), and the history stays drawn. A server with only old history, say after vartop web was not running for hours, shows the same banner with its age, not "Waiting for the first snapshot".
-- **Another configuration is refused.** Two `vartop web` on one machine share the [data directory](#data-directory), and only one collects (see [Collection](#collection)). If the one collecting reads another config file, the other's pages read *Another vartop (pid {pid}) is collecting with another configuration; this vartop web collects once it stops.*, the current values show `—`, and every action is refused with that text (HTTP 409) and sends nothing: its snapshots name endpoints found under the other configuration, and this server's token must not go to them. The check reads the last collector's lease, running or not, so it holds after that one stopped or crashed too, until this vartop web collects.
+- **Another configuration is refused.** Two `vartop web` on one machine share the [data directory](#data-directory), and only one collects (see [Collection](#collection)). If the one collecting reads another config file, or listens for the hub on another address (or not at all, `--hub-listen`), the other's pages read *Another vartop (pid {pid}) is collecting with another configuration; this vartop web collects once it stops.*, the current values show `—`, and every action is refused with that text (HTTP 409) and sends nothing: its snapshots name endpoints found under the other configuration, and this server's token must not go to them; a hub server's instances are reachable only through the hub they connected to. The check reads the last collector's lease, running or not, so it holds after that one stopped or crashed too, until this vartop web collects.
 - **Only current data is shown or acted on.** A snapshot is current when it is not stale, the collector's configuration is this vartop's, and it was not taken before that collector started: an older one is a previous collector's. Right after vartop web starts, or takes over from another, the page therefore shows `—` and *No new data for {age}.* and refuses actions (HTTP 409, nothing sent) until its first snapshot, up to about two polling intervals. With nothing collecting, an action is refused at once, with *… — vartop web is not collecting.* If the collector's lease cannot be read, actions are refused with *cannot read the collector's lease: {err}* and the page keeps showing data by the stale rule above. After a server's endpoints (or DNS settings) are edited, its newest snapshot still names the old units until the collector restarts it, a few seconds; an action meanwhile is refused with *The configuration of {server} changed; actions wait for its first snapshot under it. Try again in a few seconds.*, and nothing is sent: this server's token must not go to endpoints the config no longer lists.
 - **Connecting takes a moment.** While vartop web is still connecting to a server (a DNS lookup can take a moment), the page says it is waiting for the server's first snapshot. If the connection fails, the real cause is shown with the server's name.
 
@@ -453,7 +454,7 @@ flowchart LR
 
 ### Instance labels
 
-The page says **instance** and labels each one instance-1, instance-2, … in the order vartop first sees them, static and DNS endpoints included; hover a label for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number. Labels are stored per server, so they survive restarting vartop web; a number not seen for 24 hours is freed, and a new instance takes the lowest free number.
+The page says **instance** and labels each one instance-1, instance-2, … in the order vartop first sees them, static and DNS endpoints included; hover a label for its instance ID and address. A label's number follows the instance ID, so it stays put when an endpoint turns out to be a load balancer, and stays with an address while its instance is down; an instance that comes back with a new ID gets a new number. Labels are stored per server, so they survive restarting vartop web; a number not seen for 24 hours, or for the server's `history` when that is longer, is freed (its stored chart buckets are kept that long, so a reused number never mixes two instances), and a new instance takes the lowest free number.
 
 ### Load balancers
 
@@ -595,12 +596,15 @@ vartop
 | `GET` | `/queues/{id}/jobs` | One page of a queue's jobs in one state | 1.0.0 |
 | `PATCH` | `/queues/{id}/actions/{action}` | Pause or resume a queue | 1.2.0 |
 | `GET` | `/workflows` | One page of workflows, newest first | 1.3.0 |
+| `GET` | `/workflow-counts` | Workflow counts per store; optional, an older VarMQ lacks it | — |
 | `GET` | `/workflows/{id}` | One workflow and its tasks | 1.3.0 |
 | `PATCH` | `/workflows/{id}/actions/cancel` | Cancel a workflow (`?undo=false`: without undo) | 1.3.0 |
 | `GET` | `/queues/{id}/jobs/{jobId}` | One job, with its result | 1.4.0 |
 | `PATCH` | `/queues/{id}/jobs/{jobId}/actions/cancel` | Cancel a job | 1.4.0 |
 
 API 1.5.0 adds a worker's `strategy` and `sources`, which the worker page draws as its sources graph. VarMQ v1.11.0 serves API 1.5.0.
+
+In hub mode the same requests go down each instance's stream instead.
 
 </details>
 
