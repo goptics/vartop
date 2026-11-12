@@ -876,10 +876,13 @@ func TestWebServesHub(t *testing.T) {
 		s := latestOf(dataDir, "h")
 		return s != nil && len(s.Pods) == 0 && s.Err == ""
 	})
-	dash := regexp.MustCompile(`vartop web: (http://\S+)`).FindStringSubmatch(out.String())
-	if dash == nil {
-		t.Fatalf("no dashboard address in:\n%s", out.String())
-	}
+	// The dashboard line can print after the hub line: wait for it too.
+	dashRe := regexp.MustCompile(`vartop web: (http://\S+)`)
+	var dash []string
+	fleettest.WaitUntil(t, 5*time.Second, "the dashboard address", func() bool {
+		dash = dashRe.FindStringSubmatch(out.String())
+		return dash != nil
+	})
 	for path, want := range map[string]string{"/": "0/0 instances", "/grid": "No instances to show.", "/queues": "0/0 instances", "/workflows": "0/0 instances"} {
 		resp, err := http.Get(dash[1] + path)
 		if err != nil {
