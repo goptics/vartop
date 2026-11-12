@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1406,9 +1407,10 @@ func TestConnCapFollowsSync(t *testing.T) {
 
 // TestReplyBudgetPerServer: chunked replies reserve the budget as their
 // bytes arrive, and each hub server has its own budget: 16 stalled
-// one-byte chunked replies of server a leave room for a's and b's replies.
+// one-byte chunked replies of server a fill a's budget, so a's next reply
+// gets 503 while b's is delivered.
 func TestReplyBudgetPerServer(t *testing.T) {
-	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA, "b": tokB})
+	r, base := newTestHubWith(t, slowBeat, 0, map[string]string{"a": tokA, "b": tokB}, func(l *limits) { l.replyMax = 16 * replyStep })
 	rtA := r.Transport(tokA)
 	var gates []*gate
 	defer func() {
@@ -1434,15 +1436,16 @@ func TestReplyBudgetPerServer(t *testing.T) {
 	a2, _ := fleettest.DialHub(t, base, tokA, "a2", fleettest.HubInstanceOptions{})
 	b, _ := fleettest.DialHub(t, base, tokB, "b", fleettest.HubInstanceOptions{})
 	for _, c := range []struct {
-		in *fleettest.HubInstance
-		rt http.RoundTripper
-	}{{a2, rtA}, {b, r.Transport(tokB)}} {
+		in   *fleettest.HubInstance
+		rt   http.RoundTripper
+		want int
+	}{{a2, rtA, http.StatusServiceUnavailable}, {b, r.Transport(tokB), http.StatusNoContent}} {
 		f, res := held(t, context.Background(), c.rt, c.in)
-		if code, _ := c.in.Reply(f.ID, 200, nil, []byte(`[]`)); code != http.StatusNoContent {
-			t.Errorf("reply of %s while a's chunked replies stall: %d, want 204", c.in.ID, code)
+		if code, _ := c.in.Reply(f.ID, 200, nil, []byte(`[]`)); code != c.want {
+			t.Errorf("reply of %s while a's chunked replies fill a's budget: %d, want %d", c.in.ID, code, c.want)
 		}
-		if err := wait(t, res); err != nil {
-			t.Error(err)
+		if err := wait(t, res); (err == nil) != (c.want == http.StatusNoContent) {
+			t.Errorf("RoundTrip to %s: %v", c.in.ID, err)
 		}
 	}
 }
@@ -1669,5 +1672,26 @@ func TestServerConnShare(t *testing.T) {
 	_ = first.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if resp, err := http.ReadResponse(bufio.NewReader(first), nil); err != nil || resp.StatusCode != http.StatusNoContent {
 		t.Errorf("b's beat on a connection of a: %v, %v; want 204", resp, err)
+	}
+}
+
+// TestChunkedReplyMemory: a chunked reply of MaxReply bytes allocates
+// about its size; a doubling buffer allocated 4 times it and held twice.
+func TestChunkedReplyMemory(t *testing.T) {
+	r, base := newTestHub(t, slowBeat, 0, map[string]string{"a": tokA})
+	a, _ := fleettest.DialHub(t, base, tokA, "a", fleettest.HubInstanceOptions{})
+	f, res := held(t, context.Background(), r.Transport(tokA), a)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	code, err := a.ReplyAs(a.ID, f.ID, 200, nil, &zeros{MaxReply}, -1)
+	runtime.ReadMemStats(&after)
+	if err != nil || code != http.StatusNoContent {
+		t.Fatalf("chunked reply of MaxReply bytes: %d, %v; want 204", code, err)
+	}
+	if err := wait(t, res); err != nil {
+		t.Fatal(err)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > MaxReply*3/2 {
+		t.Errorf("a chunked reply of %d bytes allocated %d", MaxReply, got)
 	}
 }

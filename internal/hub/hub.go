@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -165,7 +166,7 @@ var pingLine = []byte(`{"type":"ping"}` + "\n")
 type reply struct {
 	status      int
 	contentType string
-	body        []byte
+	body        net.Buffers
 	err         error
 }
 
@@ -591,10 +592,12 @@ func (b *budgeted) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// readReply reads r's body through body, at most MaxReply bytes. It aborts
-// the read when the caller stops waiting or the stream drops: nobody would
+// readReply reads r's body through body, at most MaxReply bytes: a known
+// length into one buffer of that size, an unknown one into pages of
+// replyStep, as the budget counts it (no doubling buffer). It aborts the
+// read when the caller stops waiting or the stream drops: nobody would
 // read it.
-func readReply(w http.ResponseWriter, r *http.Request, body io.Reader, c *conn, wt *waiter) ([]byte, error) {
+func readReply(w http.ResponseWriter, r *http.Request, body io.Reader, c *conn, wt *waiter) (net.Buffers, error) {
 	rc := http.NewResponseController(w)
 	stop, watched := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -611,12 +614,31 @@ func readReply(w http.ResponseWriter, r *http.Request, body io.Reader, c *conn, 
 		close(stop)
 		<-watched // no deadline set after the handler returned
 	}()
-	var buf bytes.Buffer
-	if r.ContentLength > 0 {
+	lim := http.MaxBytesReader(w, io.NopCloser(body), MaxReply)
+	if r.ContentLength >= 0 {
+		var buf bytes.Buffer
 		buf.Grow(int(r.ContentLength) + bytes.MinRead)
+		_, err := buf.ReadFrom(lim)
+		return net.Buffers{buf.Bytes()}, err
 	}
-	_, err := buf.ReadFrom(http.MaxBytesReader(w, io.NopCloser(body), MaxReply))
-	return buf.Bytes(), err
+	var pages net.Buffers
+	for {
+		if len(pages) == 0 || len(pages[len(pages)-1]) == replyStep {
+			pages = append(pages, make([]byte, 0, replyStep))
+		}
+		p := &pages[len(pages)-1]
+		n, err := lim.Read((*p)[len(*p):replyStep])
+		*p = (*p)[:len(*p)+n]
+		if err == io.EOF {
+			if len(*p) == 0 {
+				pages = pages[:len(pages)-1]
+			}
+			return pages, nil
+		}
+		if err != nil {
+			return pages, err
+		}
+	}
 }
 
 // beatFrom serves POST /hub/beat: the instance is alive, or with bye=1
@@ -705,6 +727,10 @@ func (h *Hub) RoundTrip(req *http.Request) (*http.Response, error) {
 		header.Set("Content-Type", rep.contentType)
 	}
 	header.Set(api.InstanceHeader, id)
+	var n int64
+	for _, b := range rep.body {
+		n += int64(len(b))
+	}
 	return &http.Response{
 		Status:        strconv.Itoa(rep.status) + " " + http.StatusText(rep.status),
 		StatusCode:    rep.status,
@@ -712,8 +738,8 @@ func (h *Hub) RoundTrip(req *http.Request) (*http.Response, error) {
 		ProtoMajor:    1,
 		ProtoMinor:    1,
 		Header:        header,
-		Body:          io.NopCloser(bytes.NewReader(rep.body)),
-		ContentLength: int64(len(rep.body)),
+		Body:          io.NopCloser(&rep.body),
+		ContentLength: n,
 		Request:       req,
 	}, nil
 }
