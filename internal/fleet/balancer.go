@@ -433,9 +433,11 @@ type LabelNumber struct {
 }
 
 // freeAfter is how long a number goes unshown before another unit may take
-// it: the store's retention, so that no stored snapshot still shows its
-// last owner. Seen is up to a minute early, so a number is freed only once
-// Seen is over freeAfter and a minute old.
+// it, at least: the store's retention, so that no stored snapshot still
+// shows its last owner. A collector keeps it for the server's history
+// instead when longer (tracker.keep), so that no stored bucket of the
+// label, kept that long, mixes two units. Seen is up to a minute early, so
+// a number is freed only once Seen is over it and a minute old.
 const freeAfter = 24 * time.Hour
 
 // maxNumbers caps the numbers a tracker keeps (and the store keeps of
@@ -457,6 +459,7 @@ type tracker struct {
 	numbers  map[string]LabelNumber // what a unit's number follows (see label) → its instance-N; handed from a key to an instance, freed after freeAfter unshown
 	followed map[string]string      // unit key → what its number followed when last labelled
 	changed  bool                   // numbers or followed changed since labels last reported them
+	keep     time.Duration          // how long a number goes unshown before it is freed; 0: freeAfter
 }
 
 // newTracker returns an empty tracker for a server polled every interval.
@@ -676,7 +679,7 @@ func (t *tracker) see(f string, at time.Time) {
 // followed them.
 func (t *tracker) free(now time.Time) {
 	for f, n := range t.numbers {
-		if now.Sub(n.Seen) > freeAfter+time.Minute {
+		if now.Sub(n.Seen) > max(t.keep, freeAfter)+time.Minute {
 			delete(t.numbers, f)
 			t.changed = true
 		}

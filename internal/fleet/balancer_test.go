@@ -1270,3 +1270,26 @@ func TestPollBalancerTooManyWorkers(t *testing.T) {
 		t.Errorf("big's list fetched %d times, want 1", n)
 	}
 }
+
+// TestLabelKeptForHistory: with a history longer than freeAfter, a number
+// stays its unit's until unshown for the history, so a label's stored
+// buckets never mix two units; past it, it is freed.
+func TestLabelKeptForHistory(t *testing.T) {
+	now := time.Date(2026, 11, 11, 12, 0, 30, 0, time.UTC)
+	for _, c := range []struct {
+		keep, unshown time.Duration
+		kept          bool
+	}{
+		{0, 2 * 24 * time.Hour, false},                 // the default: freeAfter
+		{7 * 24 * time.Hour, 2 * 24 * time.Hour, true}, // within a 7d history
+		{7 * 24 * time.Hour, 8 * 24 * time.Hour, false},
+	} {
+		tr := newTracker(5 * time.Second)
+		tr.keep = c.keep
+		tr.numbers["#gone"] = LabelNumber{N: 1, Seen: now.Add(-c.unshown)}
+		tr.free(now)
+		if _, ok := tr.numbers["#gone"]; ok != c.kept {
+			t.Errorf("keep %v, unshown %v: kept = %v, want %v", c.keep, c.unshown, ok, c.kept)
+		}
+	}
+}
