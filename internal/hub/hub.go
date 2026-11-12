@@ -447,6 +447,7 @@ func (h *Hub) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no") // proxies: do not buffer
+	live(w, r)
 	w.WriteHeader(http.StatusOK)
 	if !h.write(w, rc, hello) {
 		return
@@ -540,6 +541,7 @@ func (h *Hub) replyTo(w http.ResponseWriter, r *http.Request) {
 	switch mbe := (*http.MaxBytesError)(nil); {
 	case err == nil:
 		wt.ch <- reply{status: status, contentType: r.Header.Get("Content-Type"), body: read}
+		live(w, r)
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, errBudget):
 		full()
@@ -632,6 +634,7 @@ func (h *Hub) beatFrom(w http.ResponseWriter, r *http.Request) {
 		c.beat.Store(h.since())
 		c.listed.Store(true)
 	}
+	live(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 

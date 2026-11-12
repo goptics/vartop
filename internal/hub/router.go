@@ -50,6 +50,7 @@ type Router struct {
 	connCap      atomic.Int64 // the listener's connection cap; Sync sets it
 	lim          *limits
 	log          *slog.Logger
+	full         rateLog // share refusals (see authed)
 	mux          *http.ServeMux
 
 	mu     sync.RWMutex
@@ -158,6 +159,10 @@ func (r *Router) auth(req *http.Request) *Hub {
 }
 
 // authed checks the token before anything else of the request is read.
+// A valid token does not authenticate the connection: a request accepted
+// for a live session does (see live). Until then the request holds a
+// place in its Hub's share of authenticated connections; past the share
+// the connection is cut, as the listener cuts one past its cap.
 func (r *Router) authed(serve func(*Hub, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		h := r.auth(req)
@@ -169,10 +174,56 @@ func (r *Router) authed(serve func(*Hub, http.ResponseWriter, *http.Request)) ht
 			http.Error(w, "missing or wrong token", http.StatusUnauthorized)
 			return
 		}
-		if st, ok := req.Context().Value(connKey{}).(*connState); ok {
-			st.mark() // the connection carried a token: it may idle on
+		st, _ := req.Context().Value(connKey{}).(*connState)
+		if st == nil || st.authed.Load() {
+			serve(h, w, req) // a proxy's connection may carry several servers'
+			return
 		}
-		serve(h, w, req)
+		if st.c != nil && !st.c.l.reserve(h) {
+			r.full.warn(r.log, "hub: server's share of connections full; connection refused", "server", h.label())
+			panic(http.ErrAbortHandler)
+		}
+		g := &grant{st: st, h: h}
+		defer g.settle(false)
+		// Not reused unless authenticated: it would die at the timeout
+		// under a client's next request.
+		w.Header().Set("Connection", "close")
+		serve(h, w, req.WithContext(context.WithValue(req.Context(), grantKey{}, g)))
+	}
+}
+
+// grantKey keys a request's context to its *grant.
+type grantKey struct{}
+
+// grant is a request's place in h's share, taken while its connection is
+// not authenticated.
+type grant struct {
+	st   *connState
+	h    *Hub
+	once sync.Once
+}
+
+// settle, on its first call: keep (the request was accepted for a live
+// session) authenticates the connection for g.h, holding the place for
+// it; otherwise, or when the connection already was, the place goes back.
+func (g *grant) settle(keep bool) {
+	g.once.Do(func() {
+		if keep {
+			g.st.authed.Store(true)
+		}
+		if g.st.c != nil {
+			g.st.c.l.settle(g.st.c, g.h, keep)
+		}
+	})
+}
+
+// live: r was accepted for a live session (a stream registered, a beat
+// or reply of its session taken); its connection is authenticated. Call
+// it before the success status is written.
+func live(w http.ResponseWriter, r *http.Request) {
+	if g, ok := r.Context().Value(grantKey{}).(*grant); ok {
+		w.Header().Del("Connection")
+		g.settle(true)
 	}
 }
 
@@ -281,24 +332,16 @@ type connKey struct{}
 // connState is one hub connection's: authenticated or not, and its slot
 // of the capListener, nil when Serve did not cap the listener.
 type connState struct {
-	authed atomic.Bool // a request on it carried a valid token
+	authed atomic.Bool // a request on it was accepted for a live session
 	c      *capConn
-}
-
-// mark: the connection is authenticated. It no longer counts toward its
-// IP's tokenless connections.
-func (s *connState) mark() {
-	if !s.authed.Swap(true) && s.c != nil {
-		s.c.l.authed(s.c)
-	}
 }
 
 // NewServer is the hub listener's http.Server: bounded headers, a
 // ReadHeaderTimeout, and no server-wide read or write timeout, which would
 // cut the long-lived stream (handlers set their own deadlines). A
-// connection that carried no request with a valid token within the request
-// timeout is closed: a client without the token holds no connection, idle
-// HTTP/2 included, for longer.
+// connection that carried no request accepted for a live session within
+// the request timeout is closed: a client without the token, or with the
+// token alone, holds no connection, idle HTTP/2 included, for longer.
 func NewServer(r *Router, cert *tls.Certificate, log *slog.Logger) *http.Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -364,13 +407,15 @@ type capListener struct {
 	net.Listener
 	max     *atomic.Int64
 	perIP   int
+	share   int64        // authenticated connections per Hub; 0: no limit
 	log     *slog.Logger // nil: discarded
 	evicted rateLog
 	refused rateLog
 
-	mu   sync.Mutex
-	n    int64
-	byIP map[string]*list.List // tokenless capConns of each IP, oldest first
+	mu    sync.Mutex
+	n     int64
+	byIP  map[string]*list.List // tokenless capConns of each IP, oldest first
+	byHub map[*Hub]int64        // authenticated capConns and grants of each Hub
 }
 
 func (l *capListener) Accept() (net.Conn, error) {
@@ -436,19 +481,51 @@ func (l *capListener) unqueue(c *capConn) {
 	}
 }
 
-// authed: c is authenticated; it no longer counts for its IP.
-func (l *capListener) authed(c *capConn) {
+// reserve takes a place of h's share; false when it is full.
+func (l *capListener) reserve(h *Hub) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.unqueue(c)
+	if l.share > 0 && l.byHub[h] >= l.share {
+		return false
+	}
+	if l.byHub == nil {
+		l.byHub = make(map[*Hub]int64)
+	}
+	l.byHub[h]++
+	return true
 }
 
-// free gives back c's slot.
+// settle settles a place of h's share reserved for a request on c: keep
+// authenticates c for h, which then holds it and no longer counts for its
+// IP. A c already authenticated, evicted or closed gives it back.
+func (l *capListener) settle(c *capConn, h *Hub, keep bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if keep && c.elem != nil {
+		l.unqueue(c)
+		c.hub = h
+		return
+	}
+	l.give(h)
+}
+
+// give gives back a place of h's share, under l.mu.
+func (l *capListener) give(h *Hub) {
+	if l.byHub[h]--; l.byHub[h] <= 0 {
+		delete(l.byHub, h)
+	}
+}
+
+// free gives back c's slot, and its place of its Hub's share.
 func (l *capListener) free(c *capConn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.n--
 	l.unqueue(c)
+	if c.hub != nil {
+		l.give(c.hub)
+		c.hub = nil
+	}
 }
 
 // open is the number of connections held.
@@ -464,6 +541,7 @@ type capConn struct {
 	l    *capListener
 	ip   string
 	elem *list.Element // under l.mu: in l.byIP while tokenless and open
+	hub  *Hub          // under l.mu: the Hub it is authenticated for, while open
 	once sync.Once
 }
 
@@ -510,10 +588,10 @@ func (c *capConn) CloseWrite() error {
 
 // Serve serves r on ln (TLS with cert) until ctx ends, then drops every
 // instance and shuts down within timeout. It caps ln's open connections
-// (see connsPerInstance) and the tokenless ones of one source IP
-// (Options.MaxConnsPerIP).
+// (see connsPerInstance), the authenticated ones of each hub server, and
+// the tokenless ones of one source IP (Options.MaxConnsPerIP).
 func Serve(ctx context.Context, ln net.Listener, r *Router, cert *tls.Certificate, timeout time.Duration, log *slog.Logger) error {
-	ln = &capListener{Listener: ln, max: &r.connCap, perIP: r.perIP, log: log}
+	ln = &capListener{Listener: ln, max: &r.connCap, perIP: r.perIP, share: int64(connsPerInstance * r.maxInstances), log: log}
 	srv := NewServer(r, cert, log)
 	errc := make(chan error, 1)
 	go func() {

@@ -1246,7 +1246,7 @@ func (l fromListener) Accept() (net.Conn, error) {
 // TestCapPerIP: the hub listener holds at most perIP tokenless connections
 // of one source IP: one more closes the IP's oldest. Other IPs are not
 // touched, an authenticated one no longer counts, and a closed one frees
-// its slot.
+// its slot and its place of its Hub's share.
 func TestCapPerIP(t *testing.T) {
 	inner, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1255,7 +1255,7 @@ func TestCapPerIP(t *testing.T) {
 	from := make(chan string, 1)
 	var max atomic.Int64
 	max.Store(100)
-	ln := &capListener{Listener: fromListener{inner, from}, max: &max, perIP: 2}
+	ln := &capListener{Listener: fromListener{inner, from}, max: &max, perIP: 2, share: 1}
 	defer ln.Close()
 	accepted := make(chan net.Conn, 8)
 	go func() {
@@ -1284,15 +1284,16 @@ func TestCapPerIP(t *testing.T) {
 			return nil
 		}
 	}
-	// count is the open connections and the tokenless ones of each IP.
-	count := func() (int64, map[string]int) {
+	// count is the open connections, the tokenless ones of each IP and
+	// the places taken of the Hubs' shares.
+	count := func() (int64, map[string]int, int) {
 		ln.mu.Lock()
 		defer ln.mu.Unlock()
 		ips := make(map[string]int)
 		for ip, q := range ln.byIP {
 			ips[ip] = q.Len()
 		}
-		return ln.n, ips
+		return ln.n, ips, len(ln.byHub)
 	}
 	a1 := dial("10.0.0.1")
 	a2 := dial("10.0.0.1")
@@ -1301,25 +1302,36 @@ func TestCapPerIP(t *testing.T) {
 		t.Errorf("the IP's oldest connection: read %v, want it closed", err)
 	}
 	b := dial("10.0.0.2")
-	ln.authed(a2.(*capConn)) // authenticated: no longer counted for its IP
+	h1, h2 := new(Hub), new(Hub)
+	if !ln.reserve(h1) {
+		t.Fatal("no place of an empty share")
+	}
+	ln.settle(a2.(*capConn), h1, true) // authenticated: no longer counted for its IP
+	if ln.reserve(h1) {
+		t.Error("a place past the share of 1")
+	}
+	if !ln.reserve(h2) {
+		t.Error("another Hub's full share took h2's place")
+	}
+	ln.settle(a3.(*capConn), h2, false) // not accepted: given back
 	a4 := dial("10.0.0.1")
-	if n, ips := count(); n != 4 || !maps.Equal(ips, map[string]int{"10.0.0.1": 2, "10.0.0.2": 1}) {
-		t.Errorf("open = %d, tokenless per IP %v; want 4, a3 and a4 of 10.0.0.1, b of 10.0.0.2", n, ips)
+	if n, ips, hubs := count(); n != 4 || !maps.Equal(ips, map[string]int{"10.0.0.1": 2, "10.0.0.2": 1}) || hubs != 1 {
+		t.Errorf("open = %d, tokenless per IP %v, %d Hubs; want 4, a3 and a4 of 10.0.0.1, b of 10.0.0.2, h1's", n, ips, hubs)
 	}
 	for _, c := range []net.Conn{a1, a2, a3, a4, b} {
 		c.Close()
 	}
-	if n, ips := count(); n != 0 || len(ips) != 0 {
-		t.Errorf("after closing all: open = %d, tokenless per IP %v; want none", n, ips)
+	if n, ips, hubs := count(); n != 0 || len(ips) != 0 || hubs != 0 {
+		t.Errorf("after closing all: open = %d, tokenless per IP %v, %d Hubs; want none", n, ips, hubs)
 	}
 	if r := NewRouter(Options{MaxConnsPerIP: 5}); r.perIP != 5 {
 		t.Errorf("Options.MaxConnsPerIP 5: perIP = %d", r.perIP)
 	}
 }
 
-// TestUnauthedConnClosed: a connection that carried no request with a
-// valid token is closed at the request timeout, idle HTTP/2 and HTTP/1.1
-// keep-alive alike; one that carried a token lives on.
+// TestUnauthedConnClosed: a connection that carried no request accepted
+// for a live session is closed at the request timeout, idle HTTP/2 and
+// HTTP/1.1 keep-alive alike; one that carried an accepted stream lives on.
 func TestUnauthedConnClosed(t *testing.T) {
 	tmp := httptest.NewUnstartedServer(http.NotFoundHandler())
 	tmp.EnableHTTP2 = true
@@ -1361,7 +1373,7 @@ func TestUnauthedConnClosed(t *testing.T) {
 	}
 	h2 := dial("h2", "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
 	h1 := dial("http/1.1", "GET /nope HTTP/1.1\r\nHost: h\r\n\r\n")
-	authed := dial("http/1.1", "POST /hub/beat?instance=x HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer "+tokA+"\r\n\r\n")
+	authed := dial("http/1.1", "GET /hub/stream?instance=x&protocol=1 HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer "+tokA+"\r\n\r\n")
 	if !closedWithin(h2, timeout+3*time.Second) {
 		t.Error("an idle tokenless HTTP/2 connection outlived the request timeout")
 	}
@@ -1369,7 +1381,7 @@ func TestUnauthedConnClosed(t *testing.T) {
 		t.Error("a tokenless HTTP/1.1 keep-alive connection outlived the request timeout")
 	}
 	if closedWithin(authed, 4*timeout) {
-		t.Error("a connection that carried a token was closed at the request timeout")
+		t.Error("a connection that carried an accepted stream was closed at the request timeout")
 	}
 }
 
@@ -1540,5 +1552,122 @@ func TestPerIPCountsTokenless(t *testing.T) {
 	}
 	if out := logs.String(); !strings.Contains(out, "127.0.0.1") || strings.Contains(out, tokA) {
 		t.Errorf("logs: want the eviction with its IP, never the token:\n%s", out)
+	}
+}
+
+// serveHub serves r with Serve on a new loopback listener until the test
+// ends, and returns its address.
+func serveHub(t *testing.T, r *Router) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- Serve(ctx, ln, r, nil, time.Second, nil) }()
+	t.Cleanup(func() { cancel(); <-served })
+	return ln.Addr().String()
+}
+
+// rawPost sends one request on a new connection to addr and returns the
+// connection and the status, 0 when no reply came.
+func rawPost(t *testing.T, addr, req string) (net.Conn, int) {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := io.WriteString(c, req); err != nil {
+		return c, 0
+	}
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		return c, 0
+	}
+	resp.Body.Close()
+	_ = c.SetReadDeadline(time.Time{})
+	return c, resp.StatusCode
+}
+
+// beatReq is a beat of instance with token and session.
+func beatReq(instance, token, session string) string {
+	return fmt.Sprintf("POST /hub/beat?instance=%s HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer %s\r\n%s: %s\r\nContent-Length: 0\r\n\r\n", instance, token, SessionHeader, session)
+}
+
+// TestValidTokenNotLive: a valid token alone does not authenticate a
+// connection; a request of no live session (a beat of an unknown
+// instance, a duplicate stream) leaves it under the request timeout.
+func TestValidTokenNotLive(t *testing.T) {
+	const timeout = 300 * time.Millisecond
+	r := newRouter(slowBeat, 0, nil)
+	r.lim.reqTimeout = timeout
+	r.Sync(hubConfig(map[string]string{"a": tokA}))
+	addr := serveHub(t, r)
+	if _, code := fleettest.DialHub(t, "http://"+addr, tokA, "dup", fleettest.HubInstanceOptions{}); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	for _, c := range []struct {
+		name, req string
+		want      int
+	}{
+		{"beat of nobody", beatReq("nobody", tokA, "wrong-session-0123456789"), http.StatusNotFound},
+		{"duplicate stream", "GET /hub/stream?instance=dup&protocol=1 HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer " + tokA + "\r\n\r\n", http.StatusConflict},
+	} {
+		conn, code := rawPost(t, addr, c.req)
+		if code != c.want {
+			t.Errorf("%s: %d, want %d", c.name, code, c.want)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(timeout + 2*time.Second))
+		_, err := io.Copy(io.Discard, conn)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Errorf("%s: the connection outlived the request timeout", c.name)
+		}
+	}
+}
+
+// TestServerConnShare: each hub server holds at most connsPerInstance ×
+// maxInstances authenticated connections: a holder of server a's token
+// cannot fill the listener and lock out server b. A connection
+// authenticated for a may still carry b's requests (a reverse proxy).
+func TestServerConnShare(t *testing.T) {
+	r := newRouter(slowBeat, 1, nil) // a share of 10 each; the cap 276
+	r.Sync(hubConfig(map[string]string{"a": tokA, "b": tokB}))
+	addr := serveHub(t, r)
+	base := "http://" + addr
+	a, code := fleettest.DialHub(t, base, tokA, "a1", fleettest.HubInstanceOptions{})
+	if code != http.StatusOK {
+		t.Fatal(code)
+	}
+	fleettest.WaitUntil(t, 5*time.Second, "a1 listed", func() bool { return len(r.Source(tokA).Endpoints()) == 1 })
+	var first net.Conn
+	held := 0
+	for range 400 {
+		c, code := rawPost(t, addr, beatReq("a1", tokA, a.Session()))
+		if code != http.StatusNoContent {
+			break
+		}
+		if first == nil {
+			first = c
+		}
+		held++
+	}
+	if held > connsPerInstance {
+		t.Errorf("a held %d more authenticated connections, want at most its share of %d", held, connsPerInstance)
+	}
+	b, code := fleettest.DialHub(t, base, tokB, "b1", fleettest.HubInstanceOptions{})
+	if code != http.StatusOK {
+		t.Fatalf("b's stream while a holds its share: %d, want 200", code)
+	}
+	fleettest.WaitUntil(t, 5*time.Second, "b1 listed", func() bool { return len(r.Source(tokB).Endpoints()) == 1 })
+	if first == nil {
+		t.Fatal("no connection of a authenticated")
+	}
+	io.WriteString(first, beatReq("b1", tokB, b.Session()))
+	_ = first.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if resp, err := http.ReadResponse(bufio.NewReader(first), nil); err != nil || resp.StatusCode != http.StatusNoContent {
+		t.Errorf("b's beat on a connection of a: %v, %v; want 204", resp, err)
 	}
 }

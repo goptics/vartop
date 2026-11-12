@@ -335,9 +335,9 @@ vartop web follows changes to the config while it runs. A new hub server accepts
 Limits:
 
 - Each hub server accepts at most 1000 instances. It accepts a burst of 200 new instance streams, and then 20 each second.
-- The hub listener holds at most 10 connections for each instance that the hub servers accept, plus 256. With one hub server, that is 10,256 connections.
-- The hub listener holds at most 64 tokenless connections per source IP. A connection is tokenless until one of its requests is authenticated. Authenticated connections do not count, so many instances can share one proxy or NAT address. When a 65th tokenless connection arrives, the hub closes the oldest tokenless connection of that IP. Set `--hub-max-conns-per-ip` to change the limit, or to `0` for no limit.
-- A connection must carry a request with a valid token within 10 seconds, or the hub closes it. An idle connection closes after 30 seconds.
+- The hub listener holds at most 10 connections for each instance that the hub servers accept, plus 256. With one hub server, that is 10,256 connections. Each hub server has its own share of 10 authenticated connections per instance. Past its share, the hub closes new connections of that server, and other servers are not affected.
+- The hub listener holds at most 64 tokenless connections per source IP. A connection is tokenless until it carries an accepted stream, heartbeat or reply; then it is authenticated. A valid token alone is not enough. Authenticated connections do not count, so many instances can share one proxy or NAT address. When a 65th tokenless connection arrives, the hub closes the oldest tokenless connection of that IP. Set `--hub-max-conns-per-ip` to change the limit, or to `0` for no limit.
+- A connection must carry an accepted stream, heartbeat or reply within 10 seconds, or the hub closes it. An idle connection closes after 30 seconds.
 - Each heartbeat and reply must arrive in full within 10 seconds.
 - Each hub server reads at most 256 MiB of replies at once, and each reply is at most 16 MiB. A reply of unknown length counts against this limit in steps of 64 KiB as it arrives. A reply that does not fit gets status 503, and its request fails.
 - At the instance limit or the new-stream rate, the hub refuses the stream with status 503, and the instance tries again later.
