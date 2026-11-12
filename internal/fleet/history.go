@@ -6,10 +6,12 @@
 package fleet
 
 import (
+	"cmp"
 	"sync"
 	"time"
 
 	"github.com/goptics/vartop/internal/api"
+	"github.com/goptics/vartop/internal/config"
 )
 
 // Sample is one worker as seen by one pod at one poll.
@@ -36,7 +38,11 @@ type PodSnapshot struct {
 
 // Tip is the hover text of the unit's label: the instance and the address it
 // was reached through when both are known, else whichever is, else its key.
+// A hub unit is "<instance> via hub": its endpoint URL is internal.
 func (p PodSnapshot) Tip() string {
+	if id, ok := config.HubInstance(cmp.Or(p.Via, p.Key)); ok {
+		return cmp.Or(p.Instance, id) + " via hub"
+	}
 	switch {
 	case p.Instance != "" && p.Via != "":
 		return p.Instance + " via " + p.Via
@@ -96,9 +102,16 @@ func (r *Rater) Rate(s *Snapshot) {
 				continue
 			}
 			sm.CompletedRate, sm.FailedRate, sm.RateOK = rate(prev, sm, r.interval)
-			// ponytail: never pruned; entries for vanished pods are tiny and
-			// fall out of rate()'s 3x window anyway.
 			r.last[key] = sm
+		}
+	}
+	// Drop the bases rate() would refuse: over 3 intervals before s. A
+	// worker of s is never one (its base is new, or early: within half an
+	// interval), so only gone units and workers go, whose samples would
+	// otherwise be kept forever.
+	for key, sm := range r.last {
+		if s.At.Sub(sm.At) > 3*r.interval {
+			delete(r.last, key)
 		}
 	}
 }

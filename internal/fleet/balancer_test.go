@@ -1171,3 +1171,102 @@ func TestReacherAttemptPanic(t *testing.T) {
 		t.Fatal("run still running 3s after an attempt panicked")
 	}
 }
+
+// TestLabelManyKept: label stays linear with many numbers kept: 50,000
+// kept and 10,000 new units in one call took 18.9s when each new number
+// scanned every held one.
+func TestLabelManyKept(t *testing.T) {
+	tr := newTracker(5 * time.Second)
+	now := time.Now()
+	for i := range 50000 {
+		id := fmt.Sprintf("old-%d", i)
+		tr.numbers["#"+id] = LabelNumber{N: i + 1, Seen: now.Truncate(time.Minute)}
+		tr.followed["hub://hub.invalid/"+id] = "#" + id
+	}
+	pods := make([]PodSnapshot, 10000)
+	for i := range pods {
+		id := fmt.Sprintf("new-%d", i)
+		pods[i] = PodSnapshot{Key: "hub://hub.invalid/" + id, Via: "hub://hub.invalid/" + id, Instance: id}
+	}
+	start := time.Now()
+	tr.label(pods, now)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("label with 50,000 kept and 10,000 new took %v", d)
+	}
+	seen := make(map[string]bool)
+	for _, p := range pods {
+		if seen[p.Label] {
+			t.Fatalf("label %s given twice", p.Label)
+		}
+		seen[p.Label] = true
+	}
+}
+
+// TestLabelCap: past maxNumbers kept, the longest unshown numbers are
+// freed before freeAfter (and what followed them); numbers shown in this
+// tick are kept.
+func TestLabelCap(t *testing.T) {
+	tr := newTracker(5 * time.Second)
+	now := time.Date(2026, 11, 11, 12, 0, 30, 0, time.UTC)
+	for i := range maxNumbers + 50 {
+		id := fmt.Sprintf("old-%05d", i)
+		// old-00000 is the longest unshown.
+		tr.numbers["#"+id] = LabelNumber{N: i + 1, Seen: now.Add(-time.Hour).Add(time.Duration(i) * time.Second).Truncate(time.Minute)}
+		tr.followed["hub://hub.invalid/"+id] = "#" + id
+	}
+	pods := []PodSnapshot{{Key: "hub://hub.invalid/old-00001", Via: "hub://hub.invalid/old-00001", Instance: "old-00001"}}
+	for i := range 20 {
+		id := fmt.Sprintf("new-%d", i)
+		pods = append(pods, PodSnapshot{Key: "hub://hub.invalid/" + id, Via: "hub://hub.invalid/" + id, Instance: id})
+	}
+	tr.label(pods, now)
+	tr.label(pods, now) // the new ones are over the cap now
+	if n := len(tr.numbers); n > maxNumbers {
+		t.Errorf("%d numbers kept, want at most %d", n, maxNumbers)
+	}
+	if _, ok := tr.numbers["#old-00000"]; ok {
+		t.Error("the longest unshown number was kept")
+	}
+	if _, ok := tr.followed["hub://hub.invalid/old-00000"]; ok {
+		t.Error("a unit key still follows a freed number")
+	}
+	for _, p := range pods {
+		if _, ok := tr.numbers["#"+p.Instance]; !ok {
+			t.Errorf("number of %s, shown this tick, was freed", p.Instance)
+		}
+	}
+	for _, p := range pods {
+		if p.Instance == "old-00001" && p.Label != "instance-2" {
+			t.Errorf("a shown unit lost its number: %+v", p)
+		}
+	}
+}
+
+// TestPollBalancerTooManyWorkers: an instance behind a balancer that lists
+// over maxUnitWorkers is errored after one list: the error is definitive,
+// so its list is not fetched again until the budget ends.
+func TestPollBalancerTooManyWorkers(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range maxUnitWorkers + 1 {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	big, bigSrv := fleettest.NewVarmq(t, "big", workers)
+	lb := fleettest.NewRoundRobinLB(t, bigSrv)
+	pool, tr := lbPoll(t, lb.URL)
+	now := time.Now()
+	tr.saw(lb.URL, "big", now)
+
+	units := pollBalanced(context.Background(), pool.Clients(), tr, nil, now)
+	var u *PodSnapshot
+	for i := range units {
+		if units[i].Instance == "big" {
+			u = &units[i]
+		}
+	}
+	if u == nil || !strings.Contains(u.Err, "too many workers") || len(u.Workers) != 0 {
+		t.Errorf("unit of big = %+v, want errored with too many workers", u)
+	}
+	if n := countCalls(big.Calls(), "GET /workers"); n != 1 {
+		t.Errorf("big's list fetched %d times, want 1", n)
+	}
+}

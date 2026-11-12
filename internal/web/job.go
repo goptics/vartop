@@ -177,7 +177,7 @@ func (h *handler) jobAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	g, found := fleet.GroupQueues(fleet.FetchQueues(r.Context(), fleet.ClientsFor(t.latest, t.srv.Token), fleet.UnitLabel(t.latest))).Group(id)
+	g, found := fleet.GroupQueues(fleet.FetchQueues(r.Context(), h.clientsFor(t.latest, t.srv), fleet.UnitLabel(t.latest))).Group(id)
 	if !found {
 		conflict(w, "Queue "+strconv.Quote(id)+" is no longer reported by any "+t.noun.One+" — reload")
 		return

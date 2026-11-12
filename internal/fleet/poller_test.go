@@ -16,6 +16,7 @@ import (
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet/fleettest"
+	"github.com/goptics/vartop/internal/hub"
 )
 
 // newTestCollector starts a collector polling the endpoints every second
@@ -540,5 +541,165 @@ func TestPanicGroupReraises(t *testing.T) {
 	calm.Go(func() {})
 	if v := raised(calm.Wait); v != nil {
 		t.Errorf("Wait with no panic raised %v", v)
+	}
+}
+
+// TestPollHubServer: a hub server's instances, reached through the hub,
+// poll as direct units through the poller, one per instance and never a
+// balancer, even when each names itself otherwise; an action reaches each
+// once, on the first try; one that disconnects leaves the next poll.
+func TestPollHubServer(t *testing.T) {
+	const tok = "hub-token-0123456789abcdef"
+	srv := &config.Server{Name: "h", Hub: true, Token: tok, Interval: 1}
+	r := hub.NewRouter(hub.Options{})
+	r.Sync(&config.Config{Servers: map[string]*config.Server{"h": srv}})
+	ts := httptest.NewServer(r)
+	t.Cleanup(func() {
+		r.Close()
+		ts.Close()
+	})
+	// Both fakes answer as "liar": the hub names each by its stream.
+	f1, v1 := fleettest.NewVarmq(t, "liar", map[string]*fleettest.Worker{"emails": {Status: "Running", Concurrency: 2}})
+	f2, v2 := fleettest.NewVarmq(t, "liar", map[string]*fleettest.Worker{"emails": {Status: "Running", Concurrency: 1}})
+	fleettest.DialHub(t, ts.URL, tok, "pod-1", fleettest.HubInstanceOptions{Handler: v1.Config.Handler})
+	i2, _ := fleettest.DialHub(t, ts.URL, tok, "pod-2", fleettest.HubInstanceOptions{Handler: v2.Config.Handler})
+
+	pool, err := r.BuildPool(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	tr := newTracker(srv.PollInterval())
+	var snap *Snapshot
+	for range 3 { // a balancer would show from the second tick on
+		snap = pollOnce(context.Background(), pool, tr)
+	}
+	if len(snap.Pods) != 2 || snap.Behind != nil || snap.Err != "" {
+		t.Fatalf("snapshot = %d units, behind %v, err %q; want 2 direct units", len(snap.Pods), snap.Behind, snap.Err)
+	}
+	for _, p := range snap.Pods {
+		if p.Balanced || p.Err != "" || p.Key != hub.Endpoint(p.Instance) || p.Workers["emails"] == nil {
+			t.Errorf("unit %+v: want a direct unit of its instance with emails", p)
+		}
+	}
+
+	sc, err := ScopeOf(ClientsFor(snap, "", r.Transport(tok)), snap, "", instanceNoun)
+	if err != nil || sc.ViaBalancer() || len(sc.Direct) != 2 {
+		t.Fatalf("scope = %d direct, via balancer %v, %v", len(sc.Direct), sc.ViaBalancer(), err)
+	}
+	for _, res := range Act(context.Background(), sc, UnitsOf(snap), instanceNoun, []string{"emails"}, ActionSender("pause"))[0] {
+		if res.Outcome != "ok" {
+			t.Errorf("pause on %s: %s %s", res.Pod, res.Outcome, res.Msg)
+		}
+	}
+	for i, f := range []*fleettest.Varmq{f1, f2} {
+		if n := countCalls(f.Calls(), "PATCH /workers/emails/actions/pause"); n != 1 {
+			t.Errorf("instance %d got %d pauses, want 1", i+1, n)
+		}
+	}
+
+	i2.Close()
+	fleettest.WaitUntil(t, 5*time.Second, "pod-2 gone from discovery", func() bool { return len(pool.Clients()) == 1 })
+	snap = pollOnce(context.Background(), pool, tr)
+	if len(snap.Pods) != 1 || snap.Pods[0].Instance != "pod-1" {
+		t.Errorf("after pod-2 left: %+v, want pod-1 alone", snap.Pods)
+	}
+}
+
+// peakServer serves h, counting the requests whose path starts with
+// prefix in flight at once, each held for hold; peak is the most seen.
+func peakServer(t *testing.T, h http.Handler, prefix string, hold time.Duration) (srv *httptest.Server, peak func() int32) {
+	var now, most atomic.Int32
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			n := now.Add(1)
+			defer now.Add(-1)
+			for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+			}
+			time.Sleep(hold)
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, most.Load
+}
+
+// peakRT serves a hub unit's requests on h (its instance path stripped),
+// counting worker fetches in flight at once, each held for hold.
+type peakRT struct {
+	h         http.Handler
+	hold      time.Duration
+	now, most atomic.Int32
+}
+
+func (p *peakRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	_, path, _ := strings.Cut(strings.TrimPrefix(req.URL.Path, "/"), "/")
+	if strings.HasPrefix(path, "workers/") {
+		n := p.now.Add(1)
+		defer p.now.Add(-1)
+		for m := p.most.Load(); n > m && !p.most.CompareAndSwap(m, n); m = p.most.Load() {
+		}
+		time.Sleep(p.hold)
+	}
+	r := req.Clone(req.Context())
+	r.URL.Path, r.URL.RawPath = "/"+path, ""
+	rec := httptest.NewRecorder()
+	p.h.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
+// TestPollDirectBoundsFetches: a hub unit's worker fetches run unitFetches
+// at a time (the instance's in-flight cap), however many workers it lists.
+func TestPollDirectBoundsFetches(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range 5 * unitFetches {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	_, v := fleettest.NewVarmq(t, "a", workers)
+	rt := &peakRT{h: v.Config.Handler, hold: 20 * time.Millisecond}
+	pod, _ := pollDirect(context.Background(), api.NewClientVia(hub.Endpoint("a"), "", rt))
+	if pod.Err != "" || len(pod.Workers) != len(workers) {
+		t.Fatalf("pod: err %q, %d workers, want %d", pod.Err, len(pod.Workers), len(workers))
+	}
+	if p := rt.most.Load(); p > unitFetches || p < 2 {
+		t.Errorf("worker fetches in flight at once: %d, want 2 to %d", p, unitFetches)
+	}
+}
+
+// TestPollDirectPullFetchesInTick: a pull unit fetches more workers at
+// once than a hub unit: 100 workers of 70ms each fit a 1s interval's tick
+// (0.8s); 8 at a time took 0.9s.
+func TestPollDirectPullFetchesInTick(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range 100 {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	_, v := fleettest.NewVarmq(t, "a", workers)
+	srv, peak := peakServer(t, v.Config.Handler, "/workers/", 70*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	pod, _ := pollDirect(ctx, fleettest.StaticPool(t, srv.URL).Clients()[0])
+	if pod.Err != "" || len(pod.Workers) != len(workers) {
+		t.Fatalf("pod: err %q, %d workers, want %d", pod.Err, len(pod.Workers), len(workers))
+	}
+	if p := peak(); p <= unitFetches {
+		t.Errorf("worker fetches in flight at once: %d, want over %d", p, unitFetches)
+	}
+}
+
+// TestPollDirectWorkerCap: a unit that lists over maxUnitWorkers workers
+// is errored, and none of them is fetched.
+func TestPollDirectWorkerCap(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	for i := range maxUnitWorkers + 1 {
+		workers[fmt.Sprintf("w%d", i)] = &fleettest.Worker{Status: "Running"}
+	}
+	v, srv := fleettest.NewVarmq(t, "a", workers)
+	pod, answered := pollDirect(context.Background(), fleettest.StaticPool(t, srv.URL).Clients()[0])
+	if !strings.Contains(pod.Err, "too many workers") || len(pod.Workers) != 0 || !slices.Equal(answered, []string{"a"}) {
+		t.Errorf("pod: err %q, %d workers, answered %v; want too many workers, none, [a]", pod.Err, len(pod.Workers), answered)
+	}
+	if calls := v.Calls(); len(calls) != 1 {
+		t.Errorf("requests %d, want the list only", len(calls))
 	}
 }

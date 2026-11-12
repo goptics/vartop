@@ -34,10 +34,15 @@ var serverListCmd = &cobra.Command{
 				prefix = "* "
 			}
 
-			if server.DNS != nil {
+			switch {
+			case server.Hub:
+				// Hub servers' instances dial vartop web: nothing to probe here.
+				fmt.Printf("%s%s [hub]\n", prefix, name)
+				fmt.Printf("    Instances connect to vartop web --hub-listen\n")
+			case server.DNS != nil:
 				// DNS servers resolve to their instances at connect time.
 				fmt.Printf("%s%s [dns %s:%d]\n", prefix, name, server.DNS.Host, server.DNS.Port)
-			} else {
+			default:
 				// Active if any configured endpoint is healthy.
 				status := "Inactive"
 				for _, ep := range server.Endpoints {
@@ -72,7 +77,7 @@ var serverAddCmd = &cobra.Command{
 			}
 		}
 
-		server, err := config.PromptServer()
+		server, generated, err := config.PromptServer()
 		if err != nil {
 			return err
 		}
@@ -82,6 +87,9 @@ var serverAddCmd = &cobra.Command{
 		}
 
 		cfg.Servers[server.Name] = server
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
 
 		// Use as default if it's the first one
 		if len(cfg.Servers) == 1 {
@@ -93,6 +101,8 @@ var serverAddCmd = &cobra.Command{
 		}
 
 		switch {
+		case server.Hub:
+			fmt.Printf("Added hub server '%s'. %s", server.Name, config.HubAdded(server, generated))
 		case server.DNS != nil:
 			fmt.Printf("Added dns server '%s' (%s:%d)\n", server.Name, server.DNS.Host, server.DNS.Port)
 		case len(server.Endpoints) > 1:
@@ -226,7 +236,7 @@ var serverSetCmd = &cobra.Command{
 			return fmt.Errorf("unknown key '%s'. valid keys: endpoint, token, interval, history", key)
 		}
 
-		if err := server.Validate(); err != nil {
+		if err := cfg.Validate(); err != nil {
 			return err
 		}
 
@@ -234,6 +244,9 @@ var serverSetCmd = &cobra.Command{
 			return err
 		}
 
+		if key == "token" {
+			value = "***" // a secret: not echoed
+		}
 		fmt.Printf("Set '%s' to '%s' for server '%s'\n", key, value, name)
 		return nil
 	},

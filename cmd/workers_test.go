@@ -105,3 +105,23 @@ func TestActionReportsPartialFailure(t *testing.T) {
 		t.Fatalf("a=%v b=%v, want both hit", a.paths, b.paths)
 	}
 }
+
+// TestActionOnHubServerPointsToDashboard: action and concurrency run in
+// their own process, which cannot reach a hub server's instances: they
+// say so and point to the dashboard.
+func TestActionOnHubServerPointsToDashboard(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultServer: "h", Servers: map[string]*config.Server{
+		"h": {Name: "h", Hub: true, Token: "hub-token-0123456789abcdef"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runCmd(t, []string{"emails", "pause"}, "")
+	if err == nil || !strings.Contains(err.Error(), "hub server") || !strings.Contains(err.Error(), "dashboard") {
+		t.Errorf("action on a hub server = %v, want an error pointing to the dashboard", err)
+	}
+	err = concurrencyCmd.RunE(concurrencyCmd, []string{"emails", "4"})
+	if err == nil || !strings.Contains(err.Error(), "dashboard") {
+		t.Errorf("concurrency on a hub server = %v, want an error pointing to the dashboard", err)
+	}
+}

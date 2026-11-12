@@ -283,7 +283,7 @@ func (h *handler) liveClients(p *Page, snaps []*fleet.Snapshot, what string) (cl
 		p.Banner = liveConfigChangedMsg(p.Server, what)
 		return nil, nil, false
 	}
-	return fleet.ClientsFor(latest, srv.Token), fleet.UnitLabel(latest), true
+	return h.clientsFor(latest, srv), fleet.UnitLabel(latest), true
 }
 
 func (h *handler) queues(w http.ResponseWriter, r *http.Request) {
@@ -422,7 +422,7 @@ func (h *handler) queueAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	clients := fleet.ClientsFor(t.latest, t.srv.Token)
+	clients := h.clientsFor(t.latest, t.srv)
 	label := fleet.UnitLabel(t.latest)
 	g, found := fleet.GroupQueues(fleet.FetchQueues(r.Context(), clients, label)).Group(id)
 	switch {

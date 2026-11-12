@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -101,18 +103,28 @@ var pooled = func() *http.Transport {
 
 // NewClient establishes a new varmq API client for the given endpoint.
 func NewClient(endpoint, token string) *Client {
-	fresh := http.DefaultTransport.(*http.Transport).Clone()
-	fresh.DisableKeepAlives = true
+	return NewClientVia(endpoint, token, nil)
+}
+
+// NewClientVia is NewClient over rt: its pooled and its fresh requests
+// both go through rt (a hub's, say). Nil rt: the default transports.
+func NewClientVia(endpoint, token string, rt http.RoundTripper) *Client {
+	pooledRT, freshRT := rt, rt
+	if rt == nil {
+		fresh := http.DefaultTransport.(*http.Transport).Clone()
+		fresh.DisableKeepAlives = true
+		pooledRT, freshRT = pooled, fresh
+	}
 	return &Client{
 		endpoint: endpoint,
 		token:    token,
 		httpClient: &http.Client{
 			Timeout:   10 * time.Second,
-			Transport: pooled,
+			Transport: pooledRT,
 		},
 		freshClient: &http.Client{
 			Timeout:   10 * time.Second,
-			Transport: fresh,
+			Transport: freshRT,
 		},
 	}
 }
@@ -136,6 +148,13 @@ func (c *Client) send(hc *http.Client, req *http.Request) (*http.Response, error
 	resp, err := hc.Do(req)
 	if err == nil {
 		c.recordInstance(resp.Header.Get(InstanceHeader))
+	}
+	// A hub endpoint's URL is internal: its errors leave it out (the
+	// callers name the unit by ShortOrigin).
+	if ue := (*url.Error)(nil); errors.As(err, &ue) {
+		if _, hub := config.HubInstance(c.endpoint); hub {
+			err = ue.Err
+		}
 	}
 	return resp, err
 }

@@ -1,8 +1,16 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/goptics/vartop/internal/config"
 )
 
 // fakeSource is a mutable discovery.Source stub for pool tests.
@@ -117,5 +125,54 @@ func TestPoolCloseDelegates(t *testing.T) {
 	defer src.mu.Unlock()
 	if !src.closed {
 		t.Error("source.Close was not called")
+	}
+}
+
+// countingRT answers every request 200 "[]" and counts them.
+type countingRT struct {
+	mu   sync.Mutex
+	urls []string
+}
+
+func (c *countingRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	c.urls = append(c.urls, req.Method+" "+req.URL.String())
+	c.mu.Unlock()
+	return &http.Response{StatusCode: 200, Header: http.Header{InstanceHeader: {"i"}},
+		Body: io.NopCloser(strings.NewReader("[]")), Request: req}, nil
+}
+
+// TestPoolViaTransport: a pool's clients, pooled and fresh requests both,
+// go through the transport it was given, never the network.
+func TestPoolViaTransport(t *testing.T) {
+	rt := &countingRT{}
+	src := &fakeSource{}
+	src.set([]string{"hub://hub.invalid/i"})
+	clients := NewPoolVia(src, "", rt).Clients()
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	c := clients[0]
+	if _, err := c.ListWorkersCtx(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.ListWorkersFresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ActionFresh(context.Background(), "w", "pause"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GET hub://hub.invalid/i/workers", "GET hub://hub.invalid/i/workers", "PATCH hub://hub.invalid/i/workers/w/actions/pause"}
+	if !slices.Equal(rt.urls, want) {
+		t.Errorf("sent %v, want %v", rt.urls, want)
+	}
+}
+
+// TestPoolForHubServer: PoolFor refuses a hub server: only vartop web's
+// hub reaches its instances.
+func TestPoolForHubServer(t *testing.T) {
+	_, err := PoolFor(&config.Server{Name: "h", Hub: true, Token: "0123456789abcdef"})
+	if !errors.Is(err, ErrHubServer) || !strings.Contains(err.Error(), `"h"`) {
+		t.Errorf("PoolFor(hub) = %v, want ErrHubServer naming the server", err)
 	}
 }

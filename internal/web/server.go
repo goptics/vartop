@@ -19,8 +19,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
 	"github.com/goptics/vartop/internal/fleet"
+	"github.com/goptics/vartop/internal/hub"
 	"github.com/goptics/vartop/internal/store"
 )
 
@@ -84,6 +86,24 @@ type Source struct {
 	// environment: its config file (R31). Nil: every lease
 	// is.
 	SameEnv func(store.Lease) bool
+	// Hubs reaches the instances of hub servers. Nil: vartop web runs
+	// without --hub-listen, and requests to them fail (hub.ErrHubOff).
+	Hubs *hub.Router
+}
+
+// clientsFor is fleet.ClientsFor of srv's units in latest, over srv's
+// hub for a hub server.
+func (h *handler) clientsFor(latest *fleet.Snapshot, srv *config.Server) []*api.Client {
+	return clientsFor(h.src.Hubs, latest, srv)
+}
+
+func clientsFor(hubs *hub.Router, latest *fleet.Snapshot, srv *config.Server) []*api.Client {
+	if srv.Hub {
+		// The hub token picks the Hub; it is no API token, so the
+		// clients carry none.
+		return fleet.ClientsFor(latest, "", hubs.Transport(srv.Token))
+	}
+	return fleet.ClientsFor(latest, srv.Token, nil)
 }
 
 // handler serves the pages of every configured server from the store.

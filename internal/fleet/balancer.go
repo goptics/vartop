@@ -305,10 +305,21 @@ func (r *reacher) settled() bool {
 	return true
 }
 
-// listFresh is (*api.Client).ListWorkersFresh as a job's send.
+// listFresh is (*api.Client).ListWorkersFresh as a job's send. A list of
+// over maxUnitWorkers is an errTooMany: each listed worker costs a fetch.
 func listFresh(ctx context.Context, c *api.Client) ([]api.WorkerSummary, string, error) {
-	return c.ListWorkersFresh(ctx)
+	list, instance, err := c.ListWorkersFresh(ctx)
+	if err == nil && len(list) > maxUnitWorkers {
+		return nil, instance, fmt.Errorf("%w: %d listed, at most %d", errTooMany, len(list), maxUnitWorkers)
+	}
+	return list, instance, err
 }
+
+// errTooMany: a list of over maxUnitWorkers. Definitive for a list job:
+// listing again would download it again.
+var errTooMany = errors.New("too many workers")
+
+func isTooMany(err error) bool { return errors.Is(err, errTooMany) }
 
 // isNotFound reports whether err is a 404 reply.
 func isNotFound(err error) bool {
@@ -333,7 +344,7 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[s
 	known := t.known(endpoints, skip, now)
 	r := newReacher(eps, attemptCap(max(len(known), behind, len(eps))))
 
-	lists := addJob(r, listFresh, nil)
+	lists := addJob(r, listFresh, isTooMany)
 	lists.want(slices.Collect(maps.Keys(known))...)
 	fetches := make(map[string]*job[*api.WorkerDetails]) // by worker name
 	replied := false                                     // some list reply named an instance
@@ -366,7 +377,9 @@ func pollBalanced(ctx context.Context, eps []*api.Client, t *tracker, skip map[s
 	var units []PodSnapshot
 	for id := range lists.wants {
 		unit := PodSnapshot{Key: "#" + id, Instance: id, Balanced: true}
-		if list, ok := lists.got[id]; ok {
+		if list, ok := lists.got[id]; ok && list.Err != nil {
+			unit.Via, unit.Err = list.Via, list.Err.Error()
+		} else if ok {
 			unit.Via = list.Via
 			unit.Workers = make(map[string]*Sample, len(list.V))
 			for _, w := range list.V {
@@ -424,6 +437,13 @@ type LabelNumber struct {
 // last owner. Seen is up to a minute early, so a number is freed only once
 // Seen is over freeAfter and a minute old.
 const freeAfter = 24 * time.Hour
+
+// maxNumbers caps the numbers a tracker keeps (and the store keeps of
+// it): past it the longest unshown are freed before freeAfter, so a
+// churn of instance IDs cannot grow the label state without bound.
+// ponytail: 10000, ten hub servers' worth of DefaultMaxInstances; raise
+// it here if one server ever shows more units at once.
+const maxNumbers = 10000
 
 // tracker remembers, across a collector's ticks, which instances answered
 // through which endpoint and when, and the numbers units were given. It
@@ -610,13 +630,14 @@ func (t *tracker) label(pods []PodSnapshot, now time.Time) {
 	t.free(now)
 
 	number := make(map[string]int, len(pods)) // unit key → its number
+	lowestFree := t.lowestFree()
 	for i, p := range pods {
 		if _, ok := t.numbers[f[i]]; !ok {
 			if t.handsOn(p.Key) {
 				t.numbers[f[i]] = t.numbers[p.Key] // its first instance: the key's number moves to it
 				delete(t.numbers, p.Key)
 			} else {
-				t.numbers[f[i]] = LabelNumber{N: t.lowestFree(), Seen: seen}
+				t.numbers[f[i]] = LabelNumber{N: lowestFree(), Seen: seen}
 			}
 			t.changed = true
 		}
@@ -650,12 +671,26 @@ func (t *tracker) see(f string, at time.Time) {
 }
 
 // free forgets the numbers no unit has shown for over freeAfter (and a
-// minute: see freeAfter) at now, and that unit keys followed them.
+// minute: see freeAfter) at now, then the longest unshown past
+// maxNumbers, but never one shown in now's minute; and that unit keys
+// followed them.
 func (t *tracker) free(now time.Time) {
 	for f, n := range t.numbers {
 		if now.Sub(n.Seen) > freeAfter+time.Minute {
 			delete(t.numbers, f)
 			t.changed = true
+		}
+	}
+	if over := len(t.numbers) - maxNumbers; over > 0 {
+		shown := now.Truncate(time.Minute)
+		old := slices.SortedFunc(maps.Keys(t.numbers), func(a, b string) int {
+			return cmp.Or(t.numbers[a].Seen.Compare(t.numbers[b].Seen), strings.Compare(a, b))
+		})
+		for _, f := range old[:over] {
+			if t.numbers[f].Seen.Before(shown) {
+				delete(t.numbers, f)
+				t.changed = true
+			}
 		}
 	}
 	for key, f := range t.followed {
@@ -666,15 +701,20 @@ func (t *tracker) free(now time.Time) {
 	}
 }
 
-// lowestFree is the lowest number no unit holds.
-func (t *tracker) lowestFree() int {
+// lowestFree returns a func giving the lowest number no unit holds, and
+// holding it: the numbers held now are gathered once, so one label call
+// is linear however many numbers are kept.
+func (t *tracker) lowestFree() func() int {
 	held := make(map[int]bool, len(t.numbers))
 	for _, n := range t.numbers {
 		held[n.N] = true
 	}
 	n := 1
-	for held[n] {
-		n++
+	return func() int {
+		for held[n] {
+			n++
+		}
+		held[n] = true
+		return n
 	}
-	return n
 }

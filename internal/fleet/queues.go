@@ -50,8 +50,9 @@ func (g QueueGroup) PauseState() (all, none bool) {
 	return all, none
 }
 
-// QueueUnit is one unit that reports a queue: its label and endpoint, and
-// whether a queue action is sent to it (see QueueAct).
+// QueueUnit is one unit that reports a queue: its label and endpoint (for
+// display: a hub unit's is "<instance> via hub"), and whether a queue
+// action is sent to it (see QueueAct).
 type QueueUnit struct {
 	Label, Endpoint string
 	Pausable        bool
@@ -61,7 +62,11 @@ type QueueUnit struct {
 func (g QueueGroup) Units() []QueueUnit {
 	out := make([]QueueUnit, len(g.Clients))
 	for i, c := range g.Clients {
-		out[i] = QueueUnit{Label: g.labels[i], Endpoint: c.PrimaryEndpoint(), Pausable: g.pausable[i]}
+		ep := c.PrimaryEndpoint()
+		if id, ok := config.HubInstance(ep); ok {
+			ep = id + " via hub"
+		}
+		out[i] = QueueUnit{Label: g.labels[i], Endpoint: ep, Pausable: g.pausable[i]}
 	}
 	return out
 }

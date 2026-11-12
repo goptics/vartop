@@ -2,7 +2,11 @@ package fleet
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -107,7 +111,7 @@ func TestClientsFor(t *testing.T) {
 		Behind: map[string]int{"http://lb1": 2, "http://lb2": 0, "http://lb3": 1},
 	}
 
-	clients := ClientsFor(latest, "tok")
+	clients := ClientsFor(latest, "tok", nil)
 	var got []string
 	for _, c := range clients {
 		got = append(got, c.PrimaryEndpoint())
@@ -122,7 +126,7 @@ func TestClientsFor(t *testing.T) {
 	if a := auth.Load(); a != "Bearer tok" {
 		t.Errorf("Authorization = %v, want the token", a)
 	}
-	if c := ClientsFor(nil, "tok"); len(c) != 0 {
+	if c := ClientsFor(nil, "tok", nil); len(c) != 0 {
 		t.Errorf("ClientsFor(nil) = %d clients, want none", len(c))
 	}
 }
@@ -138,7 +142,7 @@ func TestScopeOfByLabel(t *testing.T) {
 		},
 		Behind: map[string]int{"http://lb": 1},
 	}
-	clients := ClientsFor(latest, "")
+	clients := ClientsFor(latest, "", nil)
 
 	sc, err := ScopeOf(clients, latest, "instance-1", instanceNoun)
 	if err != nil || len(sc.Direct) != 1 || sc.Direct[0].PrimaryEndpoint() != "http://a" || sc.ViaBalancer() {
@@ -212,11 +216,48 @@ func TestSourceOf(t *testing.T) {
 		"endpoint":  func(s *config.Server) { s.Endpoints = []string{"http://b:8080/varmq"} },
 		"endpoints": func(s *config.Server) { s.Endpoints = append(s.Endpoints, "http://b:8080/varmq") },
 		"dns":       func(s *config.Server) { s.Endpoints, s.DNS = nil, &config.DNSRef{Host: "mux.internal", Port: 8080} },
+		"hub":       func(s *config.Server) { s.Endpoints, s.Hub = nil, true },
 	} {
 		s := base()
 		edit(s)
 		if got := SourceOf(s); got == src {
 			t.Errorf("another %s: SourceOf = %q, want it to change", name, got)
 		}
+	}
+}
+
+// TestSourceOfPullServerUnchanged: a pull server's source is the hash it
+// had before hub servers: no config-changed banner after an upgrade.
+func TestSourceOfPullServerUnchanged(t *testing.T) {
+	srv := &config.Server{Name: "prod", Endpoints: []string{"http://a:8080/varmq"}}
+	b, _ := json.Marshal(struct {
+		Endpoints []string
+		DNS       *config.DNSRef
+	}{srv.Endpoints, srv.DNS})
+	sum := sha256.Sum256(b)
+	if got, want := SourceOf(srv), hex.EncodeToString(sum[:8]); got != want {
+		t.Errorf("SourceOf = %s, want the pre-hub hash %s", got, want)
+	}
+}
+
+// TestActBoundsNames: Act sends to unitFetches names at a time, however
+// many it is given.
+func TestActBoundsNames(t *testing.T) {
+	workers := make(map[string]*fleettest.Worker)
+	var names []string
+	for i := range 5 * unitFetches {
+		names = append(names, fmt.Sprintf("w%d", i))
+		workers[names[i]] = &fleettest.Worker{Status: "Running"}
+	}
+	_, v := fleettest.NewVarmq(t, "a", workers)
+	srv, peak := peakServer(t, v.Config.Handler, "/workers/", 20*time.Millisecond)
+	sc := ActScope{Direct: fleettest.StaticPool(t, srv.URL).Clients()}
+	for i, res := range Act(context.Background(), sc, nil, instanceNoun, names, ActionSender("pause")) {
+		if len(res) != 1 || res[0].Outcome != "ok" {
+			t.Errorf("%s: %+v", names[i], res)
+		}
+	}
+	if p := peak(); p > unitFetches || p < 2 {
+		t.Errorf("actions in flight at once: %d, want 2 to %d", p, unitFetches)
 	}
 }

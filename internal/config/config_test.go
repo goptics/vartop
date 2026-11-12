@@ -51,6 +51,35 @@ func TestValidate(t *testing.T) {
 			server:  &Server{Name: "bad"},
 			wantErr: true,
 		},
+		{
+			name:   "hub",
+			server: &Server{Name: "h", Hub: true, Token: "0123456789abcdef"},
+		},
+		{
+			name:    "hub without token",
+			server:  &Server{Name: "h", Hub: true},
+			wantErr: true,
+		},
+		{
+			name:    "hub token of 15 characters",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789abcde"},
+			wantErr: true,
+		},
+		{
+			name:    "hub token with a space",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789 abcdef"},
+			wantErr: true,
+		},
+		{
+			name:    "hub and endpoints",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789abcdef", Endpoints: []string{"http://a:1/varmq"}},
+			wantErr: true,
+		},
+		{
+			name:    "hub and dns",
+			server:  &Server{Name: "h", Hub: true, Token: "0123456789abcdef", DNS: &DNSRef{Host: "varmq", Port: 8080}},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -327,6 +356,8 @@ func TestShortOrigin(t *testing.T) {
 		"http://[fd00::1]:8080/varmq": "fd00::1",
 		"http://pod-0:8080/varmq":     "pod-0",
 		"localhost:8080":              "localhost:8080", // no scheme: no host to parse, shown as-is
+		"hub://hub.invalid/orders-7":  "orders-7",       // a hub endpoint: its instance
+		"hub://hub.invalid/a%2Fb%20c": "a/b c",
 		"":                            "",
 	} {
 		if got := ShortOrigin(in); got != want {
@@ -410,5 +441,48 @@ func TestLoadRejectsKubernetes(t *testing.T) {
 	write(`{"servers":{"s":{"name":"s","endpoints":["http://a:1/varmq"],"kubernetes":null}}}`)
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load() with null kubernetes: %v", err)
+	}
+}
+
+// TestHubTokensDistinct: two hub servers may not share a token (it picks
+// the server an instance joins); Load refuses such a config.
+func TestHubTokensDistinct(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const tok = "0123456789abcdef"
+	cfg := &Config{Servers: map[string]*Server{
+		"a": {Name: "a", Hub: true, Token: tok},
+		"b": {Name: "b", Hub: true, Token: tok},
+		"c": {Name: "c", Endpoints: []string{"http://c/varmq"}, Token: tok}, // a pull server's token is no hub token
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "distinct tokens") {
+		t.Fatalf("Validate() = %v, want a distinct-tokens error", err)
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "distinct tokens") {
+		t.Fatalf("Load() = %v, want a distinct-tokens error", err)
+	}
+	cfg.Servers["b"].Token = tok + "x"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with distinct tokens: %v", err)
+	}
+}
+
+func TestNewHubToken(t *testing.T) {
+	a, b := NewHubToken(), NewHubToken()
+	if a == b || ValidHubToken(a) != nil || len(a) != 26 {
+		t.Errorf("NewHubToken = %q, %q: want two distinct valid 26-character tokens", a, b)
+	}
+}
+
+// TestHubAdded: the token is printed only when vartop made it.
+func TestHubAdded(t *testing.T) {
+	srv := &Server{Name: "h", Hub: true, Token: "typed-token-0123456789"}
+	if got := HubAdded(srv, false); strings.Contains(got, srv.Token) || !strings.Contains(got, "--hub-listen") {
+		t.Errorf("HubAdded of a typed token = %q: want no token, and where instances connect", got)
+	}
+	if got := HubAdded(srv, true); !strings.Contains(got, srv.Token) {
+		t.Errorf("HubAdded of a generated token = %q: want the token", got)
 	}
 }

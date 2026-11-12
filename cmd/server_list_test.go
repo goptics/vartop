@@ -291,3 +291,42 @@ func TestServerSetEndpointOnDNSServerRejected(t *testing.T) {
 		t.Fatalf("dns server was modified despite validation failure: %+v", cfg.Servers["d"])
 	}
 }
+
+// TestServerListShowsHub: a hub server is listed as such, its token
+// masked, with no health probe.
+func TestServerListShowsHub(t *testing.T) {
+	const tok = "hub-token-0123456789abcdef"
+	saveServersConfig(t, "h", &config.Server{Name: "h", Hub: true, Token: tok, Interval: 5})
+	out, err := captureStdout(t, func() error { return serverListCmd.RunE(serverListCmd, nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"* h [hub]", "--hub-listen", "Token:    ***"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, tok) {
+		t.Errorf("token leaked:\n%s", out)
+	}
+}
+
+// TestServerSetHubToken: set token validates a hub token and does not
+// echo it.
+func TestServerSetHubToken(t *testing.T) {
+	saveServersConfig(t, "h", &config.Server{Name: "h", Hub: true, Token: "hub-token-0123456789abcdef"})
+	if _, err := captureStdout(t, func() error { return serverSetCmd.RunE(serverSetCmd, []string{"h", "token", "short"}) }); err == nil {
+		t.Error("set a 5-character hub token, want an error")
+	}
+	const tok = "new-hub-token-0123456789"
+	out, err := captureStdout(t, func() error { return serverSetCmd.RunE(serverSetCmd, []string{"h", "token", tok}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, tok) {
+		t.Errorf("token echoed:\n%s", out)
+	}
+	if cfg, err := config.Load(); err != nil || cfg.Servers["h"].Token != tok {
+		t.Errorf("Load = %v, %v; want the new token saved", cfg, err)
+	}
+}
