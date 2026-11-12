@@ -46,6 +46,7 @@
 <div class="detail-layout">
 {{template "live" .}}
 <aside class="detail-side">
+<div id="ctl" data-key="{{if not .Detail}}none{{else if .OneBalanced}}lb{{else if .ScopeBalanced}}on-lb{{else}}on{{end}}">
 {{with .Detail}}{{$name := pathEscape .Name}}
 {{if $.OneBalanced}}<p class="note">{{oneBalanced}}</p>
 {{else}}<section class="controls" aria-label="Controls">
@@ -68,6 +69,7 @@
     {{end}}<button type="button" class="danger act-stop" hx-post="/workers/{{$name}}/actions/stop">Stop…</button>
   </form>
 </section>{{end}}{{end}}
+</div>
 <div id="results" aria-live="polite"></div>
 </aside>
 </div>

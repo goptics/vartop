@@ -1346,3 +1346,37 @@ func TestWorkflowsEmptyWords(t *testing.T) {
 		}
 	}
 }
+
+// A live workflow task job ("wf:<wf>:<task>") has no Cancel: varmq runs a
+// cancelled task on shared storage anyway; the page links its workflow.
+// A running job's "Running for" is its run, not its wait too.
+func TestJobPageTaskAndRunningFor(t *testing.T) {
+	g := fleet.QueueGroup{QueueSummary: api.QueueSummary{ID: "q"}}
+	now := viewT0.UnixMilli()
+	rec := contract.JobRecord{ID: "wf:etl-1:load", State: contract.JobProcessing, EnqueuedAt: now - 300_000, StartedAt: now - 20_000}
+	v := jobView(g, parseQueueID("q"), rec.ID, "dev", fleet.JobRead{Found: true, Job: rec}, viewT0)
+	if v.Ctl.Cancel || v.Ctl.Workflow != "/workflows/etl-1?server=dev" {
+		t.Errorf("task ctl = %+v, want no Cancel and a link to etl-1", v.Ctl)
+	}
+	body := run(t, "job", "layout", Page{Server: "dev", Job: v})
+	if strings.Contains(body, "Cancel job") || !strings.Contains(body, `<a href="/workflows/etl-1?server=dev">cancel its workflow</a>`) {
+		t.Errorf("task page offers Cancel or lacks the workflow link:\n%s", body)
+	}
+	if !strings.Contains(body, `<dt>Running for</dt><dd><span class="dur" data-ms="20000">20s</span>`) {
+		t.Errorf("Running for is not the run span:\n%s", body)
+	}
+	for id, want := range map[string]string{"wf:a:b": "a", "wf:a:b:undo": "a", "ord-1": "", "wf:": ""} {
+		if got := taskWorkflow(id); got != want {
+			t.Errorf("taskWorkflow(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
+
+// Storage that lists cancelled jobs under failed (redisq) shows each row
+// in its own state, with a chip, not as failed.
+func TestQueueRowOwnState(t *testing.T) {
+	r := jobRow(contract.JobRecord{ID: "c1", State: contract.JobCancelled}, 1)
+	if r.State != "cancelled" {
+		t.Fatalf("row state = %q", r.State)
+	}
+}

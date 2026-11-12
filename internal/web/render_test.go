@@ -593,7 +593,7 @@ func TestEmptyPagesRender(t *testing.T) {
 		if !strings.Contains(body, `id="banner"`) || !strings.Contains(body, "instance-9 is not an instance of dev") {
 			t.Error("banner missing")
 		}
-		if !strings.Contains(body, `hx-select-oob="#banner,#status"`) {
+		if !strings.Contains(body, `hx-select-oob="#banner,#status,#ctl"`) {
 			t.Error("poller cannot deliver the banner")
 		}
 		if !strings.Contains(body, `id="live"`) {

@@ -5,14 +5,14 @@
   <form class="qact" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
     {{template "server_field" .}}
     <button type="button" class="danger" hx-post="{{.Post}}">Cancel job</button>
-  </form>{{end}}
+  </form>{{else if .Workflow}}<p class="sub">A workflow task: <a href="{{.Workflow}}">cancel its workflow</a> to stop it.</p>{{end}}
 </div>{{end}}
 {{define "content"}}{{with .Job}}<nav class="crumbs" aria-label="Breadcrumb"><a href="{{queuesURL $.Server}}">Queues</a><span aria-hidden="true">/</span><a class="ql" href="{{.QueueURL}}">{{template "qname" .Queue}}</a><span aria-hidden="true">/</span><span aria-current="page" class="mono">{{.ID}}</span></nav>
 <header class="qhead jobhead">
   <div class="wftitle"><h1 class="qid">{{.ID}}</h1>{{if .Found}}<span class="jstate state-{{.State}}"><span class="dot" aria-hidden="true"></span>{{.State}}</span>{{end}}</div>
   <p class="qfull">{{with .ID}}<button type="button" class="copy" data-copy="{{.}}" hidden>Copy ID</button>{{end}} <span>in queue <code class="mono">{{.Queue.ID}}</code></span></p>
   {{if .Found}}<dl class="facts">
-    <div><dt>{{if eq .State "pending"}}Waiting for{{else if eq .State "processing"}}Running for{{else}}Took{{end}}</dt><dd>{{template "dur" .Total}}</dd></div>
+    <div><dt>{{if eq .State "pending"}}Waiting for{{else if eq .State "processing"}}Running for{{else}}Took{{end}}</dt><dd>{{if eq .State "processing"}}{{template "dur" .Ran}}{{else}}{{template "dur" .Total}}{{end}}</dd></div>
     <div><dt>Attempts</dt><dd>{{.Row.Attempts}}</dd></div>
     <div><dt>Read from</dt><dd>{{.From}}</dd></div>
   </dl>

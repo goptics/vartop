@@ -197,6 +197,7 @@ type JobTab struct {
 // payload on one line, cut.
 type JobRow struct {
 	ID, LastError                      string
+	State                              string // its own state: redisq lists cancelled jobs under failed
 	URL                                string // its job page, "" for none (see jobURL)
 	When, WhenISO, WhenFull, Preview   string
 	Errors                             []ErrorRow // oldest first
@@ -447,7 +448,7 @@ func (h *handler) queueAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func jobRow(j contract.JobRecord, n int) JobRow {
-	row := JobRow{ID: j.ID, Attempts: j.Attempts, N: n}
+	row := JobRow{ID: j.ID, State: string(j.State), Attempts: j.Attempts, N: n}
 	for _, e := range j.Errors {
 		er := ErrorRow{Attempt: e.Attempt, Error: e.Error}
 		er.At, er.AtISO = msTime(e.At)

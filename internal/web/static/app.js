@@ -14,6 +14,45 @@
   });
   document.addEventListener("htmx:historyRestore", () => { seen = ""; });
 
+  // A poll's hx-select="#live" would filter an error reply to nothing, and
+  // a failed send has no reply: either way the page would go on showing old
+  // numbers as current. Say so in #errors instead; the next good poll
+  // clears it.
+  const errors = () => document.getElementById("errors");
+  const pollFailed = (msg) => {
+    const box = errors();
+    if (!box) return;
+    const p = document.createElement("p");
+    p.className = "banner stale";
+    p.textContent = msg;
+    box.replaceChildren(p);
+    box.dataset.poll = "1";
+  };
+  document.addEventListener("htmx:beforeSwap", (e) => {
+    const d = e.detail;
+    if (!polls(d.elt)) return;
+    if (d.isError) {
+      d.shouldSwap = false;
+      // DOMParser runs no scripts or handlers; only the text is kept.
+      const body = new DOMParser().parseFromString(d.xhr.responseText, "text/html").body;
+      const why = body.textContent.trim().replace(/\s+/g, " ");
+      pollFailed(`Refresh failed (HTTP ${d.xhr.status})${why ? ": " + why : ""}. The values shown may be old.`);
+    } else if (errors() && errors().dataset.poll) {
+      errors().replaceChildren();
+      delete errors().dataset.poll;
+    }
+  });
+  // #ctl (worker controls, dashboard bulk form) sits outside #live, so a
+  // poll brings it out of band; it is swapped only when what it shows
+  // changed (data-key), so a slider being dragged is not reset each poll.
+  document.addEventListener("htmx:oobBeforeSwap", (e) => {
+    const d = e.detail, next = d.fragment && d.fragment.firstElementChild;
+    if (d.target.id === "ctl" && next && next.dataset.key === d.target.dataset.key) d.shouldSwap = false;
+  });
+  document.addEventListener("htmx:sendError", (e) => {
+    if (polls(e.detail.elt)) pollFailed("Cannot reach vartop web. The values shown may be old.");
+  });
+
   // Confirm panels: Keep, or Escape inside one, closes it and sends
   // nothing; focus goes back to the control that asked for it (htmx
   // focuses Keep, autofocus, when the panel comes in).

@@ -65,6 +65,7 @@
 {{define "content"}}<header class="pagehead"><h1>Dashboard</h1><p class="sub">Workers on {{.Scope}}</p></header>
 {{template "live" .}}
 <div id="results" aria-live="polite"></div>
+<div id="ctl" data-key="{{if not .Dashboard}}none{{else if .OneBalanced}}lb{{else}}on{{end}}">
 {{if .Dashboard}}{{if .OneBalanced}}<p class="note">{{oneBalanced}}</p>
 {{else}}<form id="bulk" class="bulk" hx-target="#results" hx-swap="innerHTML" hx-sync="#page:replace">
   {{template "server_field" .}}
@@ -73,4 +74,5 @@
   <button type="button" hx-post="/bulk/pause">Pause selected</button>
   <button type="button" hx-post="/bulk/resume">Resume selected</button>
 </form>{{end}}{{end}}
+</div>
 {{end}}
