@@ -68,9 +68,12 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	}
 	wg.Wait()
 
-	failed := 0
+	failed, missing := 0, 0
 	for i, c := range clients {
 		origin := config.ShortOrigin(c.PrimaryEndpoint())
+		if isNotFound(errs[i]) {
+			missing++
+		}
 		if fleet.IsUnchanged(errs[i]) {
 			fmt.Fprintf(w, "  %s: no change (%s)\n", origin, unchangedMsg(errs[i]))
 			continue
@@ -92,16 +95,26 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	if failed > 0 {
 		return fmt.Errorf("%d of %d instance(s) failed", failed, len(clients))
 	}
+	// 404 everywhere: no instance knows the worker (a typo, say), not "no change".
+	if missing == len(clients) {
+		return fmt.Errorf("worker not found on any of %d instance(s)", len(clients))
+	}
 	return nil
+}
+
+func isNotFound(err error) bool {
+	var apiErr *api.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 // unchangedMsg words a varmq 409 or 404 like the web does: varmq's own
 // message, or that the instance lacks the worker.
 func unchangedMsg(err error) string {
-	var apiErr *api.APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+	if isNotFound(err) {
 		return "not on this instance"
 	}
+	var apiErr *api.APIError
+	errors.As(err, &apiErr)
 	return apiErr.Message
 }
 

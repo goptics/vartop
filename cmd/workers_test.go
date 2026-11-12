@@ -173,3 +173,15 @@ func TestConcurrencyEscapesAndTreatsConflictAsNoChange(t *testing.T) {
 		t.Fatalf("want no-change line:\n%s", out.String())
 	}
 }
+
+// TestActionUnknownWorkerFails: 404 on every instance is a missing worker, not
+// "no change".
+func TestActionUnknownWorkerFails(t *testing.T) {
+	var a, b recorder
+	saveStatic(t, a.serve(t, http.StatusNotFound).URL, b.serve(t, http.StatusNotFound).URL)
+
+	out, err := runCmd(t, []string{"emials", "pause"}, "")
+	if err == nil || !strings.Contains(err.Error(), "not found on any") {
+		t.Fatalf("err = %v, want not-found error\n%s", err, out)
+	}
+}
