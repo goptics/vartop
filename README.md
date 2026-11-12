@@ -177,7 +177,7 @@ vartop web --no-open                   # print the URL, don't launch a browser
 | `-s`, `--server` | Server to show first; the page can switch to any configured server | *(default server, else the first configured)* |
 | `--hub-listen` | Address the hub listens on for VarMQ instances of hub servers, see [Hub mode](#hub-mode) | *(no hub)* |
 | `--hub-tls-cert`, `--hub-tls-key` | TLS certificate and key files of the hub listener | *(plain HTTP)* |
-| `--hub-max-conns-per-ip` | Tokenless connections the hub listener holds from one source IP; `0` for no limit | `64` |
+| `--hub-max-conns-per-ip` | Connections from one source IP that have not sent a valid token yet; `0` for no limit. Use `0` behind a reverse proxy that opens a new upstream connection per request | `64` |
 
 Press <kbd>Ctrl+C</kbd> to stop; collection stops with it.
 
@@ -336,8 +336,10 @@ Limits:
 
 - Each hub server accepts at most 1000 instances. It accepts a burst of 200 new instance streams, and then 20 each second.
 - The hub listener holds at most 10 connections for each instance that the hub servers accept, plus 256. With one hub server, that is 10,256 connections. Each hub server has its own share of 10 authenticated connections per instance. Past its share, the hub closes new connections of that server, and other servers are not affected.
-- The hub listener holds at most 64 tokenless connections per source IP. A connection is tokenless until it carries an accepted stream, heartbeat or reply; then it is authenticated. A valid token alone is not enough. Authenticated connections do not count, so many instances can share one proxy or NAT address. When a 65th tokenless connection arrives, the hub closes the oldest tokenless connection of that IP. Set `--hub-max-conns-per-ip` to change the limit, or to `0` for no limit.
-- A connection must carry an accepted stream, heartbeat or reply within 10 seconds, or the hub closes it. An idle connection closes after 30 seconds.
+- The hub listener holds at most 64 tokenless connections per source IP. A connection is tokenless until it sends a request with a valid token. Connections that sent a valid token do not count, so many instances can share one proxy or NAT address. When a 65th tokenless connection arrives, the hub closes the oldest tokenless connection of that IP. Set `--hub-max-conns-per-ip` to change the limit, or to `0` for no limit.
+- Set `--hub-max-conns-per-ip` to `0` behind a reverse proxy that opens a new upstream connection for each request. If you are not sure, set `0`.
+- Known limit: a client on the same source address as the instances can still open connections very fast. The same host, a NAT or a proxy address counts as one source address. Such a client can disturb new connections from that address while their TLS handshake or request headers are in progress. Live streams and authenticated connections are not affected.
+- A connection is authenticated when it carries an accepted stream, heartbeat or reply. A valid token alone is not enough. The hub closes a connection that is not authenticated within 10 seconds. A request with a valid token that is still in progress at that time delays the close until the request ends. An idle connection closes after 30 seconds.
 - Each heartbeat and reply must arrive in full within 10 seconds.
 - Each hub server reads at most 256 MiB of replies at once, and each reply is at most 16 MiB. A reply of unknown length counts against this limit in steps of 64 KiB as it arrives. A reply that does not fit gets status 503, and its request fails.
 - At the instance limit or the new-stream rate, the hub refuses the stream with status 503, and the instance tries again later.
