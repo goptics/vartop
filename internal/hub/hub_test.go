@@ -1629,6 +1629,9 @@ func TestValidTokenNotLive(t *testing.T) {
 			if code != c.want {
 				t.Errorf("%s (keep-alive %v): %d, want %d", c.name, keep, code, c.want)
 			}
+			if keep && closedBy(conn, timeout/3) {
+				t.Errorf("%s: closed before the timeout, so not by the timer", c.name)
+			}
 			_ = conn.SetReadDeadline(time.Now().Add(timeout + 2*time.Second))
 			_, err := io.Copy(io.Discard, conn)
 			if errors.Is(err, os.ErrDeadlineExceeded) {
