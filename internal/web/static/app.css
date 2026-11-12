@@ -72,8 +72,11 @@ main { max-width: 1280px; }
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
   padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
-.brand { display: inline-flex; align-items: center; gap: 8px; color: var(--fg); font-size: var(--fs-4); font-weight: 650; letter-spacing: -.01em; text-decoration: none; }
-.brand svg { color: var(--accent); }
+/* logo (Lookout): mark + "top" --accent, "var" --fg; 24px tall = 90px wide */
+.brand { display: inline-flex; align-items: center; line-height: 0; }
+.brand svg { height: 24px; width: auto; }
+.brand .mark { fill: var(--accent); }
+.brand .ink { fill: var(--fg); }
 .rail nav { display: flex; flex-wrap: wrap; gap: 2px; }
 .rail nav a { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--r-2); color: var(--subtle); font-weight: 500; text-decoration: none; }
 .rail nav a:hover { background: var(--raised); color: var(--fg); }
