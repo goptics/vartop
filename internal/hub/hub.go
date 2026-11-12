@@ -499,10 +499,12 @@ func (h *Hub) write(w http.ResponseWriter, rc *http.ResponseController, b []byte
 // counts against the hub server's reply budget while it is read.
 func (h *Hub) replyTo(w http.ResponseWriter, r *http.Request) {
 	c := h.session(r)
-	var wt *waiter
-	if c != nil {
-		wt = c.claim(r.PathValue("id"))
+	if c == nil {
+		http.Error(w, "no request with that id is waiting", http.StatusNotFound)
+		return
 	}
+	live(w, r) // the session's: authenticated before its body is read
+	wt := c.claim(r.PathValue("id"))
 	if wt == nil {
 		http.Error(w, "no request with that id is waiting", http.StatusNotFound)
 		return
@@ -542,7 +544,6 @@ func (h *Hub) replyTo(w http.ResponseWriter, r *http.Request) {
 	switch mbe := (*http.MaxBytesError)(nil); {
 	case err == nil:
 		wt.ch <- reply{status: status, contentType: r.Header.Get("Content-Type"), body: read}
-		live(w, r)
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, errBudget):
 		full()

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1304,14 +1305,14 @@ func TestCapPerIP(t *testing.T) {
 	}
 	b := dial("10.0.0.2")
 	h1, h2 := new(Hub), new(Hub)
-	if !ln.reserve(h1) {
+	if !ln.reserve(a2.(*capConn), h1) { // granted: no longer counted for its IP
 		t.Fatal("no place of an empty share")
 	}
-	ln.settle(a2.(*capConn), h1, true) // authenticated: no longer counted for its IP
-	if ln.reserve(h1) {
+	ln.settle(a2.(*capConn), h1, true)
+	if ln.reserve(nil, h1) {
 		t.Error("a place past the share of 1")
 	}
-	if !ln.reserve(h2) {
+	if !ln.reserve(nil, h2) {
 		t.Error("another Hub's full share took h2's place")
 	}
 	ln.settle(a3.(*capConn), h2, false) // not accepted: given back
@@ -1602,31 +1603,37 @@ func beatReq(instance, token, session string) string {
 
 // TestValidTokenNotLive: a valid token alone does not authenticate a
 // connection; a request of no live session (a beat of an unknown
-// instance, a duplicate stream) leaves it under the request timeout.
+// instance, a duplicate stream) leaves it under the request timeout. The
+// timer closes it, keep-alive too: without its Connection: close.
 func TestValidTokenNotLive(t *testing.T) {
 	const timeout = 300 * time.Millisecond
-	r := newRouter(slowBeat, 0, nil)
-	r.lim.reqTimeout = timeout
-	r.Sync(hubConfig(map[string]string{"a": tokA}))
-	addr := serveHub(t, r)
-	if _, code := fleettest.DialHub(t, "http://"+addr, tokA, "dup", fleettest.HubInstanceOptions{}); code != http.StatusOK {
-		t.Fatal(code)
-	}
-	for _, c := range []struct {
-		name, req string
-		want      int
-	}{
-		{"beat of nobody", beatReq("nobody", tokA, "wrong-session-0123456789"), http.StatusNotFound},
-		{"duplicate stream", "GET /hub/stream?instance=dup&protocol=1 HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer " + tokA + "\r\n\r\n", http.StatusConflict},
-	} {
-		conn, code := rawPost(t, addr, c.req)
-		if code != c.want {
-			t.Errorf("%s: %d, want %d", c.name, code, c.want)
+	for _, keep := range []bool{false, true} {
+		r := newRouter(slowBeat, 0, nil)
+		r.lim.reqTimeout = timeout
+		r.Sync(hubConfig(map[string]string{"a": tokA}))
+		addr := serveHub(t, r)
+		if keep {
+			addr = serveCapped(t, r, keepAlive{r}, nil).Addr().String()
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(timeout + 2*time.Second))
-		_, err := io.Copy(io.Discard, conn)
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Errorf("%s: the connection outlived the request timeout", c.name)
+		if _, code := fleettest.DialHub(t, "http://"+addr, tokA, "dup", fleettest.HubInstanceOptions{}); code != http.StatusOK {
+			t.Fatal(code)
+		}
+		for _, c := range []struct {
+			name, req string
+			want      int
+		}{
+			{"beat of nobody", beatReq("nobody", tokA, "wrong-session-0123456789"), http.StatusNotFound},
+			{"duplicate stream", "GET /hub/stream?instance=dup&protocol=1 HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer " + tokA + "\r\n\r\n", http.StatusConflict},
+		} {
+			conn, code := rawPost(t, addr, c.req)
+			if code != c.want {
+				t.Errorf("%s (keep-alive %v): %d, want %d", c.name, keep, code, c.want)
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(timeout + 2*time.Second))
+			_, err := io.Copy(io.Discard, conn)
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Errorf("%s (keep-alive %v): the connection outlived the request timeout", c.name, keep)
+			}
 		}
 	}
 }
@@ -1694,4 +1701,358 @@ func TestChunkedReplyMemory(t *testing.T) {
 	if got := after.TotalAlloc - before.TotalAlloc; got > MaxReply*3/2 {
 		t.Errorf("a chunked reply of %d bytes allocated %d", MaxReply, got)
 	}
+}
+
+// serveCapped serves h (r when nil) with r's hub server on a loopback
+// listener capped as Serve caps it, TLS with cert, until the test ends.
+// It returns the listener, for its counts.
+func serveCapped(t *testing.T, r *Router, h http.Handler, cert *tls.Certificate) *capListener {
+	t.Helper()
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := &capListener{Listener: inner, max: &r.connCap, perIP: r.perIP, share: int64(connsPerInstance * r.maxInstances)}
+	srv := NewServer(r, cert, nil)
+	if h != nil {
+		srv.Handler = h
+	}
+	go func() {
+		if cert != nil {
+			_ = srv.ServeTLS(cl, "", "")
+		} else {
+			_ = srv.Serve(cl)
+		}
+	}()
+	t.Cleanup(func() {
+		r.Close()
+		_ = srv.Close()
+	})
+	return cl
+}
+
+// keepAlive drops the Connection header its handler sets: only the hub's
+// timer can then close a connection.
+type keepAlive struct{ http.Handler }
+
+func (k keepAlive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	k.Handler.ServeHTTP(noClose{w}, r)
+}
+
+type noClose struct{ http.ResponseWriter }
+
+func (w noClose) WriteHeader(code int) {
+	w.Header().Del("Connection")
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w noClose) Write(b []byte) (int, error) {
+	w.Header().Del("Connection")
+	return w.ResponseWriter.Write(b)
+}
+
+func (w noClose) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// dialRaw opens a TCP connection to addr, closed when the test ends.
+func dialRaw(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// closedBy: the server closed c within d.
+func closedBy(c net.Conn, d time.Duration) bool {
+	_ = c.SetReadDeadline(time.Now().Add(d))
+	_, err := io.Copy(io.Discard, c)
+	return !errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// replyHead is the head of a reply of size bytes, for inst, to request id.
+func replyHead(inst, session, id string, size int) string {
+	return fmt.Sprintf("POST /hub/reply/%s?instance=%s HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer %s\r\n%s: %s\r\nX-Hub-Status: 200\r\nContent-Length: %d\r\n\r\n", id, inst, tokA, SessionHeader, session, size)
+}
+
+// TestReplyUploadSurvives: a reply upload on a new connection is not cut
+// while its body arrives within its own read deadline: neither by more
+// tokenless connections of its IP than the limit, nor at the request
+// timeout after accept.
+func TestReplyUploadSurvives(t *testing.T) {
+	const size = 64 << 10
+	for _, c := range []struct {
+		name    string
+		timeout time.Duration
+		before  time.Duration                   // from accept to the headers
+		mid     func(t *testing.T, addr string) // between the body's halves
+	}{
+		{"flood of its IP", requestTimeout, 0, func(t *testing.T, addr string) {
+			first := dialRaw(t, addr) // tokenless, after the reply's connection
+			for range DefaultMaxConnsPerIP {
+				dialRaw(t, addr)
+			}
+			if !closedBy(first, 5*time.Second) {
+				t.Fatal("the flood evicted no connection")
+			}
+		}},
+		{"past the timeout after accept", time.Second, 600 * time.Millisecond, func(*testing.T, string) {
+			time.Sleep(700 * time.Millisecond)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRouter(slowBeat, 0, nil)
+			r.lim.reqTimeout = c.timeout
+			r.perIP = DefaultMaxConnsPerIP
+			r.Sync(hubConfig(map[string]string{"a": tokA}))
+			addr := serveHub(t, r)
+			a, code := fleettest.DialHub(t, "http://"+addr, tokA, "a", fleettest.HubInstanceOptions{})
+			if code != http.StatusOK {
+				t.Fatal(code)
+			}
+			f, res := held(t, context.Background(), r.Transport(tokA), a)
+			conn := dialRaw(t, addr)
+			time.Sleep(c.before)
+			half := strings.Repeat("x", size/2)
+			if _, err := io.WriteString(conn, replyHead(a.ID, a.Session(), f.ID, size)+half); err != nil {
+				t.Fatal(err)
+			}
+			fleettest.WaitUntil(t, 5*time.Second, "the reply's body read", func() bool { return r.hub(keyOf(tokA)).replyUsed.Load() == size })
+			c.mid(t, addr)
+			_, _ = io.WriteString(conn, half)
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil || resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("reply upload: %v, %v; want 204", resp, err)
+			}
+			if err := wait(t, res); err != nil {
+				t.Errorf("RoundTrip: %v", err)
+			}
+		})
+	}
+}
+
+// TestGrantedRequestHeld: a request with a valid token holds its
+// connection while it runs: past the IP's tokenless limit, and past the
+// request timeout after accept. Once it ends without a live session, the
+// connection falls back under the timeout and is closed, with no
+// Connection: close to close it.
+func TestGrantedRequestHeld(t *testing.T) {
+	const timeout = 300 * time.Millisecond
+	r := newRouter(slowBeat, 0, nil)
+	r.lim.reqTimeout = timeout
+	r.perIP = 1
+	r.Sync(hubConfig(map[string]string{"a": tokA}))
+	in, out := make(chan struct{}), make(chan struct{})
+	slow := r.authed(func(_ *Hub, w http.ResponseWriter, _ *http.Request) {
+		close(in)
+		<-out
+		http.Error(w, "no live session", http.StatusNotFound)
+	})
+	addr := serveCapped(t, r, keepAlive{slow}, nil).Addr().String()
+	conn := dialRaw(t, addr)
+	if _, err := io.WriteString(conn, beatReq("nobody", tokA, "wrong-session-0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	<-in
+	// At the IP's limit of 1, the second tokenless connection closes the
+	// first, not the granted one.
+	first := dialRaw(t, addr)
+	dialRaw(t, addr)
+	if !closedBy(first, 5*time.Second) {
+		t.Fatal("no tokenless connection evicted")
+	}
+	time.Sleep(2 * timeout) // past the request timeout after accept
+	close(out)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("granted request: %v, %v; want its 404", resp, err)
+	}
+	resp.Body.Close()
+	if resp.Close {
+		t.Fatal("the response asks to close the connection; the timer is not tested")
+	}
+	if !closedBy(conn, timeout+3*time.Second) {
+		t.Error("the connection outlived the request timeout after its request ended without a live session")
+	}
+}
+
+// TestConnCountsExact: after a mix of live streams, beats and replies,
+// failed requests of two servers on one connection, tokenless and evicted
+// connections, a reply cut mid-body, over HTTP/1.1 and HTTP/2, the
+// listener counts each connection held once, in one place; all counts
+// come back to zero once they close.
+func TestConnCountsExact(t *testing.T) {
+	tmp := httptest.NewUnstartedServer(http.NotFoundHandler())
+	tmp.EnableHTTP2 = true
+	tmp.StartTLS()
+	cert := tmp.TLS.Certificates[0]
+	pool := tmp.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	tmp.Close()
+	r := newRouter(slowBeat, 0, nil)
+	r.perIP = 3
+	r.Sync(hubConfig(map[string]string{"a": tokA, "b": tokB}))
+	cl := serveCapped(t, r, nil, &cert)
+	addr := cl.Addr().String()
+	ha, hb := r.hub(keyOf(tokA)), r.hub(keyOf(tokB))
+	counts := func() (n int64, ips map[string]int, hubs map[*Hub]int64) {
+		cl.mu.Lock()
+		defer cl.mu.Unlock()
+		ips = make(map[string]int)
+		for ip, q := range cl.byIP {
+			ips[ip] = q.Len()
+		}
+		return cl.n, ips, maps.Clone(cl.byHub)
+	}
+	var conns []net.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	// do sends req on c (a new HTTP/1.1 connection when nil).
+	do := func(c net.Conn, req string) (net.Conn, *http.Response, *bufio.Reader) {
+		t.Helper()
+		if c == nil {
+			tc, err := tls.Dial("tcp", addr, &tls.Config{RootCAs: pool, NextProtos: []string{"http/1.1"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			conns = append(conns, tc)
+			c = tc
+		}
+		if _, err := io.WriteString(c, req); err != nil {
+			t.Fatal(err)
+		}
+		br := bufio.NewReader(c)
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, resp, br
+	}
+	stream := func(token, id string) (*bufio.Reader, string) {
+		t.Helper()
+		_, resp, _ := do(nil, "GET /hub/stream?instance="+id+"&protocol=1 HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer "+token+"\r\n\r\n")
+		br := bufio.NewReader(resp.Body)
+		l, err := br.ReadBytes('\n')
+		var hello frame
+		if err != nil || json.Unmarshal(l, &hello) != nil {
+			t.Fatalf("hello of %s: %q, %v", id, l, err)
+		}
+		return br, hello.Session
+	}
+	status := func(resp *http.Response) int {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// HTTP/2: one tokenless connection, then a stream, failed beats of
+	// both servers and a tokenless request on it at once.
+	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}, ForceAttemptHTTP2: true}
+	defer tr.CloseIdleConnections()
+	h2req := func(ctx context.Context, method, path, token string) (*http.Response, error) {
+		req, _ := http.NewRequestWithContext(ctx, method, "https://"+addr+path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		return tr.RoundTrip(req)
+	}
+	if resp, err := h2req(context.Background(), http.MethodGet, "/nope", ""); err != nil || resp.ProtoMajor != 2 {
+		t.Fatalf("HTTP/2: %v, %v", resp, err)
+	} else {
+		status(resp)
+	}
+	sctx, scancel := context.WithCancel(context.Background())
+	defer scancel()
+	var wg sync.WaitGroup
+	var h2stream *http.Response
+	for _, q := range []struct{ method, path, token string }{
+		{http.MethodGet, "/hub/stream?instance=h2&protocol=1", tokA},
+		{http.MethodPost, "/hub/beat?instance=nobody", tokA},
+		{http.MethodPost, "/hub/beat?instance=nobody", tokB},
+		{http.MethodPost, "/hub/beat?instance=nobody", ""},
+	} {
+		wg.Go(func() {
+			resp, err := h2req(sctx, q.method, q.path, q.token)
+			switch {
+			case err != nil:
+				t.Errorf("HTTP/2 %s %s: %v", q.method, q.path, err)
+			case q.method == http.MethodGet:
+				h2stream = resp
+			default:
+				status(resp)
+			}
+		})
+	}
+	wg.Wait()
+	if h2stream == nil || h2stream.StatusCode != http.StatusOK {
+		t.Fatalf("HTTP/2 stream: %v", h2stream)
+	}
+	defer h2stream.Body.Close()
+
+	// HTTP/1.1: streams of both servers, a beat of each on one
+	// connection, a reply of no request, a reply cut mid-body, failed
+	// requests.
+	sa, sessA := stream(tokA, "a1")
+	_, sessB := stream(tokB, "b1")
+	beatConn, resp, _ := do(nil, beatReq("a1", tokA, sessA))
+	if code := status(resp); code != http.StatusNoContent {
+		t.Fatalf("beat of a1: %d", code)
+	}
+	if _, resp, _ = do(beatConn, beatReq("b1", tokB, sessB)); status(resp) != http.StatusNoContent {
+		t.Fatal("beat of b1 on a's connection")
+	}
+	if _, resp, _ = do(nil, replyHead("a1", sessA, "none", 0)); status(resp) != http.StatusNotFound {
+		t.Fatal("reply of no request")
+	}
+	go func() {
+		if resp, err := get(sctx, r.Transport(tokA), "a1", "/workers"); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	var f frame
+	for f.Type != "request" {
+		l, err := sa.ReadBytes('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = json.Unmarshal(l, &f)
+	}
+	cut, err := tls.Dial("tcp", addr, &tls.Config{RootCAs: pool, NextProtos: []string{"http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(cut, replyHead("a1", sessA, f.ID, 1000)+"partial")
+	fleettest.WaitUntil(t, 5*time.Second, "the cut reply read", func() bool { return ha.replyUsed.Load() == 1000 })
+	cut.Close()
+	fleettest.WaitUntil(t, 5*time.Second, "the cut reply done", func() bool { return ha.replyUsed.Load() == 0 })
+	for _, req := range []string{beatReq("nobody", tokA, "wrong-session-0123456789"), beatReq("nobody", tokB, "x"), beatReq("a1", "wrong-token-0123456789", sessA)} {
+		do(nil, req)
+	}
+	for range 5 { // past the IP's limit of 3: the 2 oldest are closed
+		conns = append(conns, dialRaw(t, addr))
+	}
+	// Live for a: its 2 streams, the beat and reply connections; for b:
+	// its stream. Tokenless: 3.
+	want := map[*Hub]int64{ha: 4, hb: 1}
+	fleettest.WaitUntil(t, 5*time.Second, "exact counts", func() bool {
+		n, ips, hubs := counts()
+		return n == 8 && maps.Equal(ips, map[string]int{"127.0.0.1": 3}) && maps.Equal(hubs, want)
+	})
+	scancel()
+	h2stream.Body.Close()
+	for _, c := range conns {
+		c.Close()
+	}
+	r.Close()
+	fleettest.WaitUntil(t, 5*time.Second, "all counts zero", func() bool {
+		tr.CloseIdleConnections() // the HTTP/2 one idles once its stream resets
+		n, ips, hubs := counts()
+		return n == 0 && len(ips) == 0 && len(hubs) == 0
+	})
 }
