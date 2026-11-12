@@ -441,9 +441,10 @@ const (
 // capListener accepts at most *max connections at once. Of one source IP
 // it holds at most perIP (0: no limit) tokenless connections, those that
 // sent no valid token yet: one more closes the IP's oldest tokenless one,
-// so a tokenless client cannot lock out the instances of its address. A
-// connection past *max is closed at once, so a flood of idle connections
-// cannot pile up.
+// so a tokenless client cannot lock out the instances of its address. At
+// *max a new connection closes the oldest tokenless one of any IP, so
+// tokenless clients of many IPs cannot lock out instances either; with
+// none tokenless it is closed at once, so idle connections cannot pile up.
 type capListener struct {
 	net.Listener
 	max     *atomic.Int64
@@ -456,6 +457,7 @@ type capListener struct {
 	mu    sync.Mutex
 	n     int64
 	byIP  map[string]*list.List // tokenless capConns of each IP, oldest first
+	all   list.List             // tokenless capConns of every IP, oldest first
 	byHub map[*Hub]int64        // live capConns and grants of each Hub
 }
 
@@ -473,7 +475,7 @@ func (l *capListener) Accept() (net.Conn, error) {
 		ok, old := l.admit(cc)
 		if old != nil {
 			_ = old.Close()
-			l.evicted.warn(l.log, "hub: tokenless connections of one IP at the limit; its oldest closed", "ip", ip)
+			l.evicted.warn(l.log, "hub: tokenless connections at the limit; the oldest closed", "ip", old.ip)
 		}
 		if ok {
 			return cc, nil
@@ -485,17 +487,24 @@ func (l *capListener) Accept() (net.Conn, error) {
 
 // admit takes a slot for c; false when none is free. At the limit of c's
 // IP it takes the slot of the IP's oldest tokenless connection, old, for
-// the caller to close.
+// the caller to close; at *max, that of the oldest tokenless one of any IP.
 func (l *capListener) admit(c *capConn) (ok bool, old *capConn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	q := l.byIP[c.ip]
 	switch {
 	case l.perIP > 0 && q != nil && q.Len() >= l.perIP:
-		old = q.Remove(q.Front()).(*capConn)
-		old.elem = nil
+		old = q.Front().Value.(*capConn)
+		l.unqueue(old)
+		q = l.byIP[c.ip]
 	case l.n >= l.max.Load():
-		return false, nil
+		e := l.all.Front()
+		if e == nil {
+			return false, nil
+		}
+		old = e.Value.(*capConn)
+		l.unqueue(old)
+		q = l.byIP[c.ip]
 	}
 	if q == nil {
 		if l.byIP == nil {
@@ -504,8 +513,8 @@ func (l *capListener) admit(c *capConn) (ok bool, old *capConn) {
 		q = list.New()
 		l.byIP[c.ip] = q
 	}
-	c.elem = q.PushBack(c)
-	l.n++
+	c.elem, c.gelem = q.PushBack(c), l.all.PushBack(c)
+	l.n++ // old's slot comes back when the caller closes it
 	return true, old
 }
 
@@ -516,7 +525,8 @@ func (l *capListener) unqueue(c *capConn) {
 	}
 	q := l.byIP[c.ip]
 	q.Remove(c.elem)
-	c.elem = nil
+	l.all.Remove(c.gelem)
+	c.elem, c.gelem = nil, nil
 	if q.Len() == 0 {
 		delete(l.byIP, c.ip)
 	}
@@ -588,6 +598,7 @@ type capConn struct {
 	l      *capListener
 	ip     string
 	elem   *list.Element // under l.mu: in l.byIP while open and never granted
+	gelem  *list.Element // under l.mu: in l.all, as elem
 	hub    *Hub          // under l.mu: the Hub it is authenticated for, while open
 	closed bool          // under l.mu: its slot freed
 	once   sync.Once
