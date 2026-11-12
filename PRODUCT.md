@@ -8,7 +8,7 @@ web
 
 ## Users
 
-Go developers and operators who run services built on varmq (typed worker pool + message queue). One user, one machine: vartop runs on their laptop or a box inside the network, never as a shared deployment. Three moments, equal weight:
+Go developers and operators who run services built on VarMQ (typed worker pool + job queue). One user, one machine: vartop runs on their laptop or a box inside the network, never as a shared deployment. Three moments, equal weight:
 
 - **Incident triage:** backlog grows or jobs fail; find which worker, instance or queue, then pause, resume, restart, stop or resize it.
 - **Daily monitoring:** page left open on a second screen; glanced at for throughput, backlog and failure trends.
