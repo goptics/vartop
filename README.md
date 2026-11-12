@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>vartop</h1>
+<h1><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg"><img alt="vartop" src="docs/images/logo-light.svg" height="72"></picture></h1>
 
 <p><strong>A live dashboard and control panel for <a href="https://github.com/goptics/varmq">VarMQ</a> worker fleets.</strong></p>
 
@@ -610,9 +610,8 @@ API 1.5.0 adds a worker's `strategy` and `sources`, which the worker page draws 
 | Library | Purpose |
 | --- | --- |
 | [Huh](https://github.com/charmbracelet/huh) | Interactive form prompts (onboarding, `server add`) |
-| [Lip Gloss](https://github.com/charmbracelet/lipgloss) | Styling of those prompts |
+| [Lip Gloss](https://github.com/charmbracelet/lipgloss) | Styling of those prompts and the onboarding logo banner |
 | [Cobra](https://github.com/spf13/cobra) | CLI command parsing |
-| [pterm](https://github.com/pterm/pterm) | Big-text ASCII art banner |
 | [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) | Pure-Go SQLite (no cgo) for the history store |
 | [htmx](https://htmx.org) (vendored) | The dashboard's live updates, without a build step |
 

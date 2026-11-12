@@ -7,24 +7,44 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/pterm/pterm"
 )
+
+// logoLines is the Lookout mark in half blocks, sampled from the 16 px favicon
+// (internal/web/static/favicon.svg): one char = one pixel wide, two tall.
+var logoLines = []string{
+	"   ▄   ██   ▄",
+	"   ██▄████▄██",
+	"  ████████████",
+	"  ███  ██  ███",
+	"   ▀████████▀",
+	" ██████████████",
+}
+
+// banner renders the mark in the logo green with the wordmark beside its eyes.
+func banner() string {
+	green := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#1B6E5A", Dark: "#44BF9E"})
+	bold := lipgloss.NewStyle().Bold(true)
+	var b strings.Builder
+	b.WriteString("\n")
+	for i, line := range logoLines {
+		b.WriteString(green.Render(line))
+		if i == 3 { // the eye row
+			b.WriteString(strings.Repeat(" ", 16-len([]rune(line))) + bold.Render("var") + bold.Inherit(green).Render("top"))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
 
 // PromptOnboarding interactively asks the user for their initial
 // server configuration and saves it. If the prompt is cancelled or
 // fails, it returns an error.
 func PromptOnboarding() (*Config, error) {
-	// Retro ASCII Art and Styling
 	textStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#8BE9FD")). // Cyan retro vibe
 		Padding(1, 0, 1, 0)
 
-	logo, _ := pterm.DefaultBigText.WithLetters(
-		pterm.NewLettersFromStringWithStyle("var", pterm.NewStyle(pterm.FgCyan)),
-		pterm.NewLettersFromStringWithStyle("top", pterm.NewStyle(pterm.FgLightMagenta)),
-	).Srender()
-
-	fmt.Println(logo)
+	fmt.Println(banner())
 
 	introText := "Welcome to the Dashboard!\nIt looks like you don't have a configuration file yet.\nLet's set up your first varmq server connection to get started."
 	fmt.Println(textStyle.Render(introText))
