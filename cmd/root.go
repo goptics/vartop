@@ -20,6 +20,12 @@ var rootCmd = &cobra.Command{
 	Long: `vartop monitors and manages the workers of varmq mux servers: from the
 command line, and in a web dashboard (vartop web) that collects every
 configured server while it runs.`,
+	// Execute prints the error once. Usage only for bad args/flags:
+	// PersistentPreRun runs after arg validation.
+	SilenceErrors: true,
+	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		cmd.SilenceUsage = true
+	},
 }
 
 // loadOrOnboard loads the configuration, starting the interactive onboarding
@@ -39,7 +45,7 @@ func loadOrOnboard() (*config.Config, error) {
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }

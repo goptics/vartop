@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 
@@ -11,13 +13,15 @@ import (
 
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 var actionOrigin string
 
 // fanOut runs fn against every instance of the active server (only --origin
-// when set) concurrently and prints one result line per instance. It fails if
-// any instance fails.
+// when set) concurrently and prints one result line per instance. A 409
+// (already so) or 404 (instance lacks the worker) is "no change", as on the
+// web. It fails if any other instance error.
 func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -67,6 +71,10 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	failed := 0
 	for i, c := range clients {
 		origin := config.ShortOrigin(c.PrimaryEndpoint())
+		if fleet.IsUnchanged(errs[i]) {
+			fmt.Fprintf(w, "  %s: no change (%s)\n", origin, unchangedMsg(errs[i]))
+			continue
+		}
 		if errs[i] != nil {
 			failed++
 			fmt.Fprintf(w, "  %s: failed: %v\n", origin, errs[i])
@@ -87,6 +95,16 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	return nil
 }
 
+// unchangedMsg words a varmq 409 or 404 like the web does: varmq's own
+// message, or that the instance lacks the worker.
+func unchangedMsg(err error) string {
+	var apiErr *api.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return "not on this instance"
+	}
+	return apiErr.Message
+}
+
 var actionCmd = &cobra.Command{
 	Use:       "action <worker_name> <pause|resume|restart|stop>",
 	Short:     "Send a state-modifying action to a worker",
@@ -105,7 +123,7 @@ var actionCmd = &cobra.Command{
 
 		desc := fmt.Sprintf("Sending '%s' action to worker '%s'", action, workerName)
 		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
-			return c.Action(workerName, action)
+			return c.Action(url.PathEscape(workerName), action)
 		})
 	},
 }
@@ -125,7 +143,7 @@ var concurrencyCmd = &cobra.Command{
 
 		desc := fmt.Sprintf("Updating concurrency of worker '%s' to %d", workerName, concurrency)
 		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
-			return c.TuneConcurrency(workerName, concurrency)
+			return c.TuneConcurrency(url.PathEscape(workerName), concurrency)
 		})
 	},
 }
