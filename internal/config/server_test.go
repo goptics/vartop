@@ -24,9 +24,13 @@ func TestGetActiveServerResolution(t *testing.T) {
 		t.Fatalf("unknown name: got %v, want not-found error", err)
 	}
 
-	noDefault := &Config{Servers: map[string]*Server{"a": a}}
-	if _, err = noDefault.GetActiveServer(""); err == nil || !strings.Contains(err.Error(), "no default") {
-		t.Fatalf("missing default: got %v, want no-default error", err)
+	// No default: the first server in sorted order, as vartop web picks.
+	noDefault := &Config{Servers: map[string]*Server{"b": b, "a": a}}
+	if got, err = noDefault.GetActiveServer(""); err != nil || got != a {
+		t.Fatalf("missing default: got %v, %v; want first sorted (a)", got, err)
+	}
+	if _, err = (&Config{}).GetActiveServer(""); err == nil || !strings.Contains(err.Error(), "no servers") {
+		t.Fatalf("no servers: got %v, want no-servers error", err)
 	}
 	// An explicit name still works without a default.
 	if got, err = noDefault.GetActiveServer("a"); err != nil || got != a {

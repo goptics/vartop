@@ -3,6 +3,8 @@ package cmd
 import (
 	"cmp"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -178,11 +180,9 @@ var serverRemoveCmd = &cobra.Command{
 			fmt.Println("Removed the last server. vartop web will prompt for a new one, or add one with vartop server add.")
 		} else if cfg.DefaultServer == name {
 			// Reassign default server if we just deleted the default
-			for remainingName := range cfg.Servers {
-				cfg.DefaultServer = remainingName
-				fmt.Printf("Default server automatically reassigned to '%s'\n", remainingName)
-				break
-			}
+			// first in sorted order, as vartop web falls back to
+			cfg.DefaultServer = slices.Sorted(maps.Keys(cfg.Servers))[0]
+			fmt.Printf("Default server automatically reassigned to '%s'\n", cfg.DefaultServer)
 		}
 
 		if err := config.Save(cfg); err != nil {

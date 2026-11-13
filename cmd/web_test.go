@@ -405,7 +405,7 @@ func TestWebLogsStoreNotices(t *testing.T) {
 // against its own environment — its config file.
 func TestWebSourceChecksEnv(t *testing.T) {
 	isolate(t)
-	src, release, err := webSource()
+	src, release, err := webSource("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestWebSourceChecksEnv(t *testing.T) {
 	if src.SameEnv == nil {
 		t.Fatal("webSource has no SameEnv: the web would act on another environment's collector's units")
 	}
-	own := ownLease()
+	own := ownLease("")
 	if !src.SameEnv(own) {
 		t.Error("SameEnv refuses this vartop's own environment")
 	}
@@ -425,10 +425,10 @@ func TestWebSourceChecksEnv(t *testing.T) {
 }
 
 // TestSameEnv (R31): two leases are of one environment when their config
-// path agrees, whatever their pid; vartop web's own lease is of its own.
+// path and hub address agree, whatever their pid; vartop web's own lease is of its own.
 func TestSameEnv(t *testing.T) {
 	isolate(t)
-	own := ownLease()
+	own := ownLease("")
 	if own.ConfigPath == "" {
 		t.Fatalf("ownLease = %+v, want this environment's config path", own)
 	}
@@ -441,12 +441,14 @@ func TestSameEnv(t *testing.T) {
 		{"identical", own, true},
 		{"another pid", with(func(l *store.Lease) { l.PID++ }), true},
 		{"another config path", with(func(l *store.Lease) { l.ConfigPath = "/elsewhere/vartop/config.json" }), false},
+		// A collector with no hub, or another, cannot reach this hub's instances.
+		{"another hub address", with(func(l *store.Lease) { l.Hub = ":7071" }), false},
 	} {
 		if got := sameEnv(c.l, own); got != c.want {
 			t.Errorf("%s: sameEnv = %v, want %v", c.name, got, c.want)
 		}
 	}
-	if !sameEnvAsOwn()(own) {
+	if !sameEnvAsOwn("")(own) {
 		t.Error("sameEnvAsOwn refuses this vartop's own lease")
 	}
 }
@@ -876,13 +878,7 @@ func TestWebServesHub(t *testing.T) {
 		s := latestOf(dataDir, "h")
 		return s != nil && len(s.Pods) == 0 && s.Err == ""
 	})
-	// The dashboard line can print after the hub line: wait for it too.
-	dashRe := regexp.MustCompile(`vartop web: (http://\S+)`)
-	var dash []string
-	fleettest.WaitUntil(t, 5*time.Second, "the dashboard address", func() bool {
-		dash = dashRe.FindStringSubmatch(out.String())
-		return dash != nil
-	})
+	dash := dashAddr(t, &out)
 	for path, want := range map[string]string{"/": "0/0 instances", "/grid": "No instances to show.", "/queues": "0/0 instances", "/workflows": "0/0 instances"} {
 		resp, err := http.Get(dash[1] + path)
 		if err != nil {
@@ -1034,7 +1030,7 @@ func TestWebHubShutdownOrder(t *testing.T) {
 				return s != nil && len(s.Pods) == 1 && s.Pods[0].Err == "" && s.Pods[0].Workers["orders"] != nil
 			})
 			if i == 0 {
-				dash := regexp.MustCompile(`vartop web: (http://\S+)`).FindStringSubmatch(out.String())
+				dash := dashAddr(t, &out)
 				for _, p := range []string{"/grid", "/workers/orders"} {
 					resp, err := http.Get(dash[1] + p)
 					if err != nil {
@@ -1108,4 +1104,17 @@ func TestHubSyncWarnsOnce(t *testing.T) {
 	if strings.Contains(buf.String(), tok) {
 		t.Error("the token is in the log")
 	}
+}
+
+// dashAddr waits for runWeb's "vartop web:" line in out and returns its
+// match: the collector, started first, may store a snapshot before
+// serveWeb prints it.
+func dashAddr(t *testing.T, out *lockedBuffer) []string {
+	t.Helper()
+	var dash []string
+	fleettest.WaitUntil(t, 5*time.Second, "the dashboard address", func() bool {
+		dash = regexp.MustCompile(`vartop web: (http://\S+)`).FindStringSubmatch(out.String())
+		return dash != nil
+	})
+	return dash
 }

@@ -975,8 +975,9 @@ func TestPreAuthReadDeadline(t *testing.T) {
 	})
 }
 
-// TestCapListener: the hub listener holds at most its cap of connections;
-// one past it is closed at once, and a closed one frees its slot.
+// TestCapListener: the hub listener holds at most its cap of connections.
+// One past it closes the oldest tokenless one, of any IP; with every one
+// authenticated it is closed at once. A closed one frees its slot.
 func TestCapListener(t *testing.T) {
 	inner, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1015,11 +1016,31 @@ func TestCapListener(t *testing.T) {
 			t.Fatal("not accepted")
 		}
 	}
+	// Both tokenless: one past the cap closes the oldest, held[0].
+	dial()
+	select {
+	case c := <-accepted:
+		held = append(held, c)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a connection past the cap of tokenless ones was not accepted")
+	}
+	if _, err := held[0].Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("the oldest tokenless connection: read %v, want it closed", err)
+	}
+	// Both authenticated: one past the cap is closed at once.
+	h := new(Hub)
+	for _, c := range held[1:] {
+		if !ln.reserve(c.(*capConn), h) {
+			t.Fatal("no place of an unlimited share")
+		}
+		ln.settle(c.(*capConn), h, true)
+	}
 	over := dial()
 	_ = over.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := over.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Errorf("connection past the cap: read %v, want it closed at once", err)
+		t.Errorf("connection past a cap of authenticated ones: read %v, want it closed at once", err)
 	}
+	held = held[1:]
 	held[0].Close()
 	held[0].Close() // a second Close frees nothing more
 	dial()

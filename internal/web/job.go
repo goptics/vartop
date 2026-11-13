@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goptics/varmq/contract"
@@ -62,9 +63,23 @@ type JobSpan struct {
 }
 
 // JobCtl is a job's cancel button (#jobctl): Cancel while it waits or runs.
+// A workflow task's live job has none: Workflow links its workflow, whose
+// cancel stops it (varmq runs a cancelled task on shared storage anyway).
 type JobCtl struct {
 	Server, QueueID, ID string
 	Cancel              bool
+	Workflow            string
+}
+
+// taskWorkflow is the workflow whose task job jobID is ("wf:<wf>:<task>",
+// varmq's taskJobID; names hold no ":"), "" for a plain job.
+func taskWorkflow(jobID string) string {
+	rest, ok := strings.CutPrefix(jobID, "wf:")
+	if !ok {
+		return ""
+	}
+	wf, _, _ := strings.Cut(rest, ":")
+	return wf
 }
 
 // Post is the cancel route of c's job.
@@ -118,8 +133,11 @@ func jobView(g fleet.QueueGroup, q QueueName, jobID, server string, r fleet.JobR
 		}
 		v.Result = string(res)
 	}
-	v.Ctl = JobCtl{Server: server, QueueID: g.ID, ID: jobID,
-		Cancel: (j.State == contract.JobPending || j.State == contract.JobProcessing) && jobURL(g.ID, jobID, server) != ""}
+	live := j.State == contract.JobPending || j.State == contract.JobProcessing
+	v.Ctl = JobCtl{Server: server, QueueID: g.ID, ID: jobID, Cancel: live && jobURL(g.ID, jobID, server) != ""}
+	if wf := taskWorkflow(jobID); wf != "" && live {
+		v.Ctl.Cancel, v.Ctl.Workflow = false, workflowURL(wf, server, 0)
+	}
 	return v
 }
 
@@ -171,6 +189,10 @@ func (h *handler) jobAction(w http.ResponseWriter, r *http.Request) {
 	id, jobID := r.PathValue("id"), r.PathValue("jobId")
 	if r.PathValue("action") != "cancel" {
 		badRequest(w, "unknown job action: want cancel")
+		return
+	}
+	if wf := taskWorkflow(jobID); wf != "" {
+		conflict(w, "Job "+jobID+" is a task of workflow "+wf+": cancel the workflow to stop it")
 		return
 	}
 	t, ok := h.bind(w, r)

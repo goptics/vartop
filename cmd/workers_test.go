@@ -21,7 +21,7 @@ type recorder struct {
 func (r *recorder) serve(t *testing.T, status int) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
-		r.paths = append(r.paths, req.Method+" "+req.URL.Path)
+		r.paths = append(r.paths, req.Method+" "+req.URL.EscapedPath())
 		r.mu.Unlock()
 		w.WriteHeader(status)
 	}))
@@ -123,5 +123,65 @@ func TestActionOnHubServerPointsToDashboard(t *testing.T) {
 	err = concurrencyCmd.RunE(concurrencyCmd, []string{"emails", "4"})
 	if err == nil || !strings.Contains(err.Error(), "dashboard") {
 		t.Errorf("concurrency on a hub server = %v, want an error pointing to the dashboard", err)
+	}
+}
+
+// TestActionEscapesWorkerName: a name with "/" stays one path segment, as
+// on the web.
+func TestActionEscapesWorkerName(t *testing.T) {
+	var a recorder
+	saveStatic(t, a.serve(t, http.StatusOK).URL)
+
+	if out, err := runCmd(t, []string{"orders/eu", "pause"}, ""); err != nil {
+		t.Fatalf("action error: %v\n%s", err, out)
+	}
+	if len(a.paths) != 1 || a.paths[0] != "PATCH /workers/orders%2Feu/actions/pause" {
+		t.Fatalf("paths = %v, want escaped name", a.paths)
+	}
+}
+
+// TestActionUnchangedIsNotFailure: varmq's 409 (already so) and 404 (instance
+// lacks the worker) are "no change", not failures, as on the web.
+func TestActionUnchangedIsNotFailure(t *testing.T) {
+	var a, b, c recorder
+	saveStatic(t, a.serve(t, http.StatusOK).URL, b.serve(t, http.StatusConflict).URL, c.serve(t, http.StatusNotFound).URL)
+
+	out, err := runCmd(t, []string{"emails", "pause"}, "")
+	if err != nil {
+		t.Fatalf("action error: %v\n%s", err, out)
+	}
+	if got := strings.Count(out, ": no change"); got != 2 || !strings.Contains(out, "not on this instance") {
+		t.Fatalf("want 2 no-change lines, one not-on-instance:\n%s", out)
+	}
+}
+
+// TestConcurrencyEscapesAndTreatsConflictAsNoChange covers concurrencyCmd.
+func TestConcurrencyEscapesAndTreatsConflictAsNoChange(t *testing.T) {
+	var a recorder
+	saveStatic(t, a.serve(t, http.StatusConflict).URL)
+
+	var out bytes.Buffer
+	concurrencyCmd.SetOut(&out)
+	t.Cleanup(func() { concurrencyCmd.SetOut(nil) })
+	if err := concurrencyCmd.RunE(concurrencyCmd, []string{"a b", "4"}); err != nil {
+		t.Fatalf("concurrency error: %v\n%s", err, out.String())
+	}
+	if len(a.paths) != 1 || !strings.Contains(a.paths[0], "/workers/a%20b/") {
+		t.Fatalf("paths = %v, want escaped name", a.paths)
+	}
+	if !strings.Contains(out.String(), ": no change") {
+		t.Fatalf("want no-change line:\n%s", out.String())
+	}
+}
+
+// TestActionUnknownWorkerFails: 404 on every instance is a missing worker, not
+// "no change".
+func TestActionUnknownWorkerFails(t *testing.T) {
+	var a, b recorder
+	saveStatic(t, a.serve(t, http.StatusNotFound).URL, b.serve(t, http.StatusNotFound).URL)
+
+	out, err := runCmd(t, []string{"emials", "pause"}, "")
+	if err == nil || !strings.Contains(err.Error(), "not found on any") {
+		t.Fatalf("err = %v, want not-found error\n%s", err, out)
 	}
 }

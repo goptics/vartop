@@ -85,6 +85,10 @@ type Page struct {
 	WorkflowList *WorkflowsView
 	Workflow     *WorkflowView
 
+	// DetailPage: the worker page, with or without Detail at first render
+	// (a poll may bring its controls later: detail.js must be there).
+	DetailPage bool
+
 	// OwnPoll: the page's #live polls itself (the workflow page), every
 	// IntervalSec, not the layout's poller; 0: it does not (it ended).
 	OwnPoll bool

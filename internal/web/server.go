@@ -299,7 +299,7 @@ func (h *handler) grid(w http.ResponseWriter, r *http.Request) {
 func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	p, snaps, ok := h.page(r)
-	p.Title = pageTitle(name, p.Server)
+	p.Title, p.DetailPage = pageTitle(name, p.Server), true
 	status := p.status(r)
 	if ok {
 		if podGone(&p, snaps) || podDown(&p, snaps) {

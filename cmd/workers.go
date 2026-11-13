@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 
@@ -11,13 +13,15 @@ import (
 
 	"github.com/goptics/vartop/internal/api"
 	"github.com/goptics/vartop/internal/config"
+	"github.com/goptics/vartop/internal/fleet"
 )
 
 var actionOrigin string
 
 // fanOut runs fn against every instance of the active server (only --origin
-// when set) concurrently and prints one result line per instance. It fails if
-// any instance fails.
+// when set) concurrently and prints one result line per instance. A 409
+// (already so) or 404 (instance lacks the worker) is "no change", as on the
+// web. It fails if any other instance error.
 func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -64,9 +68,16 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	}
 	wg.Wait()
 
-	failed := 0
+	failed, missing := 0, 0
 	for i, c := range clients {
 		origin := config.ShortOrigin(c.PrimaryEndpoint())
+		if isNotFound(errs[i]) {
+			missing++
+		}
+		if fleet.IsUnchanged(errs[i]) {
+			fmt.Fprintf(w, "  %s: no change (%s)\n", origin, unchangedMsg(errs[i]))
+			continue
+		}
 		if errs[i] != nil {
 			failed++
 			fmt.Fprintf(w, "  %s: failed: %v\n", origin, errs[i])
@@ -84,7 +95,27 @@ func fanOut(w io.Writer, desc string, fn func(*api.Client) error) error {
 	if failed > 0 {
 		return fmt.Errorf("%d of %d instance(s) failed", failed, len(clients))
 	}
+	// 404 everywhere: no instance knows the worker (a typo, say), not "no change".
+	if missing == len(clients) {
+		return fmt.Errorf("worker not found on any of %d instance(s)", len(clients))
+	}
 	return nil
+}
+
+func isNotFound(err error) bool {
+	var apiErr *api.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+// unchangedMsg words a varmq 409 or 404 like the web does: varmq's own
+// message, or that the instance lacks the worker.
+func unchangedMsg(err error) string {
+	if isNotFound(err) {
+		return "not on this instance"
+	}
+	var apiErr *api.APIError
+	errors.As(err, &apiErr)
+	return apiErr.Message
 }
 
 var actionCmd = &cobra.Command{
@@ -105,7 +136,7 @@ var actionCmd = &cobra.Command{
 
 		desc := fmt.Sprintf("Sending '%s' action to worker '%s'", action, workerName)
 		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
-			return c.Action(workerName, action)
+			return c.Action(url.PathEscape(workerName), action)
 		})
 	},
 }
@@ -125,7 +156,7 @@ var concurrencyCmd = &cobra.Command{
 
 		desc := fmt.Sprintf("Updating concurrency of worker '%s' to %d", workerName, concurrency)
 		return fanOut(cmd.OutOrStdout(), desc, func(c *api.Client) error {
-			return c.TuneConcurrency(workerName, concurrency)
+			return c.TuneConcurrency(url.PathEscape(workerName), concurrency)
 		})
 	},
 }

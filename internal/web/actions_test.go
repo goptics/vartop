@@ -1736,3 +1736,15 @@ func TestConcurrencyLastNCounts(t *testing.T) {
 	}
 	wantPatches(t, fa, "PATCH /workers/orders/config/concurrency/100")
 }
+
+// A workflow task's cancel is refused, nothing sent: varmq would answer 202
+// on shared storage and run the task anyway.
+func TestJobCancelRefusesTask(t *testing.T) {
+	varmqs, fakes, _ := jobQueue(t)
+	srv, _ := newTestServer(t, fakes...)
+	resp, body := post(t, srv, tenantPath+"/jobs/wf%3Aetl-1%3Aload/actions/cancel", multi("confirm", "1"), true)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "cancel the workflow to stop it") {
+		t.Errorf("task cancel = %d:\n%s", resp.StatusCode, body)
+	}
+	noPatches(t, varmqs...)
+}

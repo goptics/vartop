@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -23,7 +24,7 @@ const (
 var (
 	ErrConfigNotFound = errors.New("config file not found")
 	// ErrKubernetesRemoved is why a config with a kubernetes server fails to load.
-	ErrKubernetesRemoved = errors.New("kubernetes discovery was removed; use endpoints or dns")
+	ErrKubernetesRemoved = errors.New("kubernetes discovery was removed; use endpoints, dns or hub")
 )
 
 // DNSRef discovers varmq instances by resolving a hostname to all of its
@@ -325,15 +326,15 @@ func Save(cfg *Config) error {
 }
 
 // GetActiveServer returns the Server block corresponding to the active context.
-// If serverName is empty, it uses the DefaultServer defined in the Config.
+// If serverName is empty, it uses the DefaultServer defined in the Config,
+// else the first server in sorted order, as vartop web does.
 func (cfg *Config) GetActiveServer(serverName string) (*Server, error) {
-	name := serverName
+	name := cmp.Or(serverName, cfg.DefaultServer)
 	if name == "" {
-		name = cfg.DefaultServer
-	}
-
-	if name == "" {
-		return nil, errors.New("no default server configured")
+		if len(cfg.Servers) == 0 {
+			return nil, errors.New("no servers configured")
+		}
+		name = slices.Sorted(maps.Keys(cfg.Servers))[0]
 	}
 
 	server, exists := cfg.Servers[name]

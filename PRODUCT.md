@@ -16,12 +16,12 @@ Go developers and operators who run services built on VarMQ (typed worker pool +
 
 ## Product Purpose
 
-Live dashboard and control panel for varmq worker fleets. Talks to varmq's REST API (`varmq.Handler`) on every instance of a service and shows the whole fleet in one place: workers, instances, queues and jobs, with history from the last hour to 30 days. Success: the user sees the fleet's real state at a glance and acts on the right worker without leaving the page.
+Live dashboard and control panel for varmq worker fleets. Talks to varmq's REST API (`varmq.Handler`) on every instance of a service, or, in hub mode, through the stream each instance opens to vartop, and shows the whole fleet in one place: workers, instances, queues and jobs, with history from the last hour to 30 days. Success: the user sees the fleet's real state at a glance and acts on the right worker without leaving the page.
 
 ## Positioning
 
 - No agent, no database to run: one binary on the user's machine; collects only while `vartop web` runs.
-- Finds instances from static URLs or DNS, followed live; detects one URL answered by several instances behind a load balancer.
+- Finds instances from static URLs or DNS, followed live, or lets them connect to it (hub mode: no inbound port, no addresses); detects one URL answered by several instances behind a load balancer.
 - Merges every instance, or shows one; queue data grouped by Queue ID, never summed across instances.
 - Names queues as people do: a redisq, sqliteq or in-memory Queue ID is shown as its name, kind and namespace (an in-memory queue by its worker, from varmq API 1.4.0 `queue_ids`); other storage's IDs as sent. The full ID is one hover or copy away.
 

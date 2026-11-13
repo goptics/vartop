@@ -79,6 +79,7 @@ func NewCollector(srv *config.Server, pool *api.Pool, init CollectorInit, sink f
 		pollNow:  make(chan chan struct{}),
 		stopped:  make(chan struct{}),
 	}
+	c.tracker.keep = srv.HistorySpan() // the label's buckets live that long
 	if init.Labels != nil {
 		c.tracker.loadLabels(*init.Labels)
 	}

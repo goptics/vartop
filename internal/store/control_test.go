@@ -30,13 +30,13 @@ func TestLeaseClaimBeatRelease(t *testing.T) {
 	if _, fresh, err := a.Lease(); fresh || err != nil {
 		t.Fatalf("Lease before any claim: fresh %v, %v; want none", fresh, err)
 	}
-	want := Lease{PID: 41, ConfigPath: "/c.json"}
+	want := Lease{PID: 41, ConfigPath: "/c.json", Hub: ":7071"}
 	old, ok, err := a.Claim(want, now)
 	if err != nil || !ok || old == "" {
 		t.Fatalf("first Claim = %q, %v, %v; want a token", old, ok, err)
 	}
 	got, fresh, err := b.Lease()
-	if err != nil || !fresh || got.Token != old || got.PID != 41 || got.ConfigPath != "/c.json" ||
+	if err != nil || !fresh || got.Token != old || got.PID != 41 || got.ConfigPath != "/c.json" || got.Hub != ":7071" ||
 		!got.Started.Equal(now.Truncate(time.Millisecond)) {
 		t.Errorf("Lease = %+v, fresh %v, %v; want %+v claimed at %v", got, fresh, err, want, now)
 	}
