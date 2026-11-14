@@ -26,7 +26,7 @@ and pause, resume, restart, stop or resize it, from your browser or the command 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
-  <img alt="The vartop dashboard: completed/s, failed/min, pending and workers by status for a server of three instances, with a row and a 10-minute trend per worker" src="docs/images/dashboard-light.png">
+  <img alt="The vartop dashboard: completed/s, failed/min, pending and workers by status for a server of three instances behind one load balancer, then one row per worker, failing ones first, each with its failed/min and a 10-minute trend" src="docs/images/dashboard-light.png">
 </picture>
 
 ## What is vartop?
