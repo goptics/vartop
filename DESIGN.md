@@ -153,7 +153,7 @@ Stack constraint shapes the system: one Go binary, `html/template` + vendored ht
 - SVG stroke icons (1.5 stroke, round caps), no glyph icons.
 - Mono only for IDs, payloads, errors.
 
-**Imagery and raster provenance.** No generated imagery; the UI has none. `docs/images/*.png` (README shots, dark + light) are Playwright captures: Chrome, 1280x560 viewport, DPR 2, fullPage; `chart-hover-*` hovers the first chart element at 42% width. Subject: `vartop web` reading a synthetic store; a throwaway Go seeder wrote 8 days of daily-rhythm ticks for server "demo-cluster" (3 instances, 10.0.4.11-13; workers billing-sync, emails, thumbnails, webhooks, reports [paused on instance-2], search-index), then kept appending live ticks. Captured 2026-11-05.
+**Imagery and raster provenance.** No generated imagery; the UI has none. `docs/images/*.png` (README and docs shots, dark + light) are headless Chrome captures over CDP: 1280x560 viewport, DPR 2, full page, `prefers-color-scheme` emulated; `chart-hover-*` hovers the first chart at 42% width and clips to it. Subject: `vartop web` (interval 2s, history 7d) on server "demo-cluster": three `fleettest` fake VarMQ instances (orders-api-6f9c-*) behind a round-robin balancer at http://varmq.localhost:8080/varmq. A throwaway Go test seeded 8 days of one-a-minute polls (work-hours hump, quieter weekend, a 40-minute thumbnails dip two days back), then advanced the fakes' counters live; workers billing-sync, emails, reports (paused on instance-2), search-index, thumbnails, webhooks; queues and jobs from `fleettest.SampleJobs`, workflows from `fleettest.SampleWorkflows`. Job and workflow shots taken in the first minute, the rest after 10 minutes of live polls. Captured 2026-11-14.
 
 ## Colors
 
