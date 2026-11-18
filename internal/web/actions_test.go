@@ -1165,7 +1165,7 @@ func TestActionResponsesUseNoun(t *testing.T) {
 		one, other string
 		live       map[string]string // page the action came from → copy its #live carries
 	}{
-		{"static", config.Server{}, "instance", "pod", map[string]string{"/workers/emails": "Instances reporting:", "/": "Pending (max/instance)"}},
+		{"static", config.Server{}, "instance", "pod", map[string]string{"/workers/emails": `<span class="inst-n">3 instances</span>`, "/": "Pending (max/instance)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := serveUnits(t, tc.server, threeFakes(t)...)

@@ -36,7 +36,19 @@
   <figcaption>Failed /s <span class="peak">peak {{tickLabel $peak}}/s</span>{{template "range_switch" (rangeSwitch $ "failed")}}</figcaption>
   {{template "history" $c}}
 </figure>
-<p class="pods">{{$.Noun.CapMany}} reporting: {{if $.Stale}}—{{else}}{{range $i, $p := .Pods}}{{if $i}}, {{end}}<span title="{{$p.Tip}}">{{$p.Label}}</span> <small>({{$p.Tip}})</small>{{end}}{{end}}</p>
+{{if $.Stale}}<p class="pods">{{$.Noun.CapMany}}: —</p>{{else}}{{with .Units}}{{$n := len .}}<details class="inst" id="inst">
+  <summary><span class="inst-n">{{$n}} {{if eq $n 1}}{{$.Noun.One}}{{else}}{{$.Noun.Many}}{{end}}</span><ul class="chips">{{range statusChips $.Detail.UnitCounts}}<li class="status {{.Class}}">{{.N}} {{.Word}}</li>{{end}}</ul><span class="inst-more" aria-hidden="true"></span></summary>
+  <div class="inst-scroll"><table>
+    {{if gt $n 1}}<caption>Not reached, absent, stopped and paused first, then the rest; most pending first</caption>{{end}}
+    <thead><tr><th scope="col">{{$.Noun.Cap}}</th><th scope="col">Status</th><th scope="col" class="num">Busy</th><th scope="col" class="num">Idle</th><th scope="col" class="num">Pending</th><th scope="col">Address</th></tr></thead>
+    <tbody>{{range .}}<tr>
+      <th scope="row" class="name"><a href="{{workerURL $.Detail.Name $.Server $.Noun.Param .Label}}" title="{{.Tip}}">{{.Label}}</a></th>
+      <td><span class="status {{.Class}}">{{word .Status}}</span></td>
+      {{if .Reporting}}<td class="num">{{.Busy}}</td><td class="num">{{.Idle}}</td><td class="num">{{.Pending}}</td>{{else}}<td class="num">—</td><td class="num">—</td><td class="num">—</td>{{end}}
+      <td class="addr">{{.Tip}}</td>
+    </tr>{{end}}</tbody>
+  </table></div>
+</details>{{end}}{{end}}
 {{end}}{{end}}
 
 {{define "live"}}<div id="live">{{template "live_body" .}}</div>{{end}}
