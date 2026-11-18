@@ -73,4 +73,58 @@
     const at = document.activeElement;
     if (e.key === "Escape" && at && at.closest) keep(at.closest(".confirm"));
   });
+
+  // Mixed status: hover or focus on a .pop shows its hidden .split in one
+  // #statpop. It lives outside #live, so a poll's swap leaves it open and
+  // scrolled; the swap only refreshes its text and place.
+  const pop = document.createElement("div");
+  pop.id = "statpop";
+  pop.className = "statpop";
+  pop.setAttribute("role", "tooltip");
+  pop.hidden = true;
+  document.body.append(pop);
+  let owner = "", timer = 0;
+  const split = (t) => document.getElementById(t.getAttribute("aria-describedby"));
+  const place = (t) => {
+    const r = t.getBoundingClientRect();
+    const below = innerHeight - r.bottom, up = below < 160 && r.top > below;
+    pop.style.setProperty("--room", `${(up ? r.top : below) - 8}px`);
+    pop.style.top = up ? "" : `${r.bottom}px`;
+    pop.style.bottom = up ? `${innerHeight - r.top}px` : "";
+    pop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8))}px`;
+  };
+  const open = (t) => {
+    clearTimeout(timer);
+    const s = split(t);
+    if (!s) return;
+    if (owner !== t.id) { owner = t.id; pop.textContent = s.textContent; pop.scrollTop = 0; }
+    pop.hidden = false;
+    place(t);
+  };
+  const close = () => { owner = ""; pop.hidden = true; };
+  const later = () => { clearTimeout(timer); timer = setTimeout(close, 150); };
+  const popOf = (e) => e.target.closest && e.target.closest(".pop");
+  document.addEventListener("mouseover", (e) => {
+    const t = popOf(e);
+    if (t) open(t);
+    else if (e.target === pop || pop.contains(e.target)) clearTimeout(timer);
+  });
+  document.addEventListener("mouseout", (e) => { if (owner && (popOf(e) || e.target === pop)) later(); });
+  document.addEventListener("focusin", (e) => { const t = popOf(e); if (t) open(t); });
+  // a press on the list (its scrollbar) takes focus too: keep it open
+  document.addEventListener("focusout", (e) => { const t = popOf(e); if (t && !t.matches(":hover") && !pop.matches(":hover")) later(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && owner) close(); });
+  document.addEventListener("scroll", (e) => {
+    const t = owner && e.target !== pop && document.getElementById(owner);
+    if (t) place(t);
+  }, true);
+  document.addEventListener("htmx:afterSettle", () => {
+    if (!owner) return;
+    const t = document.getElementById(owner), s = t && split(t);
+    if (!s) return close();
+    const top = pop.scrollTop;
+    pop.textContent = s.textContent;
+    pop.scrollTop = top;
+    place(t);
+  });
 })();

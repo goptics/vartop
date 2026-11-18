@@ -259,7 +259,11 @@ th.name a:hover { color: var(--accent); text-decoration: underline; }
 .cell::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 2px; background: linear-gradient(90deg, var(--subtle) calc(var(--busy) / max(var(--conc), 1) * 100%), var(--line) 0); }
 .cell .pend { justify-self: end; color: var(--subtle); font-size: var(--fs-1); }
 .grid .down, .grid th.down { color: var(--subtle); background: color-mix(in srgb, var(--bad) 6%, var(--panel)); }
-.split { display: block; color: var(--subtle); font-size: var(--fs-1); white-space: pre; }
+/* mixed status: hover or focus shows the per-instance breakdown in one
+   #statpop (app.js), outside #live so a poll neither closes nor scrolls it */
+.pop { cursor: help; border-radius: var(--r-1); }
+.pop .status { text-decoration: underline dotted var(--subtle); text-underline-offset: 3px; }
+.statpop { position: fixed; z-index: 10; max-height: min(16em, var(--room, 16em)); overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-1); color: var(--fg); font-size: var(--fs-1); white-space: pre; }
 .units { display: flex; flex-direction: column; gap: 4px; margin: 0 0 16px; padding: 0; list-style: none; color: var(--subtle); font-size: var(--fs-2); overflow-wrap: anywhere; }
 .units b { display: inline-block; min-width: 7em; margin-right: 8px; }
 .units b { color: var(--fg); }
