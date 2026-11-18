@@ -5,7 +5,7 @@
 {{define "live_body"}}{{with .Detail}}
 <div class="detail-head">
   <h1>{{.Name}}</h1>
-  {{if not $.Stale}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{word .Status}}</span>{{if eq .Class "mixed"}}<small class="split">{{.StatusTip}}</small>{{end}}{{end}}
+  {{if not $.Stale}}{{if eq .Class "mixed"}}<span class="pop" id="st-detail" tabindex="0" aria-describedby="split-detail"><span class="status mixed">{{word .Status}}</span></span><small class="split" id="split-detail" hidden>{{.StatusTip}}</small>{{else}}<span class="status {{.Class}}"{{with .StatusTip}} title="{{.}}"{{end}}>{{word .Status}}</span>{{end}}{{end}}
 </div>
 <section class="counters" aria-label="Counters">{{if $.Stale}}
   <div class="card"><h2>Completed</h2><p class="big">—</p></div>
