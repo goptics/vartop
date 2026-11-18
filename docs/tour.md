@@ -7,21 +7,23 @@
   <img alt="The vartop dashboard: completed/s, failed/min, pending and workers by status for a server of three instances behind one load balancer, then one row per worker, failing ones first, each with its failed/min and a 10-minute trend" src="images/dashboard-light.png">
 </picture>
 
-One row per worker, merged across every instance (or one instance, from the **Instance** picker), with its status, concurrency, busy and idle workers, pending jobs, failed jobs per minute and a 10-minute trend. **Order** puts trouble first: failing workers, then paused or stopped ones that have pending jobs, then the rest. It can also sort by name, pending or failed. Tick several workers to pause or resume them together. The sidebar says how many instances answered, and here, that three of them answered behind one load-balancer URL.
+One row per worker, merged across every instance (or one instance, from the **Instance** picker), with its status, concurrency, busy and idle workers, pending jobs, failed jobs per minute and a 10-minute trend. **Order** puts trouble first: failing workers, then paused or stopped ones that have pending jobs, then the rest. It can also sort by name, pending or failed. When instances disagree, the status says **mixed**: hover, focus or tap it for each instance's status, in a list that scrolls. Tick several workers to pause or resume them together. The sidebar says how many instances answered, and here, that three of them answered behind one load-balancer URL.
 
 ## Worker page
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/worker-dark.png">
-  <img alt="A worker page: completed, successful, failed and success rate; its two sources and the priority strategy; a 7-day completed/s chart with a daily rhythm, quieter weekend days and one short dip; a 24-hour failed/s chart; the concurrency slider and the Pause and Stop buttons" src="images/worker-light.png">
+  <img alt="A worker page: completed, successful, failed and success rate; its two sources and the priority strategy; a 7-day completed/s chart with a daily rhythm, quieter weekend days and one short dip; a 24-hour failed/s chart; its three instances, all running; the concurrency slider and the Pause and Stop buttons" src="images/worker-light.png">
 </picture>
 
 Click a worker for its totals and success rate, its sources, its two charts, and its controls. **Sources** draws the queues and topics that the worker pulls from, in its order, with each one's priority and pending jobs, and says how its strategy picks among them. Each chart has its own span: **1h** from the stored polls, **24h** from 5-minute buckets, and **7d**, **30d** (or the server's own [`history`](configuration.md#schema), like `14d`) merged into longer steps. Hovering a chart shows how many instances answered and, on 1h, the poll's time and value; on longer spans, the exact window, its average and its peak:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/chart-hover-dark.png">
-  <img alt="Hovering the 7-day chart: Tue 10 Nov 11:00–11:15 · avg 126.9/s · peak 134.2/s · 3/3 instances" src="images/chart-hover-light.png">
+  <img alt="Hovering the 7-day chart: Sat 14 Nov 12:15–12:30 · avg 88.8/s · peak 92.8/s · 3/3 instances" src="images/chart-hover-light.png">
 </picture>
+
+Under the charts, the instances that run the worker: how many, with a count per status. **show all** opens one row per instance, trouble first (not reached, absent, stopped, paused), with its status, busy, idle and pending jobs; each name opens that instance's view.
 
 The concurrency slider sets the pool size per instance, applied when you let go; **Pause**, **Resume**, **Restart** and **Stop** act on every instance shown.
 
