@@ -49,6 +49,21 @@
     const d = e.detail, next = d.fragment && d.fragment.firstElementChild;
     if (d.target.id === "ctl" && next && next.dataset.key === d.target.dataset.key) d.shouldSwap = false;
   });
+  // #inst (worker page instances) comes back from a poll closed and at the
+  // top: keep it as the user left it, open and scrolled. One response swaps
+  // #banner, #status and #live, each with its own afterSwap, #live last:
+  // restore after each, idempotent.
+  let kept = null;
+  document.addEventListener("htmx:beforeSwap", () => {
+    const d = document.getElementById("inst");
+    kept = d && { open: d.open, top: d.querySelector(".inst-scroll").scrollTop };
+  });
+  document.addEventListener("htmx:afterSwap", () => {
+    const d = document.getElementById("inst");
+    if (!d || !kept) return;
+    d.open = kept.open;
+    d.querySelector(".inst-scroll").scrollTop = kept.top;
+  });
   document.addEventListener("htmx:sendError", (e) => {
     if (polls(e.detail.elt)) pollFailed("Cannot reach vartop web. The values shown may be old.");
   });

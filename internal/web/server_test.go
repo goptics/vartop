@@ -177,7 +177,7 @@ func TestPagesRender(t *testing.T) {
 	}{
 		{"/", []string{"orders", "emails", `hx-get="/?server=multi"`, "<title>vartop · multi</title>"}},
 		{"/grid", []string{"orders", "emails", `hx-get="/grid?server=multi"`, "<title>Instance grid · multi</title>"}},
-		{"/workers/orders", []string{"orders", "Instances reporting:", `hx-get="/workers/orders?server=multi"`, "<title>orders · multi</title>"}},
+		{"/workers/orders", []string{"orders", `<details class="inst" id="inst">`, `hx-get="/workers/orders?server=multi"`, "<title>orders · multi</title>"}},
 	} {
 		status, body := fetch(t, srv, c.path, false)
 		if status != http.StatusOK {
@@ -245,7 +245,7 @@ func TestPagesSayInstanceOnStaticServers(t *testing.T) {
 		},
 		"/grid": {">Instance grid<", "<title>Instance grid · multi</title>", "3/3 instances"},
 		"/workers/orders": {
-			"All instances (merged)", "Instances reporting:", "3/3 instances",
+			"All instances (merged)", `<span class="inst-n">3 instances</span>`, "3/3 instances",
 			"per instance, on all instances", `aria-label="Concurrency per instance"`, `aria-label="Concurrency per instance, exact"`,
 		},
 	})
@@ -356,7 +356,7 @@ func TestVanishedPodShowsBanner(t *testing.T) {
 			if gone := `<option value="` + label + `" selected disabled>` + label + `</option>`; strings.Count(picker, " selected") != 1 || !strings.Contains(picker, gone) {
 				t.Errorf("GET %s (hx %v): picker %q, want only %q selected", path, hx, picker, gone)
 			}
-			for _, data := range []string{">orders<", `<tr id="w-`, "Instances reporting", `id="bulk"`, `class="controls"`, "No workers"} {
+			for _, data := range []string{">orders<", `<tr id="w-`, `id="inst"`, `id="bulk"`, `class="controls"`, "No workers"} {
 				if strings.Contains(body, data) {
 					t.Errorf("GET %s (hx %v) shows %q", path, hx, data)
 				}
@@ -568,7 +568,7 @@ func TestInstanceParamResolves(t *testing.T) {
 	for _, want := range []string{
 		`<input type="hidden" name="instance" value="instance-2">`,
 		`href="/?instance=instance-2&amp;server=multi"`,
-		"Instances reporting: <span",
+		`<span class="inst-n">1 instance</span>`,
 		"on instance-2</span>",
 	} {
 		if !strings.Contains(body, want) {
@@ -696,7 +696,7 @@ func TestRemovedServerPage(t *testing.T) {
 			if status != want || !strings.Contains(body, copy) {
 				t.Errorf("GET %s (hx %v) = %d, want %d with %q:\n%s", path, hx, status, want, copy, body)
 			}
-			for _, data := range []string{">orders<", `<tr id="w-`, `id="bulk"`, "Instances reporting"} {
+			for _, data := range []string{">orders<", `<tr id="w-`, `id="bulk"`, `id="inst"`} {
 				if strings.Contains(body, data) {
 					t.Errorf("GET %s (hx %v) shows %q", path, hx, data)
 				}

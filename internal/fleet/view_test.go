@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"reflect"
 	"regexp"
@@ -748,8 +749,14 @@ func TestBuildDetail(t *testing.T) {
 	if d.SuccessRate != "77.8%" {
 		t.Errorf("SuccessRate = %q, want 77.8%% (7/9)", d.SuccessRate)
 	}
-	if len(d.Pods) != 2 || d.Pods[0].Key != "p0" || d.Pods[1].Key != "p1" {
-		t.Errorf("Pods = %+v, want only the pods reporting orders", d.Pods)
+	if got := unitLabels(d.Units); !slices.Equal(got, []string{"p2", "p0", "p1"}) {
+		t.Errorf("Units = %q, want absent p2 first, then p0, p1", got)
+	}
+	if u := d.Units[0]; u.Status != "absent" || u.Class != "unknown" || u.Reporting {
+		t.Errorf("absent unit = %+v", u)
+	}
+	if u := d.Units[1]; u.Status != "Running" || u.Busy != 0 || u.Idle != 8 || !u.Reporting || u.Tip != "p0" {
+		t.Errorf("p0 unit = %+v", u)
 	}
 	// queue_ids: merged over the pods, sorted, each once; one pod's alone
 	s.Pods[0].Workers["orders"].QueueIDs = []string{"z", "a"}
@@ -786,7 +793,7 @@ func TestBuildDetail(t *testing.T) {
 
 	// Pod filter narrows counters, status and the pod list.
 	d, ok = BuildDetail([]*Snapshot{s}, "p1", "orders", iv, podNoun)
-	if !ok || d.Status != "Idle" || len(d.Pods) != 1 || d.Pods[0].Key != "p1" {
+	if !ok || d.Status != "Idle" || len(d.Units) != 1 || d.Units[0].Label != "p1" {
 		t.Errorf("p1 detail = %+v ok=%v", d, ok)
 	}
 
@@ -804,6 +811,46 @@ func TestBuildDetail(t *testing.T) {
 	}
 	if _, ok = BuildDetail(nil, "", "orders", iv, podNoun); ok {
 		t.Error("worker reported present with no history")
+	}
+}
+
+func unitLabels(u []UnitRow) []string {
+	var l []string
+	for _, r := range u {
+		l = append(l, r.Label)
+	}
+	return l
+}
+
+// Units: trouble first (not reached/absent, stopped, paused, then active),
+// most pending first inside a class, poll order on ties; errored pods left out.
+func TestBuildDetailUnitsTroubleFirst(t *testing.T) {
+	down := okPod("down", nil)
+	down.Err = "connection refused"
+	far := okPod("far", map[string]*Sample{})
+	far.Unreached = []string{"orders"}
+	s := snap(atTick(0),
+		okPod("a", map[string]*Sample{"orders": smp("Running", 4, 1, 3, 9)}),
+		okPod("b", map[string]*Sample{"orders": smp("Paused", 4, 0, 4, 2)}),
+		okPod("c", map[string]*Sample{"orders": smp("Paused", 4, 0, 4, 7)}),
+		down,
+		okPod("d", map[string]*Sample{"orders": smp("Idle", 4, 0, 4, 0)}),
+		okPod("e", map[string]*Sample{"orders": smp("Stopped", 4, 0, 0, 0)}),
+		far,
+	)
+	d, ok := BuildDetail([]*Snapshot{s}, "", "orders", 5*time.Second, podNoun)
+	if !ok {
+		t.Fatal("orders reported absent")
+	}
+	if got := unitLabels(d.Units); !slices.Equal(got, []string{"far", "e", "c", "b", "a", "d"}) {
+		t.Errorf("Units = %q", got)
+	}
+	if d.Units[0].Status != "not reached" {
+		t.Errorf("far = %+v, want not reached", d.Units[0])
+	}
+	want := map[string]int{"Running": 1, "Paused": 2, "Idle": 1, "Stopped": 1, "not reached": 1}
+	if !maps.Equal(d.UnitCounts, want) {
+		t.Errorf("UnitCounts = %v, want %v", d.UnitCounts, want)
 	}
 }
 

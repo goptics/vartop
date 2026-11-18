@@ -669,7 +669,7 @@ func TestTipsAreTitles(t *testing.T) {
 			Pods: []fleet.PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}},
 			Rows: []fleet.GridRow{{Name: "w", Cells: []fleet.GridCell{{}}}},
 		}}),
-		"detail pods": run(t, "detail", "layout", Page{Server: "dev", Detail: &fleet.DetailView{Name: "w", Pods: []fleet.PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}}),
+		"detail pods": run(t, "detail", "layout", Page{Server: "dev", Detail: &fleet.DetailView{Name: "w", Units: []fleet.UnitRow{{Label: "instance-1", Tip: tip}}}}),
 		"confirm":     run(t, "confirm", "confirm", ConfirmView{Action: "pause", Pods: []fleet.PodColumn{{Key: "#a", Label: "instance-1", Tip: tip}}}),
 		"result":      run(t, "results", "results", ResultsView{Results: []fleet.ActionResult{{Pod: "instance-1", Key: "#a", Tip: tip, Outcome: "ok"}}, Noun: podNoun}),
 	} {
@@ -687,7 +687,8 @@ func detailPage() Page {
 		Completed: 8, Successful: 7, Failed: 1, SuccessRate: "87.5%",
 		ConcurrencyStart: 4, ConcurrencyMax: 64,
 		Completed1h: []fleet.Point{ptAt(atTick(0), 1), ptAt(atTick(1), 2)}, Failed1h: []fleet.Point{ptAt(atTick(0), 0), ptAt(atTick(1), 0)},
-		Pods: []fleet.PodColumn{{Key: "http://a:3000", Label: "a"}}, QueueIDs: []string{"redisq:fifo:{orders}"},
+		Units:      []fleet.UnitRow{{Label: "a", Tip: "http://a:3000", Status: "Running", Class: "active", Busy: 1, Idle: 3, Pending: 2, Reporting: true}},
+		UnitCounts: map[string]int{"Running": 1}, QueueIDs: []string{"redisq:fifo:{orders}"},
 	}
 	return p
 }
@@ -840,7 +841,8 @@ func TestCopyFollowsNoun(t *testing.T) {
 			p = detailPage()
 			p.Noun = n
 			check(t, "detail", run(t, "detail", "layout", p),
-				`<p class="pods">`+n.CapMany()+" reporting: ",
+				`<span class="inst-n">1 `+one+`</span>`,
+				`<th scope="col">`+n.Cap()+`</th>`,
 				"per "+one+", on all "+many+"<",
 				`aria-label="Concurrency per `+one+`"`,
 				`aria-label="Concurrency per `+one+`, exact"`,
@@ -1037,7 +1039,7 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 		body := run(t, set, "layout", p)
 		// Current state beyond the values: the balancers' note, a unit's
 		// error and down mark, the units reporting the worker.
-		for _, current := range []string{"3 instances behind lb:8080", `class="down"`, "connection refused", ">a</span>"} {
+		for _, current := range []string{"3 instances behind lb:8080", `class="down"`, "connection refused", ">a</span>", `id="inst"`} {
 			if strings.Contains(fresh, current) && strings.Contains(body, current) {
 				t.Errorf("%s: a stale page shows the current %q", set, current)
 			}
@@ -1045,8 +1047,8 @@ func TestStaleHidesCurrentValues(t *testing.T) {
 		if set == "detail" && (!strings.Contains(fresh, `class="sources"`) || strings.Contains(body, `class="sources"`)) {
 			t.Error("detail: the Queues line not shown fresh, or shown stale")
 		}
-		if set == "detail" && !strings.Contains(body, `<p class="pods">Pods reporting: —</p>`) {
-			t.Errorf("detail: a stale page lacks %q:\n%s", "Pods reporting: —", body)
+		if set == "detail" && !strings.Contains(body, `<p class="pods">Pods: —</p>`) {
+			t.Errorf("detail: a stale page lacks %q:\n%s", "Pods: —", body)
 		}
 		_, banner, _ := strings.Cut(body, `<div id="banner" role="status">`)
 		banner, _, _ = strings.Cut(banner, "</div>")

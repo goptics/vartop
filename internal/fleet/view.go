@@ -183,16 +183,37 @@ type GridView struct {
 type DetailView struct {
 	Name, Status, Class, StatusTip   string
 	Completed, Successful, Failed    uint64
-	SuccessRate                      string      // "99.5%" or "—"
-	ConcurrencyStart, ConcurrencyMax int         // start = max current per-pod; max = max(64, 2*start)
-	Completed1h, Failed1h            []Point     // per second
-	Pods                             []PodColumn // pods reporting this worker
-	QueueIDs                         []string    // its queue_ids on those pods, sorted, each once
+	SuccessRate                      string  // "99.5%" or "—"
+	ConcurrencyStart, ConcurrencyMax int     // start = max current per-pod; max = max(64, 2*start)
+	Completed1h, Failed1h            []Point // per second
+	// Units: every healthy pod's view of it, reporting, absent or not
+	// reached, trouble first (see sortUnits). UnitCounts: status → pods.
+	Units      []UnitRow
+	UnitCounts map[string]int
+	QueueIDs   []string // its queue_ids on those pods, sorted, each once
 	// Strategy and Sources: how it picks and what it pulls from (varmq
 	// API 1.5.0), merged over its pods (see mergeSources). Sources nil:
 	// no pod sent them (older varmq); QueueIDs is all there is.
 	Strategy string
 	Sources  []api.WorkerSource
+}
+
+// UnitRow is one pod's view of a worker, on the worker page.
+type UnitRow struct {
+	Label, Tip, Status, Class string // Status: varmq's, "absent" or "not reached"
+	Busy, Idle, Pending       int
+	Reporting                 bool // false: absent or not reached, no numbers
+}
+
+// troubleOrder ranks status classes for sortUnits: uncertain first, healthy last.
+var troubleOrder = []string{"unknown", "stopped", "paused", "transitional", "active"}
+
+// sortUnits puts trouble first (troubleOrder), then most pending; poll order
+// breaks ties, so a poll does not shuffle equal rows.
+func sortUnits(u []UnitRow) {
+	slices.SortStableFunc(u, func(a, b UnitRow) int {
+		return cmp.Or(cmp.Compare(slices.Index(troubleOrder, a.Class), slices.Index(troubleOrder, b.Class)), cmp.Compare(b.Pending, a.Pending))
+	})
 }
 
 // mergeSources merges pods' sources: the first pod's in its priority order,
@@ -400,15 +421,29 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 		Failed1h:         WorkerRates(hour, pod, worker, failedRate, n),
 	}
 	d.ConcurrencyMax = max(concurrencyFloor, 2*d.ConcurrencyStart)
+	d.UnitCounts = make(map[string]int)
 	for _, p := range pods {
-		sm := p.Workers[worker]
-		if p.Err != "" || sm == nil {
+		if p.Err != "" {
 			continue
 		}
+		sm := p.Workers[worker]
+		if sm == nil {
+			st := "absent"
+			if p.IsUnreached(worker) {
+				st = "not reached"
+			}
+			d.Units = append(d.Units, UnitRow{Label: p.Label, Tip: p.Tip(), Status: st, Class: StatusClass(st)})
+			d.UnitCounts[st]++
+			continue
+		}
+		d.Units = append(d.Units, UnitRow{
+			Label: p.Label, Tip: p.Tip(), Status: sm.Status, Class: StatusClass(sm.Status),
+			Busy: sm.NumProcessing, Idle: sm.NumIdleWorkers, Pending: sm.NumPending, Reporting: true,
+		})
+		d.UnitCounts[sm.Status]++
 		d.Completed += sm.Metrics.Completed
 		d.Successful += sm.Metrics.Successful
 		d.Failed += sm.Metrics.Failed
-		d.Pods = append(d.Pods, PodColumn{Key: p.Key, Label: p.Label, Err: p.Err, Tip: p.Tip()})
 		d.QueueIDs = append(d.QueueIDs, sm.QueueIDs...)
 		mergeSources(&d, sm)
 	}
@@ -421,6 +456,7 @@ func BuildDetail(snaps []*Snapshot, pod, worker string, _ time.Duration, n Noun)
 	}
 	slices.Sort(d.QueueIDs)
 	d.QueueIDs = slices.Compact(d.QueueIDs)
+	sortUnits(d.Units)
 	d.SuccessRate = "—"
 	if total := d.Successful + d.Failed; total > 0 {
 		d.SuccessRate = fmt.Sprintf("%.1f%%", float64(d.Successful)/float64(total)*100)
